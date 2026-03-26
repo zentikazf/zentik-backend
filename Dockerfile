@@ -32,10 +32,9 @@ COPY --from=builder --chown=nestjs:nodejs /app/dist ./dist
 COPY --from=builder --chown=nestjs:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=nestjs:nodejs /app/prisma ./prisma
 COPY --from=builder --chown=nestjs:nodejs /app/package.json ./package.json
-COPY --from=builder --chown=nestjs:nodejs /app/tsconfig.json ./tsconfig.json
 
 USER nestjs
 
 EXPOSE 3001
 
-CMD ["node", "-r", "tsconfig-paths/register", "dist/main"]
+CMD ["node", "dist/main"]
