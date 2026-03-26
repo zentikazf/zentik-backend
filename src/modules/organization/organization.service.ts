@@ -70,7 +70,7 @@ export class OrganizationService {
 
       const suggestions: Record<string, string[]> = {
         'Owner': ['*:*'],
-        'Product Owner': ['manage:projects', 'manage:tasks', 'manage:sprints', 'manage:boards', 'read:members', 'read:billing', 'manage:chat'],
+        'Product Owner': ['manage:projects', 'manage:tasks', 'manage:sprints', 'manage:boards', 'manage:members', 'read:members', 'read:billing', 'manage:chat'],
         'Project Manager': ['manage:projects', 'manage:tasks', 'manage:sprints', 'manage:boards', 'manage:members', 'manage:time-entries', 'read:billing', 'manage:chat', 'read:audit'],
         'Tech Lead': ['read:projects', 'manage:tasks', 'manage:sprints', 'manage:boards', 'manage:time-entries', 'read:members', 'manage:chat'],
         'Developer': ['read:projects', 'manage:tasks', 'read:sprints', 'read:boards', 'manage:time-entries', 'manage:chat'],
@@ -344,7 +344,7 @@ export class OrganizationService {
 
     const suggestions: Record<string, string[]> = {
       'Owner': ['*:*'],
-      'Product Owner': ['manage:projects', 'manage:tasks', 'manage:sprints', 'manage:boards', 'read:members', 'read:billing', 'manage:chat'],
+      'Product Owner': ['manage:projects', 'manage:tasks', 'manage:sprints', 'manage:boards', 'manage:members', 'read:members', 'read:billing', 'manage:chat'],
       'Project Manager': ['manage:projects', 'manage:tasks', 'manage:sprints', 'manage:boards', 'manage:members', 'manage:time-entries', 'read:billing', 'manage:chat', 'read:audit'],
       'Tech Lead': ['read:projects', 'manage:tasks', 'manage:sprints', 'manage:boards', 'manage:time-entries', 'read:members', 'manage:chat'],
       'Developer': ['read:projects', 'manage:tasks', 'read:sprints', 'read:boards', 'manage:time-entries', 'manage:chat'],
