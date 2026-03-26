@@ -9,6 +9,7 @@ RUN pnpm install --frozen-lockfile
 
 # Build
 FROM base AS builder
+RUN apk add --no-cache openssl
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
@@ -22,6 +23,9 @@ RUN pnpm build
 # Production
 FROM node:20-alpine AS runner
 WORKDIR /app
+
+# Install OpenSSL for Prisma compatibility
+RUN apk add --no-cache openssl
 
 ENV NODE_ENV=production
 
