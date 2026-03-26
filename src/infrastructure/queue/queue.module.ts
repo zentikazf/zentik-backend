@@ -5,9 +5,17 @@ import { AppConfigService } from '../../config/app.config';
 @Module({
   imports: [
     BullModule.forRootAsync({
-      useFactory: (config: AppConfigService) => ({
-        redis: config.redisUrl,
-      }),
+      useFactory: (config: AppConfigService) => {
+        const url = new URL(config.redisUrl);
+        return {
+          redis: {
+            host: url.hostname,
+            port: parseInt(url.port, 10),
+            password: url.password || undefined,
+            username: url.username || undefined,
+          },
+        };
+      },
       inject: [AppConfigService],
     }),
     BullModule.registerQueue(
