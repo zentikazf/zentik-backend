@@ -13,11 +13,15 @@ import { AppConfigService } from './config/app.config';
 async function bootstrap() {
   const env = validateEnv();
 
+  const logLevelMap: Record<string, LogLevel[]> = {
+    error: ['error'],
+    warn: ['error', 'warn'],
+    info: ['error', 'warn', 'log'],
+    debug: ['error', 'warn', 'log', 'debug'],
+  };
+
   const app = await NestFactory.create(AppModule, {
-    logger: (['error', 'warn', 'log', 'debug'] as LogLevel[]).slice(
-      0,
-      ['error', 'warn', 'log', 'debug'].indexOf(env.LOG_LEVEL) + 1,
-    ),
+    logger: logLevelMap[env.LOG_LEVEL] || ['error', 'warn', 'log'],
   });
 
   const configService = app.get(AppConfigService);
@@ -96,4 +100,7 @@ async function bootstrap() {
   }
 }
 
-bootstrap();
+bootstrap().catch((err) => {
+  console.error('Failed to start application:', err);
+  process.exit(1);
+});
