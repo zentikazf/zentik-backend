@@ -434,6 +434,7 @@ export class OrganizationService {
             email,
             name: dto.name,
             emailVerified: true,
+            onboardingCompleted: true,
             mustChangePassword: true,
           },
         });
