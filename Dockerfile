@@ -40,4 +40,4 @@ USER nestjs
 
 EXPOSE 3001
 
-CMD ["sh", "-c", "npx prisma migrate deploy && node dist/main"]
+CMD ["sh", "-c", "echo '[START] Running migrations...' && ./node_modules/.bin/prisma migrate deploy && echo '[START] Starting server...' && node dist/main"]
