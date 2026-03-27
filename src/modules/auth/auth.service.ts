@@ -330,6 +330,7 @@ export class AuthService {
         image: true,
         emailVerified: true,
         onboardingCompleted: true,
+        mustChangePassword: true,
         createdAt: true,
         organizationMembers: {
           select: {
@@ -368,6 +369,7 @@ export class AuthService {
         image: user.image,
         emailVerified: user.emailVerified,
         onboardingCompleted: user.onboardingCompleted,
+        mustChangePassword: user.mustChangePassword,
         createdAt: user.createdAt,
       },
       organizations: user.organizationMembers.map((m) => {
@@ -389,6 +391,28 @@ export class AuthService {
         };
       }),
     };
+  }
+
+  async changePassword(userId: string, newPassword: string) {
+    if (!newPassword || newPassword.length < 6) {
+      throw new AppException('La contraseña debe tener al menos 6 caracteres', 'INVALID_PASSWORD', 400);
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, SALT_ROUNDS);
+
+    await this.prisma.$transaction([
+      this.prisma.account.updateMany({
+        where: { userId, providerId: 'credential' },
+        data: { password: hashedPassword },
+      }),
+      this.prisma.user.update({
+        where: { id: userId },
+        data: { mustChangePassword: false },
+      }),
+    ]);
+
+    this.logger.log(`Password changed for user: ${userId}`);
+    return { message: 'Contraseña actualizada exitosamente' };
   }
 
   async completeOnboarding(userId: string) {

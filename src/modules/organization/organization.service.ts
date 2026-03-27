@@ -1,10 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import * as bcrypt from 'bcryptjs';
+import { randomBytes } from 'crypto';
 import { PrismaService } from '../../database/prisma.service';
-import { CreateOrganizationDto, UpdateOrganizationDto } from './dto';
+import { CreateOrganizationDto, UpdateOrganizationDto, CreateMemberDto } from './dto';
 import {
   OrganizationNotFoundException,
   DuplicateResourceException,
+  AppException,
 } from '../../common/filters/app-exception';
 import { domainEvent } from '../../common/events/domain-event.helper';
 
@@ -393,6 +396,87 @@ export class OrganizationService {
     return {
       created: createdNames,
       existing: [...existingNames],
+    };
+  }
+
+  async createMember(orgId: string, dto: CreateMemberDto, createdById: string) {
+    await this.findById(orgId);
+
+    // Validate role belongs to org
+    const role = await this.prisma.role.findFirst({
+      where: { id: dto.roleId, organizationId: orgId },
+    });
+    if (!role) {
+      throw new AppException('El rol especificado no existe en esta organización', 'ROLE_NOT_FOUND', 404);
+    }
+
+    const email = dto.email.toLowerCase();
+
+    // Check if user already exists
+    let user = await this.prisma.user.findUnique({ where: { email } });
+
+    const tempPassword = dto.password || randomBytes(6).toString('base64url');
+
+    if (user) {
+      // Check if already a member
+      const existingMember = await this.prisma.organizationMember.findUnique({
+        where: { organizationId_userId: { organizationId: orgId, userId: user.id } },
+      });
+      if (existingMember) {
+        throw new AppException('Este usuario ya es miembro de la organización', 'ALREADY_MEMBER', 409);
+      }
+    } else {
+      // Create the user
+      const hashedPassword = await bcrypt.hash(tempPassword, 12);
+      user = await this.prisma.$transaction(async (tx) => {
+        const newUser = await tx.user.create({
+          data: {
+            email,
+            name: dto.name,
+            emailVerified: true,
+            mustChangePassword: true,
+          },
+        });
+        await tx.account.create({
+          data: {
+            userId: newUser.id,
+            accountId: newUser.id,
+            providerId: 'credential',
+            password: hashedPassword,
+          },
+        });
+        return newUser;
+      });
+    }
+
+    // Add to organization
+    const member = await this.prisma.organizationMember.create({
+      data: {
+        organizationId: orgId,
+        userId: user.id,
+        roleId: dto.roleId,
+      },
+      include: {
+        user: { select: { id: true, name: true, email: true } },
+        role: { select: { id: true, name: true } },
+      },
+    });
+
+    this.logger.log(`Member created: ${user.email} in org ${orgId} by ${createdById}`);
+    this.eventEmitter.emit('organization.member.joined', {
+      ...domainEvent('organization.member.joined', 'organization', orgId, orgId, createdById, {
+        userName: user.name,
+        userEmail: user.email,
+        roleName: role.name,
+      }),
+      organizationId: orgId,
+      userId: user.id,
+    });
+
+    return {
+      member,
+      temporaryPassword: dto.password ? undefined : tempPassword,
+      isNewUser: !dto.password,
     };
   }
 

@@ -173,6 +173,18 @@ export class AuthController {
     return this.authService.completeOnboarding(user.id);
   }
 
+  @Patch('change-password')
+  @UseGuards(AuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Cambiar contraseña (primer inicio de sesión)' })
+  async changePassword(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: { newPassword: string },
+  ) {
+    return this.authService.changePassword(user.id, body.newPassword);
+  }
+
   @Get('sessions')
   @UseGuards(AuthGuard)
   @ApiBearerAuth()

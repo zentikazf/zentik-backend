@@ -15,7 +15,7 @@ import { Permissions } from '../../common/decorators/permissions.decorator';
 import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { OrganizationService } from './organization.service';
 import { InviteService } from './invite.service';
-import { CreateOrganizationDto, UpdateOrganizationDto, CreateInviteDto } from './dto';
+import { CreateOrganizationDto, UpdateOrganizationDto, CreateInviteDto, CreateMemberDto } from './dto';
 
 @ApiTags('Organizations')
 @ApiBearerAuth()
@@ -106,6 +106,17 @@ export class OrganizationController {
     @Param('id') memberId: string,
   ) {
     return this.organizationService.removeMember(orgId, memberId);
+  }
+
+  @Post(':orgId/members')
+  @Permissions('manage:members')
+  @ApiOperation({ summary: 'Crear un usuario y agregarlo como miembro' })
+  createMember(
+    @Param('orgId') orgId: string,
+    @Body() dto: CreateMemberDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.organizationService.createMember(orgId, dto, user.id);
   }
 
   // ============================================

@@ -139,6 +139,13 @@ export class InviteService {
               slug: true,
             },
           },
+          user: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+            },
+          },
           role: {
             select: {
               id: true,
