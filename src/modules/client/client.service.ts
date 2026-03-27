@@ -83,18 +83,32 @@ export class ClientService {
   }
 
   async update(orgId: string, clientId: string, dto: UpdateClientDto) {
-    await this.findById(orgId, clientId);
+    const existing = await this.findById(orgId, clientId);
 
-    const client = await this.prisma.client.update({
-      where: { id: clientId },
-      data: {
-        ...(dto.name !== undefined && { name: dto.name }),
-        ...(dto.email !== undefined && { email: dto.email }),
-        ...(dto.phone !== undefined && { phone: dto.phone }),
-        ...(dto.notes !== undefined && { notes: dto.notes }),
-      },
+    const client = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.client.update({
+        where: { id: clientId },
+        data: {
+          ...(dto.name !== undefined && { name: dto.name }),
+          ...(dto.email !== undefined && { email: dto.email }),
+          ...(dto.phone !== undefined && { phone: dto.phone }),
+          ...(dto.notes !== undefined && { notes: dto.notes }),
+        },
+        include: { user: { select: { id: true, name: true, email: true } } },
+      });
+
+      // Sync User.name if client has a linked user account
+      if (dto.name !== undefined && existing.userId) {
+        await tx.user.update({
+          where: { id: existing.userId },
+          data: { name: dto.name },
+        });
+      }
+
+      return updated;
     });
 
+    this.logger.log(`Client updated: ${clientId}`);
     return client;
   }
 
