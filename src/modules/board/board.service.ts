@@ -319,6 +319,24 @@ export class BoardService {
     const previousColumnId = task.boardColumnId;
     const previousStatus = task.status;
 
+    // Block moving to DONE columns (Deploy/Soporte) without approval
+    if (targetColumn.mappedStatus === 'DONE' && task.status !== 'IN_REVIEW') {
+      throw new AppException(
+        'La tarea debe estar en Testing (IN_REVIEW) y ser aprobada antes de moverla a Deploy o Soporte',
+        'APPROVAL_REQUIRED',
+        400,
+        { currentStatus: task.status, targetColumn: targetColumn.mappedStatus },
+      );
+    }
+    if (targetColumn.mappedStatus === 'DONE' && task.status === 'IN_REVIEW') {
+      throw new AppException(
+        'La tarea debe ser aprobada explícitamente, no puede arrastrarse directamente a Deploy o Soporte',
+        'APPROVAL_REQUIRED',
+        400,
+        { currentStatus: task.status, targetColumn: targetColumn.mappedStatus },
+      );
+    }
+
     // Build update data — sync status if column has mappedStatus
     const updateData: Record<string, unknown> = {
       boardColumnId: dto.targetColumnId,

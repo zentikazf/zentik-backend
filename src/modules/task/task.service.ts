@@ -222,8 +222,27 @@ export class TaskService {
         clientVisible: dto.clientVisible,
       };
 
-      // Reverse sync: if status changed, find matching board column and update boardColumnId
+      // Validate status transitions — DONE requires approval (must go through IN_REVIEW first)
       if (dto.status && dto.status !== task.status) {
+        const blockedWithoutApproval = ['DONE'];
+        if (blockedWithoutApproval.includes(dto.status) && task.status !== 'IN_REVIEW') {
+          throw new AppException(
+            'La tarea debe estar en revisión (IN_REVIEW) y ser aprobada antes de pasar a este estado',
+            'INVALID_STATUS_TRANSITION',
+            400,
+            { currentStatus: task.status, targetStatus: dto.status },
+          );
+        }
+        if (dto.status === 'DONE' && task.status === 'IN_REVIEW') {
+          throw new AppException(
+            'La tarea debe ser aprobada explícitamente usando el botón de aprobar, no puede cambiar a DONE directamente',
+            'APPROVAL_REQUIRED',
+            400,
+            { currentStatus: task.status, targetStatus: dto.status },
+          );
+        }
+
+        // Reverse sync: find matching board column and update boardColumnId
         const matchingColumn = await tx.boardColumn.findFirst({
           where: {
             mappedStatus: dto.status,
@@ -290,6 +309,17 @@ export class TaskService {
       task: updated,
       previousStatus: task.status,
     });
+
+    // Emit approval requested when task moves to IN_REVIEW
+    if (dto.status === 'IN_REVIEW' && task.status !== 'IN_REVIEW') {
+      this.eventEmitter.emit('task.approval.requested', {
+        ...domainEvent('task.approval.requested', 'task', taskId, task.project.organizationId, userId),
+        taskId,
+        taskTitle: updated!.title,
+        projectId: task.projectId,
+        userId,
+      });
+    }
 
     // Emit task.completed when status changes to DONE
     if (dto.status === 'DONE' && task.status !== 'DONE') {
