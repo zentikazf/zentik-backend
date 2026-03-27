@@ -67,6 +67,13 @@ export class FileService {
     return file;
   }
 
+  async getByKey(key: string) {
+    return this.prisma.file.findFirst({
+      where: { key },
+      select: { mimeType: true, originalName: true },
+    });
+  }
+
   async getById(fileId: string) {
     const file = await this.prisma.file.findUnique({
       where: { id: fileId },

@@ -5,25 +5,33 @@ import {
   Delete,
   Param,
   Query,
+  Res,
   UseGuards,
   UseInterceptors,
   UploadedFile,
   ParseFilePipe,
   MaxFileSizeValidator,
+  NotFoundException,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiTags, ApiBearerAuth, ApiConsumes, ApiBody, ApiOperation, ApiQuery } from '@nestjs/swagger';
+import { Response } from 'express';
+import * as fs from 'fs/promises';
 import { AuthGuard } from '../auth/guards/auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { FileService } from './file.service';
+import { StorageService } from '../../infrastructure/storage/storage.service';
 
 @ApiTags('Files')
 @ApiBearerAuth()
 @UseGuards(AuthGuard)
 @Controller()
 export class FileController {
-  constructor(private readonly fileService: FileService) {}
+  constructor(
+    private readonly fileService: FileService,
+    private readonly storage: StorageService,
+  ) {}
 
   @Post('files/upload')
   @ApiOperation({ summary: 'Subir un archivo' })
@@ -111,5 +119,21 @@ export class FileController {
       page ? parseInt(page, 10) : 1,
       limit ? parseInt(limit, 10) : 20,
     );
+  }
+
+  @Get('files/serve/:key(*)')
+  @ApiOperation({ summary: 'Servir archivo desde disco local' })
+  async serveFile(@Param('key') key: string, @Res() res: Response) {
+    const filePath = this.storage.getFilePath(key);
+    try {
+      await fs.access(filePath);
+    } catch {
+      throw new NotFoundException('Archivo no encontrado');
+    }
+
+    const file = await this.fileService.getByKey(key);
+    res.setHeader('Content-Type', file?.mimeType || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `inline; filename="${file?.originalName || 'file'}"`);
+    res.sendFile(filePath);
   }
 }
