@@ -2,6 +2,7 @@ import {
   Controller,
   Post,
   Get,
+  Patch,
   Delete,
   Body,
   Param,
@@ -161,6 +162,15 @@ export class AuthController {
   @ApiResponse({ status: 401, description: 'No autenticado' })
   async getMe(@CurrentUser() user: AuthenticatedUser) {
     return this.authService.getSession(user.id);
+  }
+
+  @Patch('onboarding-complete')
+  @UseGuards(AuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Marcar onboarding como completado' })
+  @ApiResponse({ status: 200, description: 'Onboarding marcado como completado' })
+  async completeOnboarding(@CurrentUser() user: AuthenticatedUser) {
+    return this.authService.completeOnboarding(user.id);
   }
 
   @Get('sessions')

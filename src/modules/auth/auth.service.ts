@@ -329,6 +329,7 @@ export class AuthService {
         name: true,
         image: true,
         emailVerified: true,
+        onboardingCompleted: true,
         createdAt: true,
         organizationMembers: {
           select: {
@@ -366,6 +367,7 @@ export class AuthService {
         name: user.name,
         image: user.image,
         emailVerified: user.emailVerified,
+        onboardingCompleted: user.onboardingCompleted,
         createdAt: user.createdAt,
       },
       organizations: user.organizationMembers.map((m) => {
@@ -387,6 +389,17 @@ export class AuthService {
         };
       }),
     };
+  }
+
+  async completeOnboarding(userId: string) {
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { onboardingCompleted: true },
+    });
+
+    this.logger.log(`Onboarding completed for user: ${userId}`);
+
+    return { success: true };
   }
 
   async listSessions(userId: string) {
