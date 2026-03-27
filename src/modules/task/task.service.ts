@@ -304,6 +304,18 @@ export class TaskService {
       });
     });
 
+    // Emit specific status change event for activity log
+    if (dto.status && dto.status !== task.status) {
+      this.eventEmitter.emit('task.status.changed', {
+        ...domainEvent('task.status.changed', 'task', taskId, task.project.organizationId, userId, {
+          title: updated!.title,
+          projectId: task.projectId,
+          fromStatus: task.status,
+          toStatus: dto.status,
+        }, { status: task.status }),
+      });
+    }
+
     this.eventEmitter.emit('task.updated', {
       ...domainEvent('task.updated', 'task', taskId, task.project.organizationId, userId, { title: updated!.title, status: updated!.status, projectId: task.projectId }, oldData),
       task: updated,
@@ -493,7 +505,13 @@ export class TaskService {
     });
 
     this.eventEmitter.emit('task.label.added', {
-      ...domainEvent('task.label.added', 'task', taskId, task.project.organizationId, userId, { labelId }),
+      ...domainEvent('task.label.added', 'task', taskId, task.project.organizationId, userId, {
+        labelId,
+        labelName: taskLabel.label.name,
+        labelColor: taskLabel.label.color,
+        taskTitle: task.title,
+        projectId: task.projectId,
+      }),
     });
 
     return taskLabel;
@@ -522,8 +540,17 @@ export class TaskService {
       where: { taskId_labelId: { taskId, labelId } },
     });
 
+    // Get label name before deletion for audit
+    const label = await this.prisma.label.findUnique({ where: { id: labelId }, select: { name: true, color: true } });
+
     this.eventEmitter.emit('task.label.removed', {
-      ...domainEvent('task.label.removed', 'task', taskId, task.project.organizationId, userId, { labelId }),
+      ...domainEvent('task.label.removed', 'task', taskId, task.project.organizationId, userId, {
+        labelId,
+        labelName: label?.name,
+        labelColor: label?.color,
+        taskTitle: task.title,
+        projectId: task.projectId,
+      }),
     });
   }
 

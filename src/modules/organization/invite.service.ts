@@ -7,6 +7,7 @@ import {
   AppException,
 } from '../../common/filters/app-exception';
 import { randomUUID } from 'crypto';
+import { domainEvent } from '../../common/events/domain-event.helper';
 
 @Injectable()
 export class InviteService {
@@ -160,6 +161,11 @@ export class InviteService {
       `User ${userId} joined org ${invite.organizationId} via invite code: ${code}`,
     );
     this.eventEmitter.emit('organization.member.joined', {
+      ...domainEvent('organization.member.joined', 'organization', invite.organizationId, invite.organizationId, userId, {
+        userName: member.user.name,
+        userEmail: member.user.email,
+        roleName: member.role.name,
+      }),
       organizationId: invite.organizationId,
       userId,
     });

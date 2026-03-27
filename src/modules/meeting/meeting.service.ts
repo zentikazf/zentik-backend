@@ -34,17 +34,21 @@ export class MeetingService {
 
     this.logger.log(`Meeting created: ${meeting.id} for project ${projectId}`);
 
-    if (dto.notifyClient) {
-      this.eventEmitter.emit('meeting.created', {
-        ...domainEvent('meeting.created', 'meeting', meeting.id, meeting.project.organizationId, userId),
-        meetingId: meeting.id,
+    this.eventEmitter.emit('meeting.created', {
+      ...domainEvent('meeting.created', 'meeting', meeting.id, meeting.project.organizationId, userId, {
         title: meeting.title,
         date: meeting.date,
         projectId,
-        notifyClient: true,
-        createdById: userId,
-      });
-    }
+        projectName: meeting.project.name,
+        location: meeting.location,
+      }),
+      meetingId: meeting.id,
+      title: meeting.title,
+      date: meeting.date,
+      projectId,
+      notifyClient: dto.notifyClient ?? false,
+      createdById: userId,
+    });
 
     return meeting;
   }
@@ -101,13 +105,31 @@ export class MeetingService {
       },
     });
 
+    const project = await this.prisma.project.findUnique({ where: { id: meeting.projectId }, select: { organizationId: true } });
+
+    this.eventEmitter.emit('meeting.updated', {
+      ...domainEvent('meeting.updated', 'meeting', meetingId, project!.organizationId, userId, {
+        title: meeting.title,
+        date: meeting.date,
+      }),
+    });
+
     this.logger.log(`Meeting updated: ${meetingId} by user ${userId}`);
     return meeting;
   }
 
   async delete(meetingId: string, userId: string) {
-    await this.findById(meetingId);
+    const meeting = await this.findById(meetingId);
+    const project = await this.prisma.project.findUnique({ where: { id: meeting.projectId }, select: { organizationId: true } });
+
     await this.prisma.meeting.delete({ where: { id: meetingId } });
+
+    this.eventEmitter.emit('meeting.deleted', {
+      ...domainEvent('meeting.deleted', 'meeting', meetingId, project!.organizationId, userId, {
+        title: meeting.title,
+      }),
+    });
+
     this.logger.log(`Meeting deleted: ${meetingId} by user ${userId}`);
     return { deleted: true };
   }

@@ -297,6 +297,10 @@ export class OrganizationService {
 
     const member = await this.prisma.organizationMember.findFirst({
       where: { id: memberId, organizationId: orgId },
+      include: {
+        user: { select: { name: true, email: true } },
+        role: { select: { name: true } },
+      },
     });
 
     if (!member) {
@@ -308,7 +312,11 @@ export class OrganizationService {
     });
 
     this.eventEmitter.emit('organization.member.removed', {
-      ...domainEvent('organization.member.removed', 'organization', orgId, orgId, member.userId),
+      ...domainEvent('organization.member.removed', 'organization', orgId, orgId, member.userId, {
+        userName: member.user.name,
+        userEmail: member.user.email,
+        roleName: member.role.name,
+      }),
       organizationId: orgId,
       userId: member.userId,
     });
