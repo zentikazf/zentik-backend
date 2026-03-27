@@ -39,6 +39,12 @@ export class PortalController {
     return this.portalService.getProjectDetail(user.id, projectId);
   }
 
+  @Get('portal/suggestions')
+  @ApiOperation({ summary: 'Listar todas las sugerencias globales del cliente' })
+  getGlobalSuggestions(@CurrentUser() user: AuthenticatedUser) {
+    return this.portalService.getGlobalSuggestions(user.id);
+  }
+
   @Get('portal/projects/:projectId/suggestions')
   @ApiOperation({ summary: 'Listar sugerencias del cliente en un proyecto' })
   getSuggestions(

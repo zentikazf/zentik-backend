@@ -138,6 +138,19 @@ export class PortalService {
     };
   }
 
+  async getGlobalSuggestions(userId: string) {
+    const client = await this.getClientByUserId(userId);
+
+    return this.prisma.suggestion.findMany({
+      where: { clientId: client.id },
+      include: { 
+        project: { select: { id: true, name: true } },
+        task: { select: { id: true, title: true, status: true } }
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
   async getSuggestions(userId: string, projectId: string) {
     const client = await this.getClientByUserId(userId);
 
