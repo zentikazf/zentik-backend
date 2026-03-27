@@ -301,7 +301,7 @@ export class OrganizationService {
     const member = await this.prisma.organizationMember.findFirst({
       where: { id: memberId, organizationId: orgId },
       include: {
-        user: { select: { name: true, email: true } },
+        user: { select: { id: true, name: true, email: true } },
         role: { select: { name: true } },
       },
     });
@@ -314,6 +314,24 @@ export class OrganizationService {
       where: { id: memberId },
     });
 
+    // If user has no other org memberships, delete the user entirely
+    const remainingMemberships = await this.prisma.organizationMember.count({
+      where: { userId: member.userId },
+    });
+
+    let userDeleted = false;
+    if (remainingMemberships === 0) {
+      // Clean up orphaned user: sessions, accounts, and user record
+      await this.prisma.$transaction([
+        this.prisma.session.deleteMany({ where: { userId: member.userId } }),
+        this.prisma.account.deleteMany({ where: { userId: member.userId } }),
+        this.prisma.notification.deleteMany({ where: { userId: member.userId } }),
+        this.prisma.user.delete({ where: { id: member.userId } }),
+      ]);
+      userDeleted = true;
+      this.logger.log(`Orphaned user ${member.user.email} deleted after removal from org ${orgId}`);
+    }
+
     this.eventEmitter.emit('organization.member.removed', {
       ...domainEvent('organization.member.removed', 'organization', orgId, orgId, member.userId, {
         userName: member.user.name,
@@ -324,7 +342,7 @@ export class OrganizationService {
       userId: member.userId,
     });
 
-    return { deleted: true };
+    return { deleted: true, userDeleted };
   }
 
   async ensureSaaSRoles(orgId: string) {
@@ -416,6 +434,7 @@ export class OrganizationService {
     let user = await this.prisma.user.findUnique({ where: { email } });
 
     const tempPassword = dto.password || randomBytes(6).toString('base64url');
+    let isNewUser = false;
 
     if (user) {
       // Check if already a member
@@ -425,7 +444,21 @@ export class OrganizationService {
       if (existingMember) {
         throw new AppException('Este usuario ya es miembro de la organización', 'ALREADY_MEMBER', 409);
       }
+
+      // Reset password to temp so admin can share fresh credentials
+      const hashedPassword = await bcrypt.hash(tempPassword, 12);
+      await this.prisma.$transaction([
+        this.prisma.account.updateMany({
+          where: { userId: user.id, providerId: 'credential' },
+          data: { password: hashedPassword },
+        }),
+        this.prisma.user.update({
+          where: { id: user.id },
+          data: { mustChangePassword: true },
+        }),
+      ]);
     } else {
+      isNewUser = true;
       // Create the user
       const hashedPassword = await bcrypt.hash(tempPassword, 12);
       user = await this.prisma.$transaction(async (tx) => {
@@ -477,7 +510,7 @@ export class OrganizationService {
     return {
       member,
       temporaryPassword: dto.password ? undefined : tempPassword,
-      isNewUser: !dto.password,
+      isNewUser,
     };
   }
 
