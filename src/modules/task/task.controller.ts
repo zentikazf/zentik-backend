@@ -17,6 +17,8 @@ import { CurrentUser, ApiPaginated } from '../../common/decorators';
 import { Permissions } from '../../common/decorators/permissions.decorator';
 import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { TaskService } from './task.service';
+import { TaskRelationService } from './task-relation.service';
+import { TaskApprovalService } from './task-approval.service';
 import {
   CreateTaskDto,
   UpdateTaskDto,
@@ -31,7 +33,11 @@ import {
 @UseGuards(AuthGuard, PermissionsGuard)
 @Controller()
 export class TaskController {
-  constructor(private readonly taskService: TaskService) {}
+  constructor(
+    private readonly taskService: TaskService,
+    private readonly taskRelationService: TaskRelationService,
+    private readonly taskApprovalService: TaskApprovalService,
+  ) {}
 
   // ============================================
   // TASK CRUD
@@ -133,7 +139,7 @@ export class TaskController {
     @Body() dto: AssignTaskDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.taskService.assignTask(taskId, dto.userId, user.id);
+    return this.taskRelationService.assignTask(taskId, dto.userId, user.id);
   }
 
   @Delete('tasks/:taskId/assign/:userId')
@@ -145,7 +151,7 @@ export class TaskController {
     @Param('userId') userId: string,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    await this.taskService.unassignTask(taskId, userId, user.id);
+    await this.taskRelationService.unassignTask(taskId, userId, user.id);
   }
 
   // ============================================
@@ -161,7 +167,7 @@ export class TaskController {
     @Body('labelId') labelId: string,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.taskService.addLabel(taskId, labelId, user.id);
+    return this.taskRelationService.addLabel(taskId, labelId, user.id);
   }
 
   @Delete('tasks/:taskId/labels/:labelId')
@@ -173,7 +179,7 @@ export class TaskController {
     @Param('labelId') labelId: string,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    await this.taskService.removeLabel(taskId, labelId, user.id);
+    await this.taskRelationService.removeLabel(taskId, labelId, user.id);
   }
 
   // ============================================
@@ -189,7 +195,7 @@ export class TaskController {
     @Body() dto: BulkUpdateTaskDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.taskService.bulkUpdate(projectId, dto, user.id);
+    return this.taskRelationService.bulkUpdate(projectId, dto, user.id);
   }
 
   // ============================================
@@ -203,7 +209,7 @@ export class TaskController {
     @Param('taskId') taskId: string,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.taskService.approveTask(taskId, user.id);
+    return this.taskApprovalService.approveTask(taskId, user.id);
   }
 
   @Post('tasks/:taskId/reject')
@@ -214,7 +220,7 @@ export class TaskController {
     @Body() dto: RejectTaskDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.taskService.rejectTask(taskId, dto.reason, user.id);
+    return this.taskApprovalService.rejectTask(taskId, dto.reason, user.id);
   }
 
   @Get('organizations/:orgId/approvals')
@@ -223,7 +229,7 @@ export class TaskController {
   async getPendingApprovals(
     @Param('orgId') orgId: string,
   ) {
-    return this.taskService.findPendingApprovals(orgId);
+    return this.taskApprovalService.findPendingApprovals(orgId);
   }
 
   @Get('projects/:projectId/approvals')
@@ -232,7 +238,7 @@ export class TaskController {
   async getProjectApprovals(
     @Param('projectId') projectId: string,
   ) {
-    return this.taskService.findPendingApprovalsByProject(projectId);
+    return this.taskApprovalService.findPendingApprovalsByProject(projectId);
   }
 
   // ============================================

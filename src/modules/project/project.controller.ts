@@ -17,6 +17,7 @@ import { CurrentUser, ApiPaginated } from '../../common/decorators';
 import { Permissions } from '../../common/decorators/permissions.decorator';
 import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { ProjectService } from './project.service';
+import { ProjectBudgetService } from './project-budget.service';
 import { CreateProjectDto, UpdateProjectDto, ProjectFilterDto, CreateBudgetItemDto, UpdateBudgetItemDto } from './dto';
 
 @ApiTags('Projects')
@@ -24,7 +25,10 @@ import { CreateProjectDto, UpdateProjectDto, ProjectFilterDto, CreateBudgetItemD
 @UseGuards(AuthGuard, PermissionsGuard)
 @Controller()
 export class ProjectController {
-  constructor(private readonly projectService: ProjectService) {}
+  constructor(
+    private readonly projectService: ProjectService,
+    private readonly projectBudgetService: ProjectBudgetService,
+  ) {}
 
   // ============================================
   // PROJECTS UNDER ORGANIZATION
@@ -134,7 +138,7 @@ export class ProjectController {
   @Get('projects/:projectId/budget')
   @ApiOperation({ summary: 'Listar items del presupuesto del proyecto' })
   getBudgetItems(@Param('projectId') projectId: string) {
-    return this.projectService.getBudgetItems(projectId);
+    return this.projectBudgetService.getBudgetItems(projectId);
   }
 
   @Post('projects/:projectId/budget')
@@ -145,7 +149,7 @@ export class ProjectController {
     @Param('projectId') projectId: string,
     @Body() dto: CreateBudgetItemDto,
   ) {
-    return this.projectService.createBudgetItem(projectId, dto);
+    return this.projectBudgetService.createBudgetItem(projectId, dto);
   }
 
   @Patch('projects/:projectId/budget/:itemId')
@@ -156,7 +160,7 @@ export class ProjectController {
     @Param('itemId') itemId: string,
     @Body() dto: UpdateBudgetItemDto,
   ) {
-    return this.projectService.updateBudgetItem(projectId, itemId, dto);
+    return this.projectBudgetService.updateBudgetItem(projectId, itemId, dto);
   }
 
   @Delete('projects/:projectId/budget/:itemId')
@@ -167,7 +171,7 @@ export class ProjectController {
     @Param('projectId') projectId: string,
     @Param('itemId') itemId: string,
   ) {
-    return this.projectService.deleteBudgetItem(projectId, itemId);
+    return this.projectBudgetService.deleteBudgetItem(projectId, itemId);
   }
 
   @Patch('projects/:projectId/budget-reorder')
@@ -176,7 +180,7 @@ export class ProjectController {
     @Param('projectId') projectId: string,
     @Body('itemIds') itemIds: string[],
   ) {
-    return this.projectService.reorderBudgetItems(projectId, itemIds);
+    return this.projectBudgetService.reorderBudgetItems(projectId, itemIds);
   }
 
   // ============================================
@@ -191,6 +195,6 @@ export class ProjectController {
     @Query('status') status?: string,
     @Query('billingMonth') billingMonth?: string,
   ) {
-    return this.projectService.getAlcance(orgId, { clientId, status, billingMonth });
+    return this.projectBudgetService.getAlcance(orgId, { clientId, status, billingMonth });
   }
 }

@@ -16,6 +16,7 @@ import { CurrentUser } from '../../common/decorators';
 import { Permissions } from '../../common/decorators/permissions.decorator';
 import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { OrganizationService } from './organization.service';
+import { OrgMembershipService } from './org-membership.service';
 import { InviteService } from './invite.service';
 import { CreateOrganizationDto, UpdateOrganizationDto, CreateInviteDto, CreateMemberDto } from './dto';
 
@@ -26,6 +27,7 @@ import { CreateOrganizationDto, UpdateOrganizationDto, CreateInviteDto, CreateMe
 export class OrganizationController {
   constructor(
     private readonly organizationService: OrganizationService,
+    private readonly membershipService: OrgMembershipService,
     private readonly inviteService: InviteService,
   ) {}
 
@@ -82,7 +84,7 @@ export class OrganizationController {
   @Get(':orgId/members')
   @ApiOperation({ summary: 'Listar miembros de la organizacion' })
   listMembers(@Param('orgId') orgId: string) {
-    return this.organizationService.listMembers(orgId);
+    return this.membershipService.listMembers(orgId);
   }
 
   @Patch(':orgId/members/:id')
@@ -93,13 +95,13 @@ export class OrganizationController {
     @Param('id') memberId: string,
     @Body('roleId') roleId: string,
   ) {
-    return this.organizationService.updateMemberRole(orgId, memberId, roleId);
+    return this.membershipService.updateMemberRole(orgId, memberId, roleId);
   }
 
   @Post(':orgId/backfill-roles')
   @ApiOperation({ summary: 'Agregar roles SaaS faltantes a una organizacion existente' })
   backfillRoles(@Param('orgId') orgId: string) {
-    return this.organizationService.ensureSaaSRoles(orgId);
+    return this.membershipService.ensureSaaSRoles(orgId);
   }
 
   @Delete(':orgId/members/:id')
@@ -110,7 +112,7 @@ export class OrganizationController {
     @Param('orgId') orgId: string,
     @Param('id') memberId: string,
   ) {
-    return this.organizationService.removeMember(orgId, memberId);
+    return this.membershipService.removeMember(orgId, memberId);
   }
 
   @Post(':orgId/members')
@@ -122,7 +124,7 @@ export class OrganizationController {
     @Body() dto: CreateMemberDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.organizationService.createMember(orgId, dto, user.id);
+    return this.membershipService.createMember(orgId, dto, user.id);
   }
 
   // ============================================

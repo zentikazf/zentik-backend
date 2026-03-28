@@ -9,7 +9,6 @@ import {
   CreateTaskDto,
   UpdateTaskDto,
   TaskFilterDto,
-  BulkUpdateTaskDto,
 } from './dto';
 
 @Injectable()
@@ -166,17 +165,22 @@ export class TaskService {
         parentTask: { select: { id: true, title: true, status: true } },
         createdBy: { select: { id: true, name: true, email: true, image: true } },
         subTasks: {
-          include: {
-            assignments: { include: { user: { select: { id: true, name: true, image: true } } } },
+          select: {
+            id: true, title: true, status: true, priority: true, position: true,
+            assignments: { select: { user: { select: { id: true, name: true, image: true } } } },
           },
           orderBy: { position: 'asc' },
+          take: 50,
         },
         timeEntries: {
-          include: { user: { select: { id: true, name: true, image: true } } },
+          select: { id: true, startTime: true, endTime: true, duration: true, description: true, user: { select: { id: true, name: true, image: true } } },
           orderBy: { startTime: 'desc' },
+          take: 50,
         },
         files: {
+          select: { id: true, originalName: true, mimeType: true, size: true, url: true, createdAt: true },
           orderBy: { createdAt: 'desc' },
+          take: 30,
         },
         _count: { select: { subTasks: true, comments: true, timeEntries: true } },
       },
@@ -433,159 +437,6 @@ export class TaskService {
   }
 
   // ============================================
-  // ASSIGNMENTS
-  // ============================================
-
-  async assignTask(taskId: string, userId: string, requesterId: string) {
-    const task = await this.prisma.task.findUnique({ where: { id: taskId }, include: { project: { select: { organizationId: true } } } });
-    if (!task) {
-      throw new TaskNotFoundException(taskId);
-    }
-
-    const assignment = await this.prisma.taskAssignment.create({
-      data: { taskId, userId },
-      include: {
-        user: { select: { id: true, name: true, email: true, image: true } },
-      },
-    });
-
-    this.eventEmitter.emit('task.assigned', {
-      ...domainEvent('task.assigned', 'task', taskId, task.project.organizationId, requesterId, { taskTitle: task.title, assigneeId: userId, projectId: task.projectId }),
-      taskId,
-      taskTitle: task.title,
-      assigneeId: userId,
-      assignedById: requesterId,
-      projectId: task.projectId,
-    });
-
-    return assignment;
-  }
-
-  async unassignTask(taskId: string, userId: string, requesterId: string) {
-    const task = await this.prisma.task.findUnique({ where: { id: taskId }, include: { project: { select: { organizationId: true } } } });
-    if (!task) {
-      throw new TaskNotFoundException(taskId);
-    }
-
-    const assignment = await this.prisma.taskAssignment.findUnique({
-      where: { taskId_userId: { taskId, userId } },
-    });
-
-    if (!assignment) {
-      throw new AppException(
-        'El usuario no esta asignado a esta tarea',
-        'ASSIGNMENT_NOT_FOUND',
-        404,
-        { taskId, userId },
-      );
-    }
-
-    await this.prisma.taskAssignment.delete({
-      where: { taskId_userId: { taskId, userId } },
-    });
-
-    this.eventEmitter.emit('task.unassigned', {
-      ...domainEvent('task.unassigned', 'task', taskId, task.project.organizationId, requesterId, { userId, projectId: task.projectId }),
-    });
-  }
-
-  // ============================================
-  // LABELS
-  // ============================================
-
-  async addLabel(taskId: string, labelId: string, userId: string) {
-    const task = await this.prisma.task.findUnique({ where: { id: taskId }, include: { project: { select: { organizationId: true } } } });
-    if (!task) {
-      throw new TaskNotFoundException(taskId);
-    }
-
-    const taskLabel = await this.prisma.taskLabel.create({
-      data: { taskId, labelId },
-      include: { label: true },
-    });
-
-    this.eventEmitter.emit('task.label.added', {
-      ...domainEvent('task.label.added', 'task', taskId, task.project.organizationId, userId, {
-        labelId,
-        labelName: taskLabel.label.name,
-        labelColor: taskLabel.label.color,
-        taskTitle: task.title,
-        projectId: task.projectId,
-      }),
-    });
-
-    return taskLabel;
-  }
-
-  async removeLabel(taskId: string, labelId: string, userId: string) {
-    const task = await this.prisma.task.findUnique({ where: { id: taskId }, include: { project: { select: { organizationId: true } } } });
-    if (!task) {
-      throw new TaskNotFoundException(taskId);
-    }
-
-    const taskLabel = await this.prisma.taskLabel.findUnique({
-      where: { taskId_labelId: { taskId, labelId } },
-    });
-
-    if (!taskLabel) {
-      throw new AppException(
-        'La etiqueta no esta asociada a esta tarea',
-        'LABEL_NOT_FOUND',
-        404,
-        { taskId, labelId },
-      );
-    }
-
-    await this.prisma.taskLabel.delete({
-      where: { taskId_labelId: { taskId, labelId } },
-    });
-
-    // Get label name before deletion for audit
-    const label = await this.prisma.label.findUnique({ where: { id: labelId }, select: { name: true, color: true } });
-
-    this.eventEmitter.emit('task.label.removed', {
-      ...domainEvent('task.label.removed', 'task', taskId, task.project.organizationId, userId, {
-        labelId,
-        labelName: label?.name,
-        labelColor: label?.color,
-        taskTitle: task.title,
-        projectId: task.projectId,
-      }),
-    });
-  }
-
-  // ============================================
-  // BULK OPERATIONS
-  // ============================================
-
-  async bulkUpdate(projectId: string, dto: BulkUpdateTaskDto, userId: string) {
-    const project = await this.prisma.project.findUnique({ where: { id: projectId }, select: { organizationId: true } });
-    const results = await this.prisma.$transaction(
-      dto.operations.map((op) =>
-        this.prisma.task.update({
-          where: { id: op.taskId },
-          data: {
-            ...(op.status && { status: op.status }),
-            ...(op.priority && { priority: op.priority }),
-            ...(op.sprintId !== undefined && { sprintId: op.sprintId }),
-          },
-          include: {
-            assignments: { include: { user: { select: { id: true, name: true, email: true, image: true } } } },
-            taskLabels: { include: { label: true } },
-          },
-        }),
-      ),
-    );
-
-    this.eventEmitter.emit('tasks.bulk.updated', {
-      ...domainEvent('tasks.bulk.updated', 'task', projectId, project?.organizationId || '', userId, { count: results.length, projectId }),
-    });
-    this.logger.log(`Bulk updated ${results.length} tasks in project ${projectId}`);
-
-    return results;
-  }
-
-  // ============================================
   // MY TASKS (cross-project)
   // ============================================
 
@@ -628,173 +479,6 @@ export class TaskService {
     ]);
 
     return { data: tasks, total, page, limit };
-  }
-
-  // ============================================
-  // APPROVALS
-  // ============================================
-
-  async approveTask(taskId: string, userId: string) {
-    const task = await this.prisma.task.findUnique({
-      where: { id: taskId },
-      include: {
-        project: { select: { id: true, name: true, responsibleId: true, organizationId: true } },
-        assignments: { select: { userId: true } },
-      },
-    });
-
-    if (!task) {
-      throw new TaskNotFoundException(taskId);
-    }
-
-    if (task.status !== 'IN_REVIEW') {
-      throw new AppException(
-        'Solo se pueden aprobar tareas en estado Testing (IN_REVIEW)',
-        'INVALID_TASK_STATUS',
-        400,
-      );
-    }
-
-    // Find Deploy column (mappedStatus DONE, first one by position)
-    const deployColumn = await this.prisma.boardColumn.findFirst({
-      where: {
-        board: { projectId: task.projectId },
-        mappedStatus: 'DONE',
-      },
-      orderBy: { position: 'asc' },
-    });
-
-    const updated = await this.prisma.task.update({
-      where: { id: taskId },
-      data: {
-        status: 'DONE',
-        ...(deployColumn && { boardColumnId: deployColumn.id }),
-      },
-    });
-
-    this.eventEmitter.emit('task.approval.approved', {
-      ...domainEvent('task.approval.approved', 'task', task.id, task.project.organizationId, userId, { taskTitle: task.title, projectId: task.projectId, projectName: task.project.name }),
-      taskId: task.id,
-      taskTitle: task.title,
-      projectId: task.projectId,
-      projectName: task.project.name,
-      approvedById: userId,
-      assigneeIds: task.assignments.map((a) => a.userId),
-    });
-
-    return updated;
-  }
-
-  async rejectTask(taskId: string, reason: string | undefined, userId: string) {
-    const task = await this.prisma.task.findUnique({
-      where: { id: taskId },
-      include: {
-        project: { select: { id: true, name: true, responsibleId: true, organizationId: true } },
-        assignments: { select: { userId: true } },
-      },
-    });
-
-    if (!task) {
-      throw new TaskNotFoundException(taskId);
-    }
-
-    if (task.status !== 'IN_REVIEW') {
-      throw new AppException(
-        'Solo se pueden rechazar tareas en estado Testing (IN_REVIEW)',
-        'INVALID_TASK_STATUS',
-        400,
-      );
-    }
-
-    // Find Desarrollo column (mappedStatus IN_PROGRESS)
-    const desarrolloColumn = await this.prisma.boardColumn.findFirst({
-      where: {
-        board: { projectId: task.projectId },
-        mappedStatus: 'IN_PROGRESS',
-      },
-      orderBy: { position: 'asc' },
-    });
-
-    const updated = await this.prisma.task.update({
-      where: { id: taskId },
-      data: {
-        status: 'IN_PROGRESS',
-        reviewAttempts: { increment: 1 },
-        ...(desarrolloColumn && { boardColumnId: desarrolloColumn.id }),
-      },
-    });
-
-    this.eventEmitter.emit('task.approval.rejected', {
-      ...domainEvent('task.approval.rejected', 'task', task.id, task.project.organizationId, userId, { taskTitle: task.title, projectId: task.projectId, reason: reason || '' }),
-      taskId: task.id,
-      taskTitle: task.title,
-      projectId: task.projectId,
-      projectName: task.project.name,
-      rejectedById: userId,
-      reason: reason || '',
-      reviewAttempts: updated.reviewAttempts,
-      assigneeIds: task.assignments.map((a) => a.userId),
-    });
-
-    return updated;
-  }
-
-  async findPendingApprovalsByProject(projectId: string) {
-    const tasks = await this.prisma.task.findMany({
-      where: {
-        status: 'IN_REVIEW',
-        projectId,
-      },
-      include: {
-        project: { select: { id: true, name: true } },
-        assignments: {
-          select: { user: { select: { id: true, name: true } } },
-        },
-        boardColumn: { select: { id: true, name: true, color: true } },
-      },
-      orderBy: { updatedAt: 'desc' },
-    });
-
-    return tasks.map((t) => ({
-      id: t.id,
-      title: t.title,
-      status: t.status,
-      priority: t.priority,
-      reviewAttempts: t.reviewAttempts,
-      updatedAt: t.updatedAt,
-      project: t.project,
-      assignees: t.assignments.map((a) => a.user),
-      column: t.boardColumn,
-    }));
-  }
-
-  async findPendingApprovals(orgId: string) {
-    const tasks = await this.prisma.task.findMany({
-      where: {
-        status: 'IN_REVIEW',
-        project: { organizationId: orgId },
-      },
-      include: {
-        project: { select: { id: true, name: true } },
-        assignments: {
-          select: { user: { select: { id: true, name: true } } },
-        },
-        boardColumn: { select: { id: true, name: true, color: true } },
-      },
-      orderBy: { updatedAt: 'desc' },
-    });
-
-    return tasks.map((t) => ({
-      id: t.id,
-      title: t.title,
-      status: t.status,
-      priority: t.priority,
-      reviewAttempts: t.reviewAttempts,
-      updatedAt: t.updatedAt,
-      project: t.project,
-      assignees: t.assignments.map((a) => a.user),
-      column: t.boardColumn,
-    }));
   }
 
   // ============================================
