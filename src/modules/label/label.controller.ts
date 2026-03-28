@@ -27,6 +27,7 @@ export class LabelController {
   @Post('organizations/:orgId/labels')
   @ApiOperation({ summary: 'Crear una etiqueta en la organización' })
   @ApiResponse({ status: 201, description: 'Etiqueta creada' })
+  @HttpCode(HttpStatus.CREATED)
   async create(
     @Param('orgId') orgId: string,
     @Body() dto: CreateLabelDto,

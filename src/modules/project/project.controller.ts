@@ -17,7 +17,7 @@ import { CurrentUser, ApiPaginated } from '../../common/decorators';
 import { Permissions } from '../../common/decorators/permissions.decorator';
 import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { ProjectService } from './project.service';
-import { CreateProjectDto, UpdateProjectDto, ProjectFilterDto } from './dto';
+import { CreateProjectDto, UpdateProjectDto, ProjectFilterDto, CreateBudgetItemDto, UpdateBudgetItemDto } from './dto';
 
 @ApiTags('Projects')
 @ApiBearerAuth()
@@ -31,6 +31,7 @@ export class ProjectController {
   // ============================================
 
   @Post('organizations/:orgId/projects')
+  @HttpCode(HttpStatus.CREATED)
   @Permissions('manage:projects')
   @ApiOperation({ summary: 'Crear un nuevo proyecto en la organizacion' })
   create(
@@ -74,6 +75,7 @@ export class ProjectController {
   }
 
   @Delete('projects/:projectId')
+  @HttpCode(HttpStatus.NO_CONTENT)
   @Permissions('manage:projects')
   @ApiOperation({ summary: 'Eliminar un proyecto (soft delete)' })
   softDelete(
@@ -94,6 +96,7 @@ export class ProjectController {
   }
 
   @Post('projects/:projectId/members')
+  @HttpCode(HttpStatus.CREATED)
   @Permissions('manage:members')
   @ApiOperation({ summary: 'Agregar un miembro al proyecto' })
   addMember(
@@ -104,6 +107,7 @@ export class ProjectController {
   }
 
   @Delete('projects/:projectId/members/:memberId')
+  @HttpCode(HttpStatus.NO_CONTENT)
   @Permissions('manage:members')
   @ApiOperation({ summary: 'Remover un miembro del proyecto' })
   removeMember(
@@ -134,11 +138,12 @@ export class ProjectController {
   }
 
   @Post('projects/:projectId/budget')
+  @HttpCode(HttpStatus.CREATED)
   @Permissions('manage:projects')
   @ApiOperation({ summary: 'Crear un item de presupuesto' })
   createBudgetItem(
     @Param('projectId') projectId: string,
-    @Body() dto: { description: string; category?: string; hours?: number; hourlyRate?: number },
+    @Body() dto: CreateBudgetItemDto,
   ) {
     return this.projectService.createBudgetItem(projectId, dto);
   }
@@ -149,7 +154,7 @@ export class ProjectController {
   updateBudgetItem(
     @Param('projectId') projectId: string,
     @Param('itemId') itemId: string,
-    @Body() dto: { description?: string; category?: string; hours?: number; hourlyRate?: number },
+    @Body() dto: UpdateBudgetItemDto,
   ) {
     return this.projectService.updateBudgetItem(projectId, itemId, dto);
   }

@@ -8,6 +8,8 @@ import {
   Param,
   Query,
   UseGuards,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { AuthGuard, PermissionsGuard } from '../auth/guards';
@@ -38,6 +40,7 @@ export class TimeTrackingController {
 
   @Post('time-entries')
   @ApiOperation({ summary: 'Crear entrada de tiempo manual' })
+  @HttpCode(HttpStatus.CREATED)
   async createTimeEntry(
     @CurrentUser() user: AuthenticatedUser,
     @Body() dto: CreateTimeEntryDto,
@@ -72,6 +75,7 @@ export class TimeTrackingController {
 
   @Delete('time-entries/:id')
   @ApiOperation({ summary: 'Eliminar entrada de tiempo' })
+  @HttpCode(HttpStatus.NO_CONTENT)
   async deleteTimeEntry(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id') id: string,

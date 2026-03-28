@@ -8,6 +8,8 @@ import {
   Param,
   Query,
   UseGuards,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { AuthGuard, PermissionsGuard } from '../auth/guards';
@@ -46,6 +48,7 @@ export class ChatController {
 
   @Post('organizations/:orgId/channels')
   @ApiOperation({ summary: 'Crear canal (DM/GROUP/PROJECT)' })
+  @HttpCode(HttpStatus.CREATED)
   async createChannel(
     @CurrentUser() user: AuthenticatedUser,
     @Param('orgId') orgId: string,
@@ -82,6 +85,7 @@ export class ChatController {
 
   @Delete('channels/:channelId/members/:userId')
   @ApiOperation({ summary: 'Quitar miembro de un canal' })
+  @HttpCode(HttpStatus.NO_CONTENT)
   async removeMember(
     @Param('channelId') channelId: string,
     @Param('userId') userId: string,
@@ -111,6 +115,7 @@ export class ChatController {
 
   @Post('channels/:channelId/messages')
   @ApiOperation({ summary: 'Enviar mensaje en un canal' })
+  @HttpCode(HttpStatus.CREATED)
   async sendMessage(
     @CurrentUser() user: AuthenticatedUser,
     @Param('channelId') channelId: string,
@@ -131,6 +136,7 @@ export class ChatController {
 
   @Delete('messages/:messageId')
   @ApiOperation({ summary: 'Eliminar mensaje' })
+  @HttpCode(HttpStatus.NO_CONTENT)
   async deleteMessage(
     @CurrentUser() user: AuthenticatedUser,
     @Param('messageId') messageId: string,

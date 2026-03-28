@@ -7,6 +7,8 @@ import {
   Body,
   Param,
   UseGuards,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { AuthGuard, PermissionsGuard } from '../auth/guards';
@@ -32,6 +34,7 @@ export class OrganizationController {
   // ============================================
 
   @Post()
+  @HttpCode(HttpStatus.CREATED)
   @ApiOperation({ summary: 'Crear una nueva organizacion' })
   create(
     @Body() dto: CreateOrganizationDto,
@@ -63,6 +66,7 @@ export class OrganizationController {
   }
 
   @Delete(':orgId')
+  @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Eliminar una organizacion (soft delete)' })
   softDelete(
     @Param('orgId') orgId: string,
@@ -99,6 +103,7 @@ export class OrganizationController {
   }
 
   @Delete(':orgId/members/:id')
+  @HttpCode(HttpStatus.NO_CONTENT)
   @Permissions('manage:members')
   @ApiOperation({ summary: 'Remover un miembro de la organizacion' })
   removeMember(
@@ -109,6 +114,7 @@ export class OrganizationController {
   }
 
   @Post(':orgId/members')
+  @HttpCode(HttpStatus.CREATED)
   @Permissions('manage:members')
   @ApiOperation({ summary: 'Crear un usuario y agregarlo como miembro' })
   createMember(
@@ -124,6 +130,7 @@ export class OrganizationController {
   // ============================================
 
   @Post(':orgId/invites')
+  @HttpCode(HttpStatus.CREATED)
   @Permissions('manage:members')
   @ApiOperation({ summary: 'Crear un enlace de invitacion' })
   createInvite(
@@ -140,6 +147,7 @@ export class OrganizationController {
   }
 
   @Post('join/:code')
+  @HttpCode(HttpStatus.CREATED)
   @ApiOperation({ summary: 'Unirse a una organizacion mediante codigo de invitacion' })
   joinByCode(
     @Param('code') code: string,

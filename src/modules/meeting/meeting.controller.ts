@@ -8,6 +8,8 @@ import {
   Body,
   Query,
   UseGuards,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { AuthGuard, PermissionsGuard } from '../auth/guards';
@@ -27,6 +29,7 @@ export class MeetingController {
 
   @Post('projects/:projectId/meetings')
   @ApiOperation({ summary: 'Crear reunión en un proyecto' })
+  @HttpCode(HttpStatus.CREATED)
   async create(
     @Param('projectId') projectId: string,
     @Body() dto: CreateMeetingDto,
@@ -65,6 +68,7 @@ export class MeetingController {
 
   @Delete('meetings/:meetingId')
   @ApiOperation({ summary: 'Eliminar reunión' })
+  @HttpCode(HttpStatus.NO_CONTENT)
   async delete(
     @Param('meetingId') meetingId: string,
     @CurrentUser() user: AuthenticatedUser,

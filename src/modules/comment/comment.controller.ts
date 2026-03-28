@@ -28,6 +28,7 @@ export class CommentController {
   @Post('tasks/:taskId/comments')
   @ApiOperation({ summary: 'Crear un comentario en una tarea' })
   @ApiResponse({ status: 201, description: 'Comentario creado' })
+  @HttpCode(HttpStatus.CREATED)
   async createComment(
     @Param('taskId') taskId: string,
     @Body() dto: CreateCommentDto,

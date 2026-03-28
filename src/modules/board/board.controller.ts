@@ -40,6 +40,7 @@ export class BoardController {
   @Post('projects/:projectId/boards')
   @ApiOperation({ summary: 'Crear un tablero en un proyecto' })
   @ApiResponse({ status: 201, description: 'Tablero creado exitosamente' })
+  @HttpCode(HttpStatus.CREATED)
   async createBoard(
     @Param('projectId') projectId: string,
     @Body() dto: CreateBoardDto,
@@ -98,6 +99,7 @@ export class BoardController {
   @Post('boards/:boardId/columns')
   @ApiOperation({ summary: 'Crear una columna en un tablero' })
   @ApiResponse({ status: 201, description: 'Columna creada exitosamente' })
+  @HttpCode(HttpStatus.CREATED)
   async createColumn(
     @Param('boardId') boardId: string,
     @Body() dto: CreateColumnDto,

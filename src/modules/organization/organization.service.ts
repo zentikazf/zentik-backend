@@ -68,7 +68,7 @@ export class OrganizationService {
       }
 
       // Assign suggested permissions to each role
-      const allPermissions = await tx.permission.findMany();
+      const allPermissions = await tx.permission.findMany({ take: 500 });
       const permMap = new Map(allPermissions.map((p) => [`${p.action}:${p.resource}`, p.id]));
 
       const suggestions: Record<string, string[]> = {
@@ -383,7 +383,7 @@ export class OrganizationService {
       'Soporte': ['read:projects', 'read:tasks', 'manage:time-entries', 'manage:chat'],
     };
 
-    const allPermissions = await this.prisma.permission.findMany();
+    const allPermissions = await this.prisma.permission.findMany({ take: 500 });
     const permMap = new Map(allPermissions.map((p) => [`${p.action}:${p.resource}`, p.id]));
 
     const createdNames: string[] = [];

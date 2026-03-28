@@ -12,6 +12,8 @@ import {
   ParseFilePipe,
   MaxFileSizeValidator,
   NotFoundException,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiTags, ApiBearerAuth, ApiConsumes, ApiBody, ApiOperation, ApiQuery } from '@nestjs/swagger';
@@ -47,6 +49,7 @@ export class FileController {
     },
   })
   @UseInterceptors(FileInterceptor('file'))
+  @HttpCode(HttpStatus.CREATED)
   async upload(
     @UploadedFile(
       new ParseFilePipe({
@@ -85,6 +88,7 @@ export class FileController {
 
   @Delete('files/:id')
   @ApiOperation({ summary: 'Eliminar un archivo' })
+  @HttpCode(HttpStatus.NO_CONTENT)
   async delete(@Param('id') id: string, @CurrentUser() user: AuthenticatedUser) {
     return this.fileService.delete(id, user.id);
   }

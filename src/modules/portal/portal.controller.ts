@@ -6,6 +6,8 @@ import {
   Body,
   Param,
   UseGuards,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { AuthGuard } from '../auth/guards';
@@ -56,6 +58,7 @@ export class PortalController {
 
   @Post('portal/projects/:projectId/suggestions')
   @ApiOperation({ summary: 'Crear una sugerencia en un proyecto' })
+  @HttpCode(HttpStatus.CREATED)
   createSuggestion(
     @CurrentUser() user: AuthenticatedUser,
     @Param('projectId') projectId: string,

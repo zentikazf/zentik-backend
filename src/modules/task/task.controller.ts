@@ -38,6 +38,7 @@ export class TaskController {
   // ============================================
 
   @Post('projects/:projectId/tasks')
+  @HttpCode(HttpStatus.CREATED)
   @Permissions('manage:tasks')
   @ApiOperation({ summary: 'Crear una tarea en un proyecto' })
   @ApiResponse({ status: 201, description: 'Tarea creada exitosamente' })
@@ -99,6 +100,7 @@ export class TaskController {
   // ============================================
 
   @Post('tasks/:taskId/subtasks')
+  @HttpCode(HttpStatus.CREATED)
   @ApiOperation({ summary: 'Crear una subtarea' })
   @ApiResponse({ status: 201, description: 'Subtarea creada' })
   async createSubtask(
@@ -123,6 +125,7 @@ export class TaskController {
   // ============================================
 
   @Post('tasks/:taskId/assign')
+  @HttpCode(HttpStatus.CREATED)
   @ApiOperation({ summary: 'Asignar un usuario a una tarea' })
   @ApiResponse({ status: 201, description: 'Usuario asignado' })
   async assignTask(
@@ -150,6 +153,7 @@ export class TaskController {
   // ============================================
 
   @Post('tasks/:taskId/labels')
+  @HttpCode(HttpStatus.CREATED)
   @ApiOperation({ summary: 'Agregar una etiqueta a una tarea' })
   @ApiResponse({ status: 201, description: 'Etiqueta agregada' })
   async addLabel(

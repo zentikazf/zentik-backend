@@ -27,6 +27,7 @@ import { LoginDto } from './dto/login.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import { CurrentUser } from '../../common/decorators';
 import { AuthenticatedUser, AuthenticatedRequest } from '../../common/interfaces/request.interface';
 import { AppConfigService } from '../../config/app.config';
@@ -180,9 +181,9 @@ export class AuthController {
   @ApiOperation({ summary: 'Cambiar contraseña (primer inicio de sesión)' })
   async changePassword(
     @CurrentUser() user: AuthenticatedUser,
-    @Body() body: { newPassword: string },
+    @Body() dto: ChangePasswordDto,
   ) {
-    return this.authService.changePassword(user.id, body.newPassword);
+    return this.authService.changePassword(user.id, dto.newPassword);
   }
 
   @Get('sessions')

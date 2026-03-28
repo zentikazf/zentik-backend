@@ -7,6 +7,8 @@ import {
   Body,
   Param,
   UseGuards,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { AuthGuard, PermissionsGuard } from '../auth/guards';
@@ -38,6 +40,7 @@ export class RoleController {
 
   @Post('organizations/:orgId/roles')
   @ApiOperation({ summary: 'Crear un nuevo rol en la organizacion' })
+  @HttpCode(HttpStatus.CREATED)
   create(
     @Param('orgId') orgId: string,
     @Body() dto: CreateRoleDto,
@@ -57,6 +60,7 @@ export class RoleController {
 
   @Delete('organizations/:orgId/roles/:roleId')
   @ApiOperation({ summary: 'Eliminar un rol' })
+  @HttpCode(HttpStatus.NO_CONTENT)
   delete(
     @Param('orgId') orgId: string,
     @Param('roleId') roleId: string,

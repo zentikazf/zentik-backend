@@ -33,6 +33,7 @@ export class SprintController {
   @Permissions('manage:sprints')
   @ApiOperation({ summary: 'Crear un sprint en un proyecto' })
   @ApiResponse({ status: 201, description: 'Sprint creado exitosamente' })
+  @HttpCode(HttpStatus.CREATED)
   async createSprint(
     @Param('projectId') projectId: string,
     @Body() dto: CreateSprintDto,

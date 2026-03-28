@@ -6,6 +6,8 @@ import {
   Query,
   Body,
   UseGuards,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { AuthGuard } from '../auth/guards/auth.guard';
@@ -48,6 +50,7 @@ export class CalendarController {
 
   @Delete('google/disconnect')
   @ApiOperation({ summary: 'Desconectar Google Calendar' })
+  @HttpCode(HttpStatus.NO_CONTENT)
   async disconnectGoogle(@CurrentUser() user: AuthenticatedUser) {
     return this.googleCalendarService.disconnect(user.id);
   }

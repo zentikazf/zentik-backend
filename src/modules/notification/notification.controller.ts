@@ -6,6 +6,8 @@ import {
   Param,
   Query,
   UseGuards,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { AuthGuard } from '../auth/guards/auth.guard';
@@ -61,6 +63,7 @@ export class NotificationController {
 
   @Delete(':id')
   @ApiOperation({ summary: 'Eliminar notificacion' })
+  @HttpCode(HttpStatus.NO_CONTENT)
   async deleteNotification(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id') id: string,

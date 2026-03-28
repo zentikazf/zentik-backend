@@ -7,6 +7,8 @@ import {
   Body,
   Query,
   UseGuards,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { AuthGuard, PermissionsGuard } from '../auth/guards';
@@ -26,6 +28,7 @@ export class BillingController {
   @Post('projects/:projectId/invoices')
   @Permissions('read:billing')
   @ApiOperation({ summary: 'Generar factura para un proyecto' })
+  @HttpCode(HttpStatus.CREATED)
   async generate(
     @Param('projectId') projectId: string,
     @CurrentUser() user: AuthenticatedUser,

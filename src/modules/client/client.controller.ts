@@ -26,6 +26,7 @@ export class ClientController {
 
   @Post()
   @ApiOperation({ summary: 'Crear un cliente' })
+  @HttpCode(HttpStatus.CREATED)
   create(
     @Param('orgId') orgId: string,
     @Body() dto: CreateClientDto,
@@ -79,6 +80,7 @@ export class ClientController {
 
   @Post(':clientId/create-user')
   @ApiOperation({ summary: 'Crear usuario de acceso portal para un cliente' })
+  @HttpCode(HttpStatus.CREATED)
   createUser(
     @Param('orgId') orgId: string,
     @Param('clientId') clientId: string,
