@@ -43,26 +43,26 @@ export class InvoiceService {
     const fallbackRate = dto.defaultHourlyRate ?? 0;
 
     // Group time entries by task, using per-task hourlyRate
-    const taskGroups = new Map<string, { taskId: string; description: string; totalMinutes: number; rate: number }>();
+    const taskGroups = new Map<string, { taskId: string; description: string; totalSeconds: number; rate: number }>();
     for (const entry of timeEntries) {
       const key = entry.taskId;
       const existing = taskGroups.get(key);
       const duration = entry.duration || 0;
       if (existing) {
-        existing.totalMinutes += duration;
+        existing.totalSeconds += duration;
       } else {
         const taskRate = entry.task.hourlyRate ? Number(entry.task.hourlyRate) : fallbackRate;
         taskGroups.set(key, {
           taskId: entry.task.id,
           description: entry.task.title,
-          totalMinutes: duration,
+          totalSeconds: duration,
           rate: taskRate,
         });
       }
     }
 
     const items = Array.from(taskGroups.values()).map((group) => {
-      const hours = group.totalMinutes / 60;
+      const hours = group.totalSeconds / 3600;
       return {
         description: group.description,
         quantity: new Decimal(hours.toFixed(2)),
@@ -312,7 +312,7 @@ export class InvoiceGeneratorService {
 
     const groupedByUser = new Map<
       string,
-      { userName: string; totalMinutes: number; tasks: string[] }
+      { userName: string; totalSeconds: number; tasks: string[] }
     >();
 
     for (const entry of timeEntries) {
@@ -320,21 +320,21 @@ export class InvoiceGeneratorService {
       const existing = groupedByUser.get(key);
       const duration = entry.duration || 0;
       if (existing) {
-        existing.totalMinutes += duration;
+        existing.totalSeconds += duration;
         if (!existing.tasks.includes(entry.task.title)) {
           existing.tasks.push(entry.task.title);
         }
       } else {
         groupedByUser.set(key, {
           userName: entry.user.name,
-          totalMinutes: duration,
+          totalSeconds: duration,
           tasks: [entry.task.title],
         });
       }
     }
 
     const lineItems = Array.from(groupedByUser.values()).map((group) => {
-      const hours = group.totalMinutes / 60;
+      const hours = group.totalSeconds / 3600;
       return {
         description: `${group.userName} - ${group.tasks.join(', ')}`,
         hours: parseFloat(hours.toFixed(2)),
