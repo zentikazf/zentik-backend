@@ -1,5 +1,7 @@
+import './infrastructure/observability/instrument'; // Sentry must init before everything
+import * as Sentry from '@sentry/node';
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe, Logger, LogLevel } from '@nestjs/common';
+import { ValidationPipe, Logger } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import helmet from 'helmet';
 import compression from 'compression';
@@ -9,19 +11,13 @@ import { validateEnv } from './config/env.validation';
 import { GlobalExceptionFilter } from './common/filters';
 import { TransformInterceptor, LoggingInterceptor, TimeoutInterceptor } from './common/interceptors';
 import { AppConfigService } from './config/app.config';
+import { WinstonLoggerService } from './infrastructure/observability';
 
 async function bootstrap() {
   const env = validateEnv();
 
-  const logLevelMap: Record<string, LogLevel[]> = {
-    error: ['error'],
-    warn: ['error', 'warn'],
-    info: ['error', 'warn', 'log'],
-    debug: ['error', 'warn', 'log', 'debug'],
-  };
-
   const app = await NestFactory.create(AppModule, {
-    logger: logLevelMap[env.LOG_LEVEL] || ['error', 'warn', 'log'],
+    logger: new WinstonLoggerService(),
   });
 
   const configService = app.get(AppConfigService);
@@ -101,11 +97,13 @@ async function bootstrap() {
 }
 
 process.on('uncaughtException', (err) => {
+  Sentry.captureException(err);
   console.error('[FATAL] Uncaught exception:', err);
   process.exit(1);
 });
 
 process.on('unhandledRejection', (reason) => {
+  Sentry.captureException(reason);
   console.error('[FATAL] Unhandled rejection:', reason);
   process.exit(1);
 });

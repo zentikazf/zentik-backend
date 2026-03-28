@@ -6,6 +6,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Request, Response } from 'express';
+import * as Sentry from '@sentry/node';
 import { AppConfigService } from '../../config/app.config';
 import { AppException } from './app-exception';
 
@@ -35,6 +36,16 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     };
 
     if (statusCode >= 500) {
+      Sentry.withScope((scope) => {
+        scope.setTag('correlationId', correlationId);
+        scope.setUser({ id: (request as any).user?.id });
+        scope.setContext('request', {
+          method: request.method,
+          url: request.url,
+          orgId: (request as any).user?.organizationId,
+        });
+        Sentry.captureException(exception);
+      });
       this.logger.error(logPayload, exception instanceof Error ? exception.stack : undefined);
     } else {
       this.logger.warn(logPayload);
