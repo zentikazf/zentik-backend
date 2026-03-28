@@ -169,8 +169,8 @@ export class InviteService {
     );
     this.eventEmitter.emit('organization.member.joined', {
       ...domainEvent('organization.member.joined', 'organization', invite.organizationId, invite.organizationId, userId, {
-        userName: member.user.name,
-        userEmail: member.user.email,
+        userName: (member as any).user?.name ?? '',
+        userEmail: (member as any).user?.email ?? '',
         roleName: member.role.name,
       }),
       organizationId: invite.organizationId,

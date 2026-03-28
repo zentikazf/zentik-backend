@@ -52,6 +52,15 @@ export class CreateProjectDto {
   hourlyRate?: number;
 
   @ApiPropertyOptional({
+    example: 120,
+    description: 'Horas de desarrollo estimadas para el proyecto',
+  })
+  @IsOptional()
+  @IsNumber({}, { message: 'Las horas estimadas deben ser un numero' })
+  @Min(0, { message: 'Las horas estimadas no pueden ser negativas' })
+  estimatedHours?: number;
+
+  @ApiPropertyOptional({
     example: 'USD',
     description: 'Moneda para la facturacion del proyecto',
   })
