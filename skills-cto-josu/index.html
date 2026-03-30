@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CTO Skills Ecosystem — Manual Interactivo</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#09090b;--bg-s:#111113;--bg-c:#18181b;--bg-h:#27272a;--tx:#fafafa;--tx2:#a1a1aa;--bd:#27272a;--ac:#3b82f6;--ac2:#60a5fa;--gn:#22c55e;--og:#f97316;--pp:#a855f7;--rd:#ef4444;--yl:#eab308;--cy:#06b6d4}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--tx);line-height:1.7;display:flex;-webkit-font-smoothing:antialiased}
+a{color:var(--ac2);text-decoration:none}
+
+.side{width:260px;background:var(--bg-s);border-right:1px solid var(--bd);height:100vh;position:fixed;top:0;left:0;padding:1.5rem;overflow-y:auto;z-index:10}
+.side h2{font-size:1rem;margin-bottom:.3rem;letter-spacing:-.02em}
+.side .subtitle{font-size:.75rem;color:var(--tx2);margin-bottom:1.5rem}
+.nav{list-style:none;display:flex;flex-direction:column;gap:.2rem}
+.nav a{color:var(--tx2);display:block;padding:.4rem .7rem;border-radius:6px;font-size:.85rem;transition:.2s}
+.nav a:hover,.nav a.on{color:#fff;background:var(--bg-h)}
+.nav .badge{font-size:.65rem;background:var(--bg-h);color:var(--tx2);padding:.1rem .4rem;border-radius:99px;margin-left:.3rem}
+
+.main{margin-left:260px;padding:3rem 4rem;max-width:1000px;width:100%}
+h1{font-size:2.4rem;font-weight:700;letter-spacing:-.03em;margin-bottom:.5rem}
+h2{font-size:1.7rem;font-weight:600;margin-top:3.5rem;margin-bottom:1rem;padding-bottom:.5rem;border-bottom:1px solid var(--bd)}
+h3{font-size:1.2rem;font-weight:600;margin-top:2rem;margin-bottom:.75rem;color:#e4e4e7}
+p{margin-bottom:1rem;color:#d4d4d8}
+.lead{font-size:1.1rem;color:var(--tx2);margin-bottom:2.5rem}
+strong{color:#fff}
+ul,ol{margin-bottom:1rem;padding-left:1.5rem;color:#d4d4d8}
+li{margin-bottom:.3rem}
+code{font-family:'JetBrains Mono',monospace;background:#000;padding:.15rem .4rem;border-radius:4px;color:var(--ac2);font-size:.85em;border:1px solid #27272a}
+
+/* Flowchart */
+.flow-hero{background:var(--bg-c);border:1px solid var(--bd);border-radius:16px;padding:2rem;margin-bottom:3rem}
+.flow-hero h3{margin-top:0;color:#fff;text-align:center;margin-bottom:1.5rem}
+.flow-q{text-align:center;background:var(--bg-h);padding:.8rem;border-radius:12px;font-weight:600;font-size:1rem;margin-bottom:1.5rem;color:#fff}
+.flow-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(155px,1fr));gap:.6rem}
+.flow-btn{background:var(--bg);border:1px solid var(--bd);border-radius:10px;padding:.8rem .6rem;cursor:pointer;transition:.2s;text-align:center;color:var(--tx2)}
+.flow-btn:hover{border-color:var(--ac);color:#fff;transform:translateY(-2px);box-shadow:0 4px 20px rgba(59,130,246,.12)}
+.flow-btn.active{border-color:var(--ac);background:rgba(59,130,246,.08);color:#fff}
+.flow-emoji{font-size:1.3rem;display:block;margin-bottom:.3rem}
+.flow-label{font-size:.78rem;font-weight:500;line-height:1.3}
+
+.flow-detail{display:none;background:var(--bg);border:1px solid var(--bd);border-radius:12px;padding:1.5rem;margin-top:1.5rem;animation:fadeIn .3s}
+.flow-detail.show{display:block}
+.flow-step{display:flex;align-items:flex-start;gap:1rem;margin-bottom:.8rem;position:relative;padding-left:.5rem}
+.flow-step::before{content:'';position:absolute;left:1.1rem;top:2rem;bottom:-.3rem;width:2px;background:var(--bd)}
+.flow-step:last-child::before{display:none}
+.flow-num{width:1.7rem;height:1.7rem;background:var(--bg-h);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.7rem;font-weight:700;flex-shrink:0;color:var(--tx2);z-index:1}
+.flow-step p{margin:0;font-size:.85rem}
+
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+
+/* Scorecard */
+.score-table{width:100%;border-collapse:collapse;margin:1rem 0;border-radius:12px;overflow:hidden;border:1px solid var(--bd)}
+.score-table th,.score-table td{text-align:left;padding:.65rem 1rem;border-bottom:1px solid var(--bd)}
+.score-table th{background:rgba(255,255,255,.03);font-weight:600;color:#fff;font-size:.8rem;text-transform:uppercase;letter-spacing:.04em}
+.score-table td{font-size:.85rem;color:#d4d4d8}
+.grade{font-weight:700;font-size:.9rem;padding:.15rem .5rem;border-radius:6px;display:inline-block;min-width:2rem;text-align:center}
+.grade-a{background:rgba(34,197,94,.15);color:#4ade80}
+.grade-a-{background:rgba(34,197,94,.1);color:#86efac}
+.grade-b{background:rgba(234,179,8,.12);color:#facc15}
+.grade-new{font-size:.6rem;color:var(--ac2);margin-left:.3rem;vertical-align:super}
+
+/* Skill Cards */
+.skill-grid{display:grid;grid-template-columns:1fr;gap:1rem}
+.skill-card{background:var(--bg-c);border:1px solid var(--bd);border-radius:12px;overflow:hidden;transition:.2s}
+.skill-card:hover{border-color:#3f3f46}
+.skill-head{padding:1rem 1.25rem;cursor:pointer;display:flex;justify-content:space-between;align-items:center}
+.skill-name{font-family:'JetBrains Mono',monospace;font-size:.9rem;font-weight:600;color:#fff}
+.tag{font-size:.65rem;font-weight:600;padding:.2rem .5rem;border-radius:99px;text-transform:uppercase;letter-spacing:.04em}
+.tag-gen{background:rgba(59,130,246,.15);color:#60a5fa}
+.tag-feat{background:rgba(34,197,94,.15);color:#4ade80}
+.tag-aud{background:rgba(168,85,247,.15);color:#c084fc}
+.tag-enf{background:rgba(249,115,22,.15);color:#fb923c}
+.tag-res{background:rgba(239,68,68,.15);color:#f87171}
+.tag-ref{background:rgba(161,161,170,.12);color:#a1a1aa}
+.chevron{color:var(--tx2);transition:.2s;font-size:1rem;margin-left:.5rem}
+.skill-card.open .chevron{transform:rotate(180deg)}
+
+.skill-body{display:none;padding:0 1.25rem 1.25rem;border-top:1px solid var(--bd)}
+.skill-card.open .skill-body{display:block;animation:fadeIn .3s}
+
+.card-section{margin-top:1rem}
+.card-section-title{font-size:.75rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--tx2);margin-bottom:.5rem;display:flex;align-items:center;gap:.4rem}
+.card-section p,.card-section li{font-size:.87rem;color:#d4d4d8;margin-bottom:.3rem}
+.card-section ul{padding-left:1.2rem;margin-bottom:.5rem}
+
+.prompt-box{background:#000;border:1px solid #27272a;border-radius:8px;padding:.8rem 1rem;margin:.4rem 0;position:relative;font-family:'JetBrains Mono',monospace;font-size:.82rem;color:#e4e4e7;line-height:1.5}
+.copy-btn{position:absolute;top:.4rem;right:.4rem;background:var(--bg-h);border:1px solid var(--bd);color:var(--tx2);padding:.2rem .4rem;border-radius:4px;cursor:pointer;font-size:.65rem;transition:.2s}
+.copy-btn:hover{color:#fff;border-color:var(--ac)}
+
+.output-box{background:rgba(34,197,94,.05);border-left:3px solid var(--gn);padding:.8rem 1rem;border-radius:0 8px 8px 0;margin:.4rem 0;font-size:.85rem;color:#d4d4d8}
+
+.tip-do{color:#4ade80;font-size:.85rem}
+.tip-dont{color:#f87171;font-size:.85rem}
+.tip-warn{color:#facc15;font-size:.85rem}
+
+table{width:100%;border-collapse:collapse;margin:1rem 0;background:var(--bg-c);border-radius:8px;overflow:hidden;border:1px solid var(--bd)}
+th,td{text-align:left;padding:.65rem 1rem;border-bottom:1px solid var(--bd)}
+th{background:rgba(255,255,255,.03);font-weight:600;color:#fff;font-size:.82rem}
+td{color:var(--tx2);font-size:.83rem}
+
+.faq{background:var(--bg-c);border:1px solid var(--bd);border-radius:8px;padding:1.1rem;margin-bottom:.8rem}
+.faq strong{display:block;margin-bottom:.3rem;font-size:.95rem}
+.faq p{margin:0;font-size:.87rem}
+
+@media(max-width:1024px){.side{display:none}.main{margin-left:0;padding:2rem 1.5rem}}
+</style>
+</head>
+<body>
+
+<aside class="side">
+<h2>CTO Skills Ecosystem</h2>
+<p class="subtitle">19 skills &middot; NestJS + Next.js + Prisma</p>
+<ul class="nav">
+<li><a href="#top">Inicio</a></li>
+<li><a href="#flowchart">Que necesito hacer?</a></li>
+<li><a href="#scorecard">Cobertura & Score</a></li>
+<li><a href="#skills-db">Fichas Tecnicas <span class="badge">19</span></a></li>
+<li><a href="#combos">Combos Reales</a></li>
+<li><a href="#faq">FAQ</a></li>
+</ul>
+</aside>
+
+<main class="main" id="top">
+
+<h1>Manual CTO — Skills Ecosystem</h1>
+<p class="lead">19 skills para cubrir el ciclo completo: desde la idea hasta produccion. Selecciona tu situacion y segui el camino.</p>
+
+<!-- ===================== FLOWCHART ===================== -->
+<section id="flowchart">
+<div class="flow-hero">
+<h3>Que estas haciendo ahora?</h3>
+<div class="flow-q">Selecciona tu situacion actual</div>
+<div class="flow-grid">
+<div class="flow-btn" onclick="showPath(0)"><span class="flow-emoji">🆕</span><span class="flow-label">Proyecto nuevo desde cero</span></div>
+<div class="flow-btn" onclick="showPath(1)"><span class="flow-emoji">🔧</span><span class="flow-label">Agregar feature a proyecto</span></div>
+<div class="flow-btn" onclick="showPath(2)"><span class="flow-emoji">🔄</span><span class="flow-label">Cambio pequeno / QA fix</span></div>
+<div class="flow-btn" onclick="showPath(3)"><span class="flow-emoji">🔍</span><span class="flow-label">Auditar antes de deploy</span></div>
+<div class="flow-btn" onclick="showPath(4)"><span class="flow-emoji">🎨</span><span class="flow-label">Auditar solo el frontend</span></div>
+<div class="flow-btn" onclick="showPath(5)"><span class="flow-emoji">🛡️</span><span class="flow-label">Configurar enforcement</span></div>
+<div class="flow-btn" onclick="showPath(6)"><span class="flow-emoji">🚑</span><span class="flow-label">Rescatar proyecto heredado</span></div>
+<div class="flow-btn" onclick="showPath(7)"><span class="flow-emoji">💡</span><span class="flow-label">Tengo una idea sin definir</span></div>
+<div class="flow-btn" onclick="showPath(8)"><span class="flow-emoji">📋</span><span class="flow-label">Revisar despues de un PR</span></div>
+<div class="flow-btn" onclick="showPath(9)"><span class="flow-emoji">👋</span><span class="flow-label">Onboarding de nuevo dev</span></div>
+<div class="flow-btn" onclick="showPath(10)"><span class="flow-emoji">📦</span><span class="flow-label">Migrar / actualizar deps</span></div>
+<div class="flow-btn" onclick="showPath(11)" style="border-color:#f59e0b;background:rgba(245,158,11,.06)"><span class="flow-emoji">📖</span><span class="flow-label">El Manual Prohibido (flujo completo)</span></div>
+</div>
+
+<!-- Path 0: Proyecto nuevo -->
+<div class="flow-detail" id="path-0">
+<h4>Proyecto Nuevo desde Cero</h4>
+<div class="flow-step"><div class="flow-num">1</div><div><p><strong>/senior-project-generator</strong> — <code>"Crear nuevo proyecto de [descripcion]"</code></p><p>Te entrevista y genera <code>PROJECT_BLUEPRINT.md</code> (1000+ lineas)</p></div></div>
+<div class="flow-step"><div class="flow-num">2</div><div><p><strong>/project-setup-enforcer</strong> — Configura ESLint, Prettier, Husky, commitlint, CI</p></div></div>
+<div class="flow-step"><div class="flow-num">3</div><div><p><strong>Scaffold</strong> — Implementas la estructura base segun el blueprint</p></div></div>
+<div class="flow-step"><div class="flow-num">4</div><div><p><strong>/senior-feature-builder</strong> — Por cada modulo: <code>"Nuevo feature: [nombre]"</code></p></div></div>
+<div class="flow-step"><div class="flow-num">5</div><div><p><strong>Auditorias</strong> — <code>/security-hardening-auditor</code> + <code>/deploy-readiness-checker</code></p></div></div>
+<div class="flow-step"><div class="flow-num">6</div><div><p><strong>/blueprint-compliance-auditor</strong> — Score 0-100%</p></div></div>
+<div class="flow-step"><div class="flow-num">🚀</div><div><p><strong>DEPLOY</strong></p></div></div>
+</div>
+
+<!-- Path 1: Nuevo feature -->
+<div class="flow-detail" id="path-1">
+<h4>Agregar Feature a Proyecto Existente</h4>
+<div class="flow-step"><div class="flow-num">1</div><div><p><strong>/senior-feature-builder</strong> — <code>"Nuevo feature: [descripcion]"</code></p><p>5 fases: Brainstorming &rarr; Discovery &rarr; Technical Design &rarr; Blueprint &rarr; Implementacion</p></div></div>
+<div class="flow-step"><div class="flow-num">2</div><div><p><strong>Auditorias opcionales</strong> del modulo nuevo:</p><p><code>/senior-code-auditor</code> &middot; <code>/security-hardening-auditor</code> &middot; <code>/prisma-schema-auditor</code></p></div></div>
+<div class="flow-step"><div class="flow-num">✅</div><div><p><strong>Feature listo</strong></p></div></div>
+</div>
+
+<!-- Path 2: Cambio pequeno / QA -->
+<div class="flow-detail" id="path-2">
+<h4>Cambio Pequeno / QA Fix</h4>
+<div class="flow-step"><div class="flow-num">1</div><div><p><strong>/context-aware-coder</strong> — Escanea automaticamente los patrones del proyecto</p><p>Aprende: estructura de modulos, DTOs, stores, providers, API client, naming, error handling</p></div></div>
+<div class="flow-step"><div class="flow-num">2</div><div><p><strong>Genera resumen de patrones</strong> — Te muestra como trabaja el proyecto actual</p></div></div>
+<div class="flow-step"><div class="flow-num">3</div><div><p><strong>Escribe el cambio</strong> — Codigo 100% consistente con los patrones existentes</p></div></div>
+<div class="flow-step"><div class="flow-num">✅</div><div><p><strong>Cambio integrado sin romper convenciones</strong></p></div></div>
+</div>
+
+<!-- Path 3: Auditar antes de deploy -->
+<div class="flow-detail" id="path-3">
+<h4>Auditar antes de Deploy</h4>
+<div class="flow-step"><div class="flow-num">?</div><div><p><strong>Tenes PROJECT_BLUEPRINT.md?</strong></p></div></div>
+<div class="flow-step"><div class="flow-num">SI</div><div><p><strong>/blueprint-compliance-auditor</strong> — Una sola pasada: verifica todo contra el blueprint</p></div></div>
+<div class="flow-step"><div class="flow-num">NO</div><div><p><strong>Auditorias individuales:</strong></p><p><code>/senior-code-auditor</code> &rarr; <code>/security-hardening-auditor</code> &rarr; <code>/prisma-schema-auditor</code> &rarr; <code>/testing-enforcer</code> &rarr; <code>/deploy-readiness-checker</code></p></div></div>
+</div>
+
+<!-- Path 4: Auditar frontend -->
+<div class="flow-detail" id="path-4">
+<h4>Auditar Solo el Frontend</h4>
+<div class="flow-step"><div class="flow-num">1</div><div><p><strong>/frontend-nextjs-auditor</strong> — <code>"Auditar frontend"</code></p><p>7 categorias: Server/Client Components, Data Fetching, Error Handling, Seguridad, Performance, Convenciones, Middleware</p></div></div>
+<div class="flow-step"><div class="flow-num">2</div><div><p><strong>Genera FRONTEND_AUDIT_REPORT.md</strong> — Puntuacion A-F por categoria con archivo:linea</p></div></div>
+<div class="flow-step"><div class="flow-num">3</div><div><p><strong>Ofrece corregir</strong> los hallazgos que tienen correccion concreta</p></div></div>
+</div>
+
+<!-- Path 5: Enforcement -->
+<div class="flow-detail" id="path-5">
+<h4>Configurar Enforcement (Pre-commit)</h4>
+<div class="flow-step"><div class="flow-num">1</div><div><p><strong>/project-setup-enforcer</strong> — <code>"Configurar enforcement"</code></p><p>Audita: TypeScript strict, ESLint, Prettier, Husky, commitlint, GitHub Actions, PR template</p></div></div>
+<div class="flow-step"><div class="flow-num">2</div><div><p><strong>Genera informe</strong> con checklist ✅/🟡/❌ y configuracion lista para copiar</p></div></div>
+<div class="flow-step"><div class="flow-num">3</div><div><p><strong>Si aceptas</strong>, instala y configura automaticamente las herramientas faltantes</p></div></div>
+</div>
+
+<!-- Path 6: Rescate -->
+<div class="flow-detail" id="path-6">
+<h4>Rescatar Proyecto Heredado</h4>
+<div class="flow-step"><div class="flow-num">1</div><div><p><strong>/project-rescue</strong> — <code>"Rescatar este proyecto"</code></p><p>Diagnostico + 5 auditorias internas + plan de rescate priorizado</p></div></div>
+<div class="flow-step"><div class="flow-num">2</div><div><p><strong>/senior-feature-builder</strong> — Por cada mejora del plan de rescate</p></div></div>
+<div class="flow-step"><div class="flow-num">3</div><div><p><strong>Auditorias</strong> segun prioridad del rescue plan</p></div></div>
+<div class="flow-step"><div class="flow-num">✅</div><div><p><strong>Proyecto elevado a nivel senior</strong></p></div></div>
+</div>
+
+<!-- Path 7: Idea sin definir -->
+<div class="flow-detail" id="path-7">
+<h4>Tengo una Idea sin Definir</h4>
+<div class="flow-step"><div class="flow-num">1</div><div><p><strong>/senior-feature-builder</strong> — <code>"Nuevo feature"</code></p><p>Respondes <strong>B) No del todo</strong> cuando pregunta si la idea esta clara</p></div></div>
+<div class="flow-step"><div class="flow-num">2</div><div><p><strong>Fase 0 Brainstorming</strong> — Se comporta como Product Manager: 5 preguntas para definir problema, usuarios, MVP y UX</p></div></div>
+<div class="flow-step"><div class="flow-num">3</div><div><p>Cuando la idea esta clara, pasa a <strong>Discovery &rarr; Blueprint &rarr; Implementacion</strong></p></div></div>
+</div>
+
+<!-- Path 8: Post-PR review -->
+<div class="flow-detail" id="path-8">
+<h4>Revisar despues de un PR / Merge</h4>
+<div class="flow-step"><div class="flow-num">1</div><div><p><strong>/senior-code-auditor</strong> — <code>"Revisar el modulo [nombre]"</code></p><p>Audita calidad, arquitectura, nomenclatura, patrones, rendimiento</p></div></div>
+<div class="flow-step"><div class="flow-num">2</div><div><p><strong>/security-hardening-auditor</strong> — Si el PR toco endpoints, auth o datos sensibles</p></div></div>
+<div class="flow-step"><div class="flow-num">3</div><div><p><strong>/testing-enforcer</strong> — Verifica que los tests cubran el codigo nuevo</p></div></div>
+<div class="flow-step"><div class="flow-num">✅</div><div><p><strong>Codigo revisado con informe de calidad</strong></p></div></div>
+</div>
+
+<!-- Path 9: Onboarding -->
+<div class="flow-detail" id="path-9">
+<h4>Onboarding de Nuevo Dev al Proyecto</h4>
+<div class="flow-step"><div class="flow-num">1</div><div><p><strong>/context-aware-coder</strong> — <code>"Quiero entender el proyecto"</code></p><p>Escanea todo el proyecto y genera un resumen expandido de patrones con ejemplos reales</p></div></div>
+<div class="flow-step"><div class="flow-num">2</div><div><p><strong>El dev lee el resumen</strong> — Entiende: estructura, DTOs, guards, API client, stores, convenciones</p></div></div>
+<div class="flow-step"><div class="flow-num">3</div><div><p><strong>Cuando necesite hacer cambios</strong>, usa <code>/context-aware-coder</code> para que lo guie</p></div></div>
+</div>
+
+<!-- Path 10: Migrar deps -->
+<div class="flow-detail" id="path-10">
+<h4>Migrar / Actualizar Dependencias</h4>
+<div class="flow-step"><div class="flow-num">1</div><div><p><strong>/deploy-readiness-checker</strong> — Verifica estado actual de deps, CI/CD, env vars</p></div></div>
+<div class="flow-step"><div class="flow-num">2</div><div><p><strong>/testing-enforcer</strong> — Confirma que los tests cubren las areas afectadas</p></div></div>
+<div class="flow-step"><div class="flow-num">3</div><div><p><strong>/prisma-schema-auditor</strong> — Si la migracion afecta el schema de DB</p></div></div>
+<div class="flow-step"><div class="flow-num">4</div><div><p><strong>Actualizar</strong> &rarr; correr tests &rarr; verificar build &rarr; deploy</p></div></div>
+</div>
+
+<!-- Path 11: El Manual Prohibido -->
+<div class="flow-detail" id="path-11">
+<h4 style="color:#f59e0b">📖 El Manual Prohibido — Flujo 100% Senior de Principio a Fin</h4>
+<p style="font-size:.85rem;color:var(--tx2);margin-bottom:1rem">El orden exacto para llevar un proyecto de cero a produccion usando las 19 skills. Sin atajos.</p>
+
+<p style="font-size:.8rem;font-weight:600;color:#f59e0b;margin-bottom:.5rem;text-transform:uppercase;letter-spacing:.05em">Fase 1 — Fundacion</p>
+<div class="flow-step"><div class="flow-num" style="background:#f59e0b;color:#000">1</div><div><p><strong>/senior-project-generator</strong> — Arquitectura antes que codigo. Sin blueprint no hay proyecto, hay improvisacion.</p></div></div>
+<div class="flow-step"><div class="flow-num" style="background:#f59e0b;color:#000">2</div><div><p><strong>/project-setup-enforcer</strong> — Enforcement desde el dia 1. ESLint, Prettier, Husky, commitlint, CI. Si no bloqueas codigo malo en el commit, lo pagas en la auditoria.</p></div></div>
+
+<p style="font-size:.8rem;font-weight:600;color:#f59e0b;margin-bottom:.5rem;margin-top:1.2rem;text-transform:uppercase;letter-spacing:.05em">Fase 2 — Construccion (por cada modulo del blueprint)</p>
+<div class="flow-step"><div class="flow-num" style="background:#f59e0b;color:#000">3</div><div><p><strong>/senior-feature-builder x N</strong> — Cada modulo con mini-blueprint aprobado. Nunca codear directo.</p><p style="color:var(--tx2);font-size:.8rem;margin-top:.3rem">Las skills de referencia se activan solas durante la implementacion:<br><code>nestjs-best-practices</code> &middot; <code>next-best-practices</code> &middot; <code>api-design</code> &middot; <code>error-handling-patterns</code> &middot; <code>brainstorming</code></p></div></div>
+
+<p style="font-size:.8rem;font-weight:600;color:#f59e0b;margin-bottom:.5rem;margin-top:1.2rem;text-transform:uppercase;letter-spacing:.05em">Fase 3 — Auditoria pre-deploy (cuando el MVP esta completo)</p>
+<div class="flow-step"><div class="flow-num" style="background:#f59e0b;color:#000">4</div><div><p><strong>/blueprint-compliance-auditor</strong> — Verificar que lo construido cumple lo disenado. Score 0-100%.</p></div></div>
+<div class="flow-step"><div class="flow-num" style="background:#f59e0b;color:#000">5</div><div><p><strong>/senior-code-auditor</strong> — Calidad de codigo: arquitectura, nomenclatura, patrones, rendimiento.</p></div></div>
+<div class="flow-step"><div class="flow-num" style="background:#f59e0b;color:#000">6</div><div><p><strong>/frontend-nextjs-auditor</strong> — RSC boundaries, error.tsx, loading.tsx, performance, middleware.</p></div></div>
+<div class="flow-step"><div class="flow-num" style="background:#f59e0b;color:#000">7</div><div><p><strong>/prisma-schema-auditor</strong> — Indices, relaciones, soft delete, naming. ANTES de migrar en prod.</p></div></div>
+<div class="flow-step"><div class="flow-num" style="background:#f59e0b;color:#000">8</div><div><p><strong>/security-hardening-auditor</strong> — Helmet, CORS, auth, cookies, CSRF, file uploads. No se deploya sin esto.</p></div></div>
+<div class="flow-step"><div class="flow-num" style="background:#f59e0b;color:#000">9</div><div><p><strong>/testing-enforcer</strong> — Verificar que tests cubren los flujos criticos.</p></div></div>
+<div class="flow-step"><div class="flow-num" style="background:#f59e0b;color:#000">10</div><div><p><strong>/deploy-readiness-checker</strong> — Ultimo checkpoint: env vars, CI/CD, hosting, Sentry, logging, build.</p></div></div>
+
+<p style="font-size:.8rem;font-weight:600;color:#f59e0b;margin-bottom:.5rem;margin-top:1.2rem;text-transform:uppercase;letter-spacing:.05em">Fase 4 — Deploy</p>
+<div class="flow-step"><div class="flow-num" style="background:#22c55e;color:#000">🚀</div><div><p><strong>Deploy a produccion</strong> — Solo despues de pasar las 7 auditorias.</p></div></div>
+
+<p style="font-size:.8rem;font-weight:600;color:#f59e0b;margin-bottom:.5rem;margin-top:1.2rem;text-transform:uppercase;letter-spacing:.05em">Fase 5 — Mantenimiento en produccion</p>
+<div class="flow-step"><div class="flow-num" style="background:#f59e0b;color:#000">11</div><div><p><strong>/context-aware-coder</strong> — QA fixes y cambios menores. Los fixes siguen los patrones existentes, no rompen convenciones.</p></div></div>
+<div class="flow-step"><div class="flow-num" style="background:#f59e0b;color:#000">12</div><div><p><strong>/senior-feature-builder</strong> — Features nuevos repiten Fase 2 + auditorias de lo que se toco.</p></div></div>
+<div class="flow-step"><div class="flow-num" style="background:#f59e0b;color:#000">13</div><div><p><strong>Auditorias puntuales</strong> — Solo las que aplican: toque DB &rarr; <code>/prisma-schema-auditor</code>, toque auth &rarr; <code>/security-hardening-auditor</code>, etc.</p></div></div>
+
+<p style="font-size:.8rem;font-weight:600;color:var(--tx2);margin-bottom:.5rem;margin-top:1.2rem;text-transform:uppercase;letter-spacing:.05em">Uso especial (no estan en el flujo diario)</p>
+<div class="flow-step"><div class="flow-num" style="background:var(--bg-h)">*</div><div><p><strong>/project-rescue</strong> — Solo para proyectos heredados/deteriorados &middot; <strong>/copywriting</strong> — Textos de marketing &middot; <strong>/skill-creator</strong> — Crear o mejorar skills</p></div></div>
+</div>
+
+</div>
+</section>
+
+<!-- ===================== SCORECARD ===================== -->
+<section id="scorecard">
+<h2>Cobertura & Score</h2>
+<p>Cada area del ciclo de desarrollo esta cubierta por al menos una skill. Nota basada en profundidad y completitud de la cobertura.</p>
+
+<table class="score-table">
+<thead>
+<tr><th>Area</th><th>Skill(s) que Cubren</th><th>Estado</th><th>Nota</th></tr>
+</thead>
+<tbody>
+<tr><td><strong>Generacion de proyecto</strong></td><td><code>senior-project-generator</code></td><td>✅</td><td><span class="grade grade-a">A</span></td></tr>
+<tr><td><strong>Construccion de features</strong></td><td><code>senior-feature-builder</code></td><td>✅</td><td><span class="grade grade-a">A</span></td></tr>
+<tr><td><strong>Calidad de codigo</strong></td><td><code>senior-code-auditor</code></td><td>✅</td><td><span class="grade grade-a">A</span></td></tr>
+<tr><td><strong>Seguridad</strong></td><td><code>security-hardening-auditor</code></td><td>✅</td><td><span class="grade grade-a">A</span></td></tr>
+<tr><td><strong>Testing</strong></td><td><code>testing-enforcer</code></td><td>✅</td><td><span class="grade grade-a-">A-</span></td></tr>
+<tr><td><strong>Base de datos</strong></td><td><code>prisma-schema-auditor</code></td><td>✅</td><td><span class="grade grade-a">A</span></td></tr>
+<tr><td><strong>Deploy / CI</strong></td><td><code>deploy-readiness-checker</code></td><td>✅</td><td><span class="grade grade-a-">A-</span></td></tr>
+<tr><td><strong>Frontend / Next.js</strong></td><td><code>frontend-nextjs-auditor</code></td><td>✅</td><td><span class="grade grade-a">A</span> <span class="grade-new">NEW</span></td></tr>
+<tr><td><strong>Enforcement (DX)</strong></td><td><code>project-setup-enforcer</code></td><td>✅</td><td><span class="grade grade-a">A</span> <span class="grade-new">NEW</span></td></tr>
+<tr><td><strong>Mantenimiento / QA</strong></td><td><code>context-aware-coder</code></td><td>✅</td><td><span class="grade grade-a">A</span> <span class="grade-new">NEW</span></td></tr>
+<tr><td><strong>Compliance</strong></td><td><code>blueprint-compliance-auditor</code></td><td>✅</td><td><span class="grade grade-a">A</span></td></tr>
+<tr><td><strong>Rescate de proyectos</strong></td><td><code>project-rescue</code></td><td>✅</td><td><span class="grade grade-a-">A-</span></td></tr>
+<tr style="background:rgba(255,255,255,.02)"><td><strong>GLOBAL</strong></td><td>19 skills</td><td></td><td><span class="grade grade-a-" style="font-size:1rem">A-</span></td></tr>
+</tbody>
+</table>
+</section>
+
+<!-- ===================== FICHAS TECNICAS ===================== -->
+<section id="skills-db">
+<h2>Fichas Tecnicas</h2>
+<p>Cada skill con su ficha completa: que hace, cuando usarla, que genera, tips y prompts de ejemplo.</p>
+
+<div class="skill-grid">
+
+<!-- ========== senior-project-generator ========== -->
+<div class="skill-card" onclick="toggleCard(this)">
+<div class="skill-head"><span class="skill-name">senior-project-generator</span><div><span class="tag tag-gen">Generator</span><span class="chevron">▼</span></div></div>
+<div class="skill-body">
+<div class="card-section"><div class="card-section-title">📌 QUE HACE</div>
+<p>Actua como un CTO senior que entrevista al usuario sobre su idea de proyecto y genera un <strong>PROJECT_BLUEPRINT.md</strong> de 1000+ lineas. Cubre arquitectura completa, schema de base de datos, endpoints por modulo, estrategia de autenticacion, CI/CD, deployment y checklist pre-produccion. Es el documento fundacional de todo proyecto nuevo.</p></div>
+<div class="card-section"><div class="card-section-title">⏰ CUANDO USAR</div>
+<ul>
+<li>Cuando arrancas un proyecto de cero y no existe nada todavia</li>
+<li>Cuando quieres disenar la arquitectura antes de escribir codigo</li>
+<li>Cuando necesitas un documento de referencia para el equipo</li>
+</ul></div>
+<div class="card-section"><div class="card-section-title">📦 QUE GENERA</div>
+<div class="output-box"><strong>PROJECT_BLUEPRINT.md</strong> — Documento completo con: vision del proyecto, stack tecnologico, estructura de carpetas, schema Prisma detallado, endpoints REST por modulo con request/response tipados, configuracion de auth (JWT, guards, RBAC), CI/CD pipeline, variables de entorno, checklist de produccion.</div></div>
+<div class="card-section"><div class="card-section-title">💡 TIPS Y ERRORES COMUNES</div>
+<p class="tip-do">✅ Se especifico con el dominio: "plataforma SaaS de gestion de proyectos multi-tenant"</p>
+<p class="tip-do">✅ Responde todas las preguntas del cuestionario con detalle</p>
+<p class="tip-dont">❌ No digas "haceme un proyecto" sin contexto — el blueprint sale generico</p>
+<p class="tip-dont">❌ No saltees el cuestionario — los huecos te muerden despues</p></div>
+<div class="card-section"><div class="card-section-title">📝 PROMPTS DE EJEMPLO</div>
+<div class="prompt-box">"Crear nuevo proyecto de gestión de inventarios para una empresa de logística"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div>
+<div class="prompt-box">"Nuevo proyecto de e-commerce con multi-tenant y pasarela de pagos"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div>
+<div class="prompt-box">"Generar blueprint para plataforma SaaS de gestión de proyectos"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div></div>
+</div></div>
+
+<!-- ========== senior-feature-builder ========== -->
+<div class="skill-card" onclick="toggleCard(this)">
+<div class="skill-head"><span class="skill-name">senior-feature-builder</span><div><span class="tag tag-feat">Builder</span><span class="chevron">▼</span></div></div>
+<div class="skill-body">
+<div class="card-section"><div class="card-section-title">📌 QUE HACE</div>
+<p>Dirige el proceso completo de creacion de un feature nuevo: desde la idea vaga hasta el codigo implementado. Tiene 5 fases (Brainstorming, Discovery, Technical Design, Blueprint, Implementacion) con un <strong>hard gate</strong> que impide escribir codigo sin blueprint aprobado. Se adapta al proyecto existente leyendo la estructura real.</p></div>
+<div class="card-section"><div class="card-section-title">⏰ CUANDO USAR</div>
+<ul>
+<li>Cuando necesitas agregar funcionalidad nueva y completa (modulo, feature, flujo)</li>
+<li>Cuando tenes una idea y queres que alguien te guie desde el discovery</li>
+<li>Cuando queres que el codigo nuevo siga la arquitectura del proyecto</li>
+</ul></div>
+<div class="card-section"><div class="card-section-title">📦 QUE GENERA</div>
+<div class="output-box"><strong>FEATURE_BLUEPRINT.md</strong> — Mini-PRD con: objetivo, endpoints con request/response, schema Prisma, estructura de archivos, plan de implementacion, checklist pre-merge.</div>
+<div class="output-box"><strong>Codigo implementado</strong> — DB schema, modulo NestJS completo (controller + service + DTOs), pagina Next.js con loading/error states.</div></div>
+<div class="card-section"><div class="card-section-title">💡 TIPS Y ERRORES COMUNES</div>
+<p class="tip-do">✅ Si es solo backend, decilo en la Pregunta 3 para activar el skip inteligente</p>
+<p class="tip-do">✅ Responde las preguntas una a la vez — la calidad del blueprint depende de tus respuestas</p>
+<p class="tip-dont">❌ No digas "implementa X rapido" — el hard gate te frena. Primero blueprint, despues codigo</p>
+<p class="tip-dont">❌ No digas "hace todo" — responde cada fase para obtener un resultado senior</p></div>
+<div class="card-section"><div class="card-section-title">📝 PROMPTS DE EJEMPLO</div>
+<div class="prompt-box">"Nuevo feature: sistema de notificaciones con push y email"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div>
+<div class="prompt-box">"Quiero agregar facturación con integración a Stripe"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div>
+<div class="prompt-box">"Nuevo módulo de reportes con exportación a PDF y Excel"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div></div>
+</div></div>
+
+<!-- ========== context-aware-coder ========== -->
+<div class="skill-card" onclick="toggleCard(this)">
+<div class="skill-head"><span class="skill-name">context-aware-coder</span><div><span class="tag tag-feat">Builder</span><span class="chevron">▼</span></div></div>
+<div class="skill-body">
+<div class="card-section"><div class="card-section-title">📌 QUE HACE</div>
+<p>Antes de escribir una sola linea, escanea el proyecto entero para aprender los patrones establecidos: estructura de modulos, DTOs, stores, providers, API client, naming, error handling. Despues escribe codigo que se integra perfectamente con lo existente. Es como un senior que acaba de unirse al equipo y su primera regla es "leo como trabaja este equipo antes de tocar nada".</p></div>
+<div class="card-section"><div class="card-section-title">⏰ CUANDO USAR</div>
+<ul>
+<li>Cambios pequenos post-auditoria: agregar un campo, ajustar un endpoint, fix de QA</li>
+<li>Cuando el proyecto ya esta clean y queres mantener la consistencia</li>
+<li>Onboarding: pedile "quiero entender el proyecto" y genera un resumen expandido de patrones</li>
+<li>Cualquier cambio que no sea un feature completo nuevo</li>
+</ul></div>
+<div class="card-section"><div class="card-section-title">📦 QUE GENERA</div>
+<div class="output-box"><strong>Resumen de patrones</strong> — 5-10 puntos: como se organizan modulos, DTOs, errores, eventos, guards, stores, API client, convenciones de naming e imports.</div>
+<div class="output-box"><strong>Codigo consistente</strong> — Sigue exactamente los mismos patrones que descubrio. Si el proyecto usa AppException, usa AppException. Si usa Zustand, usa Zustand.</div></div>
+<div class="card-section"><div class="card-section-title">💡 TIPS Y ERRORES COMUNES</div>
+<p class="tip-do">✅ Ideal para QA fixes, agregar campos, modificar endpoints menores</p>
+<p class="tip-do">✅ Usalo en modo onboarding: "dame un resumen de patrones del proyecto"</p>
+<p class="tip-dont">❌ No lo uses para features nuevos completos — para eso usa /senior-feature-builder</p>
+<p class="tip-warn">⚠️ Si el proyecto tiene inconsistencias, sigue el patron del modulo mas reciente</p></div>
+<div class="card-section"><div class="card-section-title">📝 PROMPTS DE EJEMPLO</div>
+<div class="prompt-box">"Agregar campo 'priority' al módulo de tareas siguiendo los patrones"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div>
+<div class="prompt-box">"Fix de QA: el endpoint de listar usuarios no pagina correctamente"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div>
+<div class="prompt-box">"Quiero entender el proyecto — dame un resumen de patrones"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div></div>
+</div></div>
+
+<!-- ========== project-rescue ========== -->
+<div class="skill-card" onclick="toggleCard(this)">
+<div class="skill-head"><span class="skill-name">project-rescue</span><div><span class="tag tag-res">Rescue</span><span class="chevron">▼</span></div></div>
+<div class="skill-body">
+<div class="card-section"><div class="card-section-title">📌 QUE HACE</div>
+<p>Diagnostica el estado de un proyecto heredado o deteriorado ejecutando 5 auditorias internas (codigo, seguridad, DB, tests, deploy). Genera un plan de rescate priorizado por severidad y opcionalmente crea un PROJECT_BLUEPRINT.md retroactivo para documentar lo que existe.</p></div>
+<div class="card-section"><div class="card-section-title">⏰ CUANDO USAR</div>
+<ul>
+<li>Cuando recibes un repositorio heredado de otro equipo</li>
+<li>Cuando un proyecto se degradó y necesitas un plan para elevarlo</li>
+<li>Cuando quieres un diagnostico completo antes de decidir si rescatar o reescribir</li>
+</ul></div>
+<div class="card-section"><div class="card-section-title">📦 QUE GENERA</div>
+<div class="output-box"><strong>Diagnostico completo</strong> + 5 auditorias internas + plan de rescate priorizado por severidad + <strong>PROJECT_BLUEPRINT.md retroactivo</strong> (opcional).</div></div>
+<div class="card-section"><div class="card-section-title">💡 TIPS Y ERRORES COMUNES</div>
+<p class="tip-do">✅ Usalo como primer paso — el plan de rescate te dice exactamente que priorizar</p>
+<p class="tip-dont">❌ No lo uses para proyectos tuyos desde cero — para eso usa auditorias individuales</p>
+<p class="tip-dont">❌ No intentes arreglar todo a la vez — sigue la prioridad del plan</p></div>
+<div class="card-section"><div class="card-section-title">📝 PROMPTS DE EJEMPLO</div>
+<div class="prompt-box">"Rescatar este proyecto"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div>
+<div class="prompt-box">"Auditar este proyecto heredado y darme un plan de acción"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div></div>
+</div></div>
+
+<!-- ========== blueprint-compliance-auditor ========== -->
+<div class="skill-card" onclick="toggleCard(this)">
+<div class="skill-head"><span class="skill-name">blueprint-compliance-auditor</span><div><span class="tag tag-aud">Auditor</span><span class="chevron">▼</span></div></div>
+<div class="skill-body">
+<div class="card-section"><div class="card-section-title">📌 QUE HACE</div>
+<p>Lee el PROJECT_BLUEPRINT.md y verifica seccion por seccion que la implementacion real cumpla con lo disenado. Es el auditor maestro que orquesta la verificacion de compliance: estructura, endpoints, schema, seguridad, tests, deploy. Genera un score 0-100% de preparacion.</p></div>
+<div class="card-section"><div class="card-section-title">⏰ CUANDO USAR</div>
+<ul>
+<li>Antes de deploy a produccion — verificar que todo lo planeado esta implementado</li>
+<li>Cuando tenes un PROJECT_BLUEPRINT.md y queres saber cuanto se cumplio</li>
+<li>Para una auditoria "one-shot" en lugar de correr cada auditor por separado</li>
+</ul></div>
+<div class="card-section"><div class="card-section-title">📦 QUE GENERA</div>
+<div class="output-box"><strong>Informe unificado</strong> seccion por seccion contra el blueprint. Score de preparacion 0-100% con hallazgos y correcciones sugeridas.</div></div>
+<div class="card-section"><div class="card-section-title">💡 TIPS Y ERRORES COMUNES</div>
+<p class="tip-warn">⚠️ Requiere PROJECT_BLUEPRINT.md — sin blueprint no puede funcionar</p>
+<p class="tip-dont">❌ No funciona con FEATURE_BLUEPRINT.md — solo lee el blueprint del proyecto</p>
+<p class="tip-do">✅ Si no tenes blueprint, usa auditorias individuales en su lugar</p></div>
+<div class="card-section"><div class="card-section-title">📝 PROMPTS DE EJEMPLO</div>
+<div class="prompt-box">"Auditoría completa contra el blueprint"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div>
+<div class="prompt-box">"Verificar cumplimiento del blueprint"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div></div>
+</div></div>
+
+<!-- ========== senior-code-auditor ========== -->
+<div class="skill-card" onclick="toggleCard(this)">
+<div class="skill-head"><span class="skill-name">senior-code-auditor</span><div><span class="tag tag-aud">Auditor</span><span class="chevron">▼</span></div></div>
+<div class="skill-body">
+<div class="card-section"><div class="card-section-title">📌 QUE HACE</div>
+<p>Actua como un Staff Engineer revisando el codigo. Audita arquitectura, nomenclatura, estructura de carpetas, patrones de API, manejo de errores, rendimiento y logging. Genera un informe puntuado A-F por categoria con referencias archivo:linea y codigo de correccion concreto para cada hallazgo.</p></div>
+<div class="card-section"><div class="card-section-title">⏰ CUANDO USAR</div>
+<ul>
+<li>Despues de implementar un feature completo</li>
+<li>Revision post-merge para verificar calidad</li>
+<li>Cuando queres saber si tu codigo esta a nivel senior</li>
+</ul></div>
+<div class="card-section"><div class="card-section-title">📦 QUE GENERA</div>
+<div class="output-box"><strong>AUDIT_REPORT.md</strong> — Informe puntuado A-F por categoria: arquitectura, nomenclatura, patrones, errores, rendimiento, logging. Cada hallazgo con archivo:linea, severidad, problema y codigo de correccion.</div></div>
+<div class="card-section"><div class="card-section-title">💡 TIPS Y ERRORES COMUNES</div>
+<p class="tip-do">✅ Apunta a modulos especificos: "auditar el modulo de usuarios"</p>
+<p class="tip-dont">❌ No pidas "auditar todo" sin contexto — es mejor por modulo para profundidad</p></div>
+<div class="card-section"><div class="card-section-title">📝 PROMPTS DE EJEMPLO</div>
+<div class="prompt-box">"Revisar la calidad de mi código"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div>
+<div class="prompt-box">"Auditar calidad del módulo de tareas y el de proyectos"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div></div>
+</div></div>
+
+<!-- ========== frontend-nextjs-auditor ========== -->
+<div class="skill-card" onclick="toggleCard(this)">
+<div class="skill-head"><span class="skill-name">frontend-nextjs-auditor</span><div><span class="tag tag-aud">Auditor</span><span class="chevron">▼</span></div></div>
+<div class="skill-body">
+<div class="card-section"><div class="card-section-title">📌 QUE HACE</div>
+<p>Audita a fondo el codigo frontend Next.js (App Router). Verifica 7 categorias con peso ponderado: Server/Client Components (20%), Data Fetching y Estado (15%), Error Handling (15%), Seguridad Frontend (15%), Performance (15%), Convenciones (10%), Middleware y Rutas (10%). Genera un informe con nota A-F, hallazgos con archivo:linea y correcciones concretas.</p></div>
+<div class="card-section"><div class="card-section-title">⏰ CUANDO USAR</div>
+<ul>
+<li>Cuando queres una auditoria profunda del frontend especificamente</li>
+<li>Despues de implementar varias paginas y componentes</li>
+<li>Antes de deploy — verificar performance, error boundaries, seguridad client-side</li>
+<li>Complementa a senior-code-auditor que se enfoca mas en backend</li>
+</ul></div>
+<div class="card-section"><div class="card-section-title">📦 QUE GENERA</div>
+<div class="output-box"><strong>FRONTEND_AUDIT_REPORT.md</strong> — Tabla de puntuacion general (A-F por categoria), hallazgos por severidad (critico/alto/medio/bajo), detalle por categoria con archivo:linea y correccion, plan de accion recomendado.</div></div>
+<div class="card-section"><div class="card-section-title">💡 TIPS Y ERRORES COMUNES</div>
+<p class="tip-do">✅ Ejecutala despues de senior-code-auditor para cobertura full-stack</p>
+<p class="tip-do">✅ Verifica: "use client" innecesarios, falta de error.tsx/loading.tsx, next/image vs img</p>
+<p class="tip-dont">❌ No confundas con code-auditor — este profundiza en Next.js especificamente</p>
+<p class="tip-dont">❌ No asumas que todo Client Component es malo — verifica si necesita interactividad</p></div>
+<div class="card-section"><div class="card-section-title">📝 PROMPTS DE EJEMPLO</div>
+<div class="prompt-box">"Auditar el frontend del proyecto"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div>
+<div class="prompt-box">"Revisar componentes de Next.js — server vs client, performance, errors"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div></div>
+</div></div>
+
+<!-- ========== security-hardening-auditor ========== -->
+<div class="skill-card" onclick="toggleCard(this)">
+<div class="skill-head"><span class="skill-name">security-hardening-auditor</span><div><span class="tag tag-aud">Auditor</span><span class="chevron">▼</span></div></div>
+<div class="skill-body">
+<div class="card-section"><div class="card-section-title">📌 QUE HACE</div>
+<p>Actua como un pentester profesional reportando a su cliente. Audita 12 categorias de seguridad: transporte, bootstrap (main.ts), rate limiting, autenticacion, autorizacion, validacion I/O, cabeceras HTTP, base de datos, secretos, dependencias, cookies/sesiones, y proteccion CSRF + file uploads. Genera un informe APROBADO/NO APROBADO.</p></div>
+<div class="card-section"><div class="card-section-title">⏰ CUANDO USAR</div>
+<ul>
+<li>Despues de implementar o modificar autenticacion/autorizacion</li>
+<li>Antes de deploy a produccion — verificar postura de seguridad</li>
+<li>Cuando se agregan endpoints que manejan datos sensibles</li>
+<li>Despues de tocar cookies, sesiones, o file uploads</li>
+</ul></div>
+<div class="card-section"><div class="card-section-title">📦 QUE GENERA</div>
+<div class="output-box"><strong>SECURITY_AUDIT.md</strong> — Checklist ✅/❌ de 12 categorias: Helmet, CORS, ValidationPipe, ThrottlerModule, guards, bcrypt, tokens, secrets, npm audit, cookies httpOnly/secure/sameSite, CSRF, file uploads. Con pasos de remediacion y codigo.</div></div>
+<div class="card-section"><div class="card-section-title">💡 TIPS Y ERRORES COMUNES</div>
+<p class="tip-do">✅ Ejecutala cuando ya tengas auth implementado — asi el checklist completo aplica</p>
+<p class="tip-do">✅ Ahora incluye cookies (httpOnly, secure, sameSite) y validacion de file uploads</p>
+<p class="tip-dont">❌ No la uses sin auth — la mitad del checklist va a ser N/A</p></div>
+<div class="card-section"><div class="card-section-title">📝 PROMPTS DE EJEMPLO</div>
+<div class="prompt-box">"Auditar seguridad del proyecto"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div>
+<div class="prompt-box">"Security review completo antes de ir a producción"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div></div>
+</div></div>
+
+<!-- ========== prisma-schema-auditor ========== -->
+<div class="skill-card" onclick="toggleCard(this)">
+<div class="skill-head"><span class="skill-name">prisma-schema-auditor</span><div><span class="tag tag-aud">Auditor</span><span class="chevron">▼</span></div></div>
+<div class="skill-body">
+<div class="card-section"><div class="card-section-title">📌 QUE HACE</div>
+<p>Audita el schema de Prisma modelo por modelo: nomenclatura, indices, relaciones, campos de auditoria (createdAt, updatedAt), soft delete (isActive/deletedAt), seeding, y convenciones. Verifica que la base de datos este optimizada y siga las mejores practicas antes de migrar en produccion.</p></div>
+<div class="card-section"><div class="card-section-title">⏰ CUANDO USAR</div>
+<ul>
+<li>ANTES de hacer <code>prisma migrate deploy</code> en produccion</li>
+<li>Cuando agregas modelos o relaciones nuevas</li>
+<li>Para verificar indices y performance de queries</li>
+</ul></div>
+<div class="card-section"><div class="card-section-title">📦 QUE GENERA</div>
+<div class="output-box"><strong>Informe modelo por modelo</strong> — Nomenclatura, indices faltantes, relaciones mal configuradas, campos de auditoria, soft delete, convenciones. Con correcciones de schema concretas.</div></div>
+<div class="card-section"><div class="card-section-title">💡 TIPS Y ERRORES COMUNES</div>
+<p class="tip-warn">⚠️ Usala ANTES de migrar — si ya migraste, los fixes requieren otra migracion</p>
+<p class="tip-do">✅ Complementa con deploy-readiness para verificar que la DB esta lista para prod</p></div>
+<div class="card-section"><div class="card-section-title">📝 PROMPTS DE EJEMPLO</div>
+<div class="prompt-box">"Revisar esquema de Prisma"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div>
+<div class="prompt-box">"Auditar la base de datos antes de migrar a producción"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div></div>
+</div></div>
+
+<!-- ========== testing-enforcer ========== -->
+<div class="skill-card" onclick="toggleCard(this)">
+<div class="skill-head"><span class="skill-name">testing-enforcer</span><div><span class="tag tag-aud">Auditor</span><span class="chevron">▼</span></div></div>
+<div class="skill-body">
+<div class="card-section"><div class="card-section-title">📌 QUE HACE</div>
+<p>Audita la estrategia de testing del proyecto: existencia de tests unitarios, de integracion y e2e, calidad de las pruebas existentes, cobertura contra objetivos, y configuracion de CI para correr tests automaticamente. No busca 100% coverage ciego — prioriza tests de logica critica y flujos de negocio.</p></div>
+<div class="card-section"><div class="card-section-title">⏰ CUANDO USAR</div>
+<ul>
+<li>Cuando baja la cobertura de tests o hay regresiones</li>
+<li>Despues de agregar un feature — verificar que tiene tests</li>
+<li>Antes de deploy — confirmar que los tests cubren los flujos criticos</li>
+</ul></div>
+<div class="card-section"><div class="card-section-title">📦 QUE GENERA</div>
+<div class="output-box"><strong>Informe de testing</strong> — Brechas de cobertura por modulo, pruebas faltantes, calidad de tests existentes (mocks, assertions, edge cases), configuracion CI, recomendaciones priorizadas.</div></div>
+<div class="card-section"><div class="card-section-title">💡 TIPS Y ERRORES COMUNES</div>
+<p class="tip-do">✅ Prioriza tests de logica de negocio — services, no controllers</p>
+<p class="tip-dont">❌ No esperes 100% cobertura — la skill prioriza tests de lógica critica</p></div>
+<div class="card-section"><div class="card-section-title">📝 PROMPTS DE EJEMPLO</div>
+<div class="prompt-box">"Revisar mis tests y decirme qué falta"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div>
+<div class="prompt-box">"Auditar la estrategia de testing del proyecto"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div></div>
+</div></div>
+
+<!-- ========== deploy-readiness-checker ========== -->
+<div class="skill-card" onclick="toggleCard(this)">
+<div class="skill-head"><span class="skill-name">deploy-readiness-checker</span><div><span class="tag tag-enf">Enforcer</span><span class="chevron">▼</span></div></div>
+<div class="skill-body">
+<div class="card-section"><div class="card-section-title">📌 QUE HACE</div>
+<p>Verifica que el proyecto este listo para despliegue en produccion. Audita variables de entorno, CI/CD pipelines, configuracion de hosting (Vercel/Railway), observabilidad (Sentry, logging), documentacion, y build de produccion. Genera un veredicto go/no-go claro.</p></div>
+<div class="card-section"><div class="card-section-title">⏰ CUANDO USAR</div>
+<ul>
+<li>Cuando estas cerca de salir a produccion</li>
+<li>Pre-deploy final — el ultimo checkpoint</li>
+<li>Despues de configurar CI/CD para verificar que todo esta conectado</li>
+</ul></div>
+<div class="card-section"><div class="card-section-title">📦 QUE GENERA</div>
+<div class="output-box"><strong>Informe go/no-go</strong> — Variables de entorno, CI/CD, hosting, Sentry, logging, build de produccion. Por categoria con estado y recomendaciones.</div></div>
+<div class="card-section"><div class="card-section-title">💡 TIPS Y ERRORES COMUNES</div>
+<p class="tip-dont">❌ No la ejecutes demasiado temprano — si no tenes CI/CD, la mitad va a ser "falta configurar"</p>
+<p class="tip-do">✅ Usala como ultimo paso antes del deploy</p></div>
+<div class="card-section"><div class="card-section-title">📝 PROMPTS DE EJEMPLO</div>
+<div class="prompt-box">"¿Está listo para producción?"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div>
+<div class="prompt-box">"Verificar deploy readiness del proyecto"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div></div>
+</div></div>
+
+<!-- ========== project-setup-enforcer ========== -->
+<div class="skill-card" onclick="toggleCard(this)">
+<div class="skill-head"><span class="skill-name">project-setup-enforcer</span><div><span class="tag tag-enf">Enforcer</span><span class="chevron">▼</span></div></div>
+<div class="skill-body">
+<div class="card-section"><div class="card-section-title">📌 QUE HACE</div>
+<p>Verifica y configura la capa de enforcement del proyecto: todo lo que previene errores ANTES del commit. Audita 7 herramientas: TypeScript strict mode, ESLint, Prettier, Husky + lint-staged (pre-commit hooks), commitlint (conventional commits), GitHub Actions CI, y PR templates. Para cada herramienta faltante, genera la configuracion completa lista para copiar.</p></div>
+<div class="card-section"><div class="card-section-title">⏰ CUANDO USAR</div>
+<ul>
+<li>Al inicio de un proyecto nuevo — configurar enforcement desde el dia 1</li>
+<li>Cuando recibes un proyecto sin pre-commit hooks ni linting configurado</li>
+<li>Para verificar que la configuracion no se desconfiguro con el tiempo</li>
+</ul></div>
+<div class="card-section"><div class="card-section-title">📦 QUE GENERA</div>
+<div class="output-box"><strong>Informe de enforcement</strong> — Tabla con estado ✅/🟡/❌ por herramienta. Para cada faltante: por que importa + configuracion completa (package.json, archivos de config, hooks). Si aceptas, instala y configura automaticamente.</div></div>
+<div class="card-section"><div class="card-section-title">💡 TIPS Y ERRORES COMUNES</div>
+<p class="tip-do">✅ Ejecutala una vez al inicio del proyecto — despues solo para verificar</p>
+<p class="tip-do">✅ Si es un MVP, commitlint puede esperar — la skill es pragmatica</p>
+<p class="tip-dont">❌ No instala nada sin preguntar primero — muestra el informe y despues pregunta</p></div>
+<div class="card-section"><div class="card-section-title">📝 PROMPTS DE EJEMPLO</div>
+<div class="prompt-box">"Configurar enforcement del proyecto"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div>
+<div class="prompt-box">"Setup pre-commit hooks, linting y CI"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div></div>
+</div></div>
+
+<!-- ========== nestjs-best-practices ========== -->
+<div class="skill-card" onclick="toggleCard(this)">
+<div class="skill-head"><span class="skill-name">nestjs-best-practices</span><div><span class="tag tag-ref">Reference</span><span class="chevron">▼</span></div></div>
+<div class="skill-body">
+<div class="card-section"><div class="card-section-title">📌 QUE HACE</div>
+<p>Base de conocimiento de patrones y buenas practicas de NestJS para produccion. Cubre modulos, inyeccion de dependencias, guards, interceptors, pipes, exception filters, testing, y patrones de arquitectura. Se activa automaticamente cuando trabajas con codigo NestJS.</p></div>
+<div class="card-section"><div class="card-section-title">⏰ CUANDO USAR</div>
+<ul>
+<li>Cuando escribes o refactorizas codigo NestJS</li>
+<li>Para consultar patrones: "como manejar errores en NestJS?"</li>
+<li>Se complementa con senior-code-auditor para verificar que se siguen las practicas</li>
+</ul></div>
+<div class="card-section"><div class="card-section-title">📝 PROMPTS DE EJEMPLO</div>
+<div class="prompt-box">"Cómo estructurar un módulo NestJS correctamente?"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div></div>
+</div></div>
+
+<!-- ========== next-best-practices ========== -->
+<div class="skill-card" onclick="toggleCard(this)">
+<div class="skill-head"><span class="skill-name">next-best-practices</span><div><span class="tag tag-ref">Reference</span><span class="chevron">▼</span></div></div>
+<div class="skill-body">
+<div class="card-section"><div class="card-section-title">📌 QUE HACE</div>
+<p>Base de conocimiento de Next.js App Router: convenciones de archivos, Server/Client Components, data fetching, metadata, error handling, route handlers, optimizacion de imagenes/fonts, y bundling. Referencia rapida para decisiones de frontend.</p></div>
+<div class="card-section"><div class="card-section-title">⏰ CUANDO USAR</div>
+<ul>
+<li>Cuando trabajas con paginas y componentes Next.js</li>
+<li>Para consultar: "debo usar Server Component o Client Component para esto?"</li>
+<li>Se complementa con frontend-nextjs-auditor para verificar despues</li>
+</ul></div>
+<div class="card-section"><div class="card-section-title">📝 PROMPTS DE EJEMPLO</div>
+<div class="prompt-box">"¿Server Component o Client Component para un formulario con validación?"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div></div>
+</div></div>
+
+<!-- ========== api-design ========== -->
+<div class="skill-card" onclick="toggleCard(this)">
+<div class="skill-head"><span class="skill-name">api-design</span><div><span class="tag tag-ref">Reference</span><span class="chevron">▼</span></div></div>
+<div class="skill-body">
+<div class="card-section"><div class="card-section-title">📌 QUE HACE</div>
+<p>Guia de diseno de APIs RESTful y GraphQL. Cubre naming de endpoints, versionado, paginacion, filtrado, manejo de errores HTTP, OpenAPI/Swagger, autenticacion, y patrones de respuesta consistentes.</p></div>
+<div class="card-section"><div class="card-section-title">⏰ CUANDO USAR</div>
+<ul>
+<li>Cuando disenas endpoints nuevos</li>
+<li>Para decidir convenciones: naming, status codes, formato de respuesta</li>
+</ul></div>
+<div class="card-section"><div class="card-section-title">📝 PROMPTS DE EJEMPLO</div>
+<div class="prompt-box">"Diseñar los endpoints REST para un módulo de facturación"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div></div>
+</div></div>
+
+<!-- ========== error-handling-patterns ========== -->
+<div class="skill-card" onclick="toggleCard(this)">
+<div class="skill-head"><span class="skill-name">error-handling-patterns</span><div><span class="tag tag-ref">Reference</span><span class="chevron">▼</span></div></div>
+<div class="skill-body">
+<div class="card-section"><div class="card-section-title">📌 QUE HACE</div>
+<p>Patrones de manejo de errores: excepciones tipadas, Result types, propagacion de errores, degradacion graceful. Aplicable a NestJS (exception filters, AppException) y Next.js (error.tsx, error boundaries). Ayuda a construir aplicaciones resilientes.</p></div>
+<div class="card-section"><div class="card-section-title">⏰ CUANDO USAR</div>
+<ul>
+<li>Cuando implementas manejo de errores en backend o frontend</li>
+<li>Cuando queres un patron consistente de errores en todo el proyecto</li>
+</ul></div>
+<div class="card-section"><div class="card-section-title">📝 PROMPTS DE EJEMPLO</div>
+<div class="prompt-box">"Cómo manejar errores consistentemente en mi proyecto NestJS + Next.js?"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div></div>
+</div></div>
+
+<!-- ========== brainstorming ========== -->
+<div class="skill-card" onclick="toggleCard(this)">
+<div class="skill-head"><span class="skill-name">brainstorming</span><div><span class="tag tag-ref">Reference</span><span class="chevron">▼</span></div></div>
+<div class="skill-body">
+<div class="card-section"><div class="card-section-title">📌 QUE HACE</div>
+<p>Se activa automaticamente antes de cualquier trabajo creativo. Explora la intencion del usuario, requerimientos y diseno antes de la implementacion. Util para definir ideas, explorar opciones y llegar a consenso antes de escribir codigo.</p></div>
+<div class="card-section"><div class="card-section-title">⏰ CUANDO USAR</div>
+<ul>
+<li>Se auto-activa cuando pedis algo creativo (crear, agregar, construir)</li>
+<li>Tambien disponible en senior-feature-builder como Fase 0</li>
+</ul></div>
+<div class="card-section"><div class="card-section-title">📝 PROMPTS DE EJEMPLO</div>
+<div class="prompt-box">"Quiero explorar opciones para un sistema de roles y permisos"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div></div>
+</div></div>
+
+<!-- ========== copywriting ========== -->
+<div class="skill-card" onclick="toggleCard(this)">
+<div class="skill-head"><span class="skill-name">copywriting</span><div><span class="tag tag-ref">Reference</span><span class="chevron">▼</span></div></div>
+<div class="skill-body">
+<div class="card-section"><div class="card-section-title">📌 QUE HACE</div>
+<p>Escribe y mejora copy de marketing para paginas web: homepage, landing, pricing, features, about. Aplica principios de copywriting profesional: claridad, beneficios sobre caracteristicas, call-to-actions efectivos.</p></div>
+<div class="card-section"><div class="card-section-title">⏰ CUANDO USAR</div>
+<ul>
+<li>Cuando necesitas textos para paginas publicas del producto</li>
+<li>Para mejorar copy existente que no convierte</li>
+</ul></div>
+<div class="card-section"><div class="card-section-title">📝 PROMPTS DE EJEMPLO</div>
+<div class="prompt-box">"Escribir copy para la landing page de mi SaaS de gestión de proyectos"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div></div>
+</div></div>
+
+<!-- ========== skill-creator ========== -->
+<div class="skill-card" onclick="toggleCard(this)">
+<div class="skill-head"><span class="skill-name">skill-creator</span><div><span class="tag tag-ref">Reference</span><span class="chevron">▼</span></div></div>
+<div class="skill-body">
+<div class="card-section"><div class="card-section-title">📌 QUE HACE</div>
+<p>Meta-skill: crea, modifica y mide el performance de otras skills. Cuando queres agregar una skill nueva al ecosistema o mejorar una existente, esta skill conoce el formato correcto y las mejores practicas de diseno de skills.</p></div>
+<div class="card-section"><div class="card-section-title">⏰ CUANDO USAR</div>
+<ul>
+<li>Cuando queres crear una skill nueva desde cero</li>
+<li>Para optimizar o expandir una skill existente</li>
+</ul></div>
+<div class="card-section"><div class="card-section-title">📝 PROMPTS DE EJEMPLO</div>
+<div class="prompt-box">"Crear una skill para auditar accesibilidad web (a11y)"<button class="copy-btn" onclick="event.stopPropagation();copyText(this)">Copiar</button></div></div>
+</div></div>
+
+</div>
+</section>
+
+<!-- ===================== COMBOS ===================== -->
+<section id="combos">
+<h2>Combos Reales</h2>
+<p>Secuencias de skills para escenarios del dia a dia.</p>
+
+<table>
+<tr><th>Escenario</th><th>Secuencia de Skills</th></tr>
+<tr><td>Proyecto nuevo completo</td><td><code>generator</code> &rarr; <code>setup-enforcer</code> &rarr; scaffold &rarr; <code>feature-builder</code> &times;N &rarr; auditorias &rarr; <code>compliance</code> &rarr; 🚀</td></tr>
+<tr><td>Feature en proyecto existente</td><td><code>feature-builder</code> &rarr; <code>code-auditor</code> &rarr; <code>security</code> &rarr; <code>prisma-auditor</code> &rarr; ✅</td></tr>
+<tr><td>Cambio pequeno / QA fix</td><td><code>context-aware-coder</code> &rarr; fix &rarr; ✅</td></tr>
+<tr><td>Auditoria full-stack completa</td><td><code>code-auditor</code> &rarr; <code>frontend-auditor</code> &rarr; <code>security</code> &rarr; <code>prisma</code> &rarr; <code>testing</code> &rarr; <code>deploy</code></td></tr>
+<tr><td>Rescate de repo heredado</td><td><code>project-rescue</code> &rarr; <code>feature-builder</code> &times;N &rarr; auditorias &rarr; ✅</td></tr>
+<tr><td>CTO auditando equipo</td><td><code>compliance</code> (o <code>code-auditor</code>) &rarr; <code>security</code> &rarr; <code>testing</code> &rarr; informe</td></tr>
+<tr><td>Onboarding de dev nuevo</td><td><code>context-aware-coder</code> (resumen de patrones) &rarr; dev lee y contribuye</td></tr>
+<tr><td>Setup proyecto nuevo completo</td><td><code>generator</code> &rarr; <code>setup-enforcer</code> &rarr; scaffold &rarr; <code>feature-builder</code> &times;N &rarr; auditorias &rarr; 🚀</td></tr>
+<tr><td>Pre-deploy con frontend</td><td><code>frontend-auditor</code> &rarr; <code>security</code> &rarr; <code>deploy-readiness</code> &rarr; 🚀</td></tr>
+</table>
+</section>
+
+<!-- ===================== FAQ ===================== -->
+<section id="faq">
+<h2>Preguntas Frecuentes</h2>
+
+<div class="faq"><strong>Puedo usar feature-builder sin PROJECT_BLUEPRINT.md?</strong><p>Si. Explora directamente la estructura del proyecto existente.</p></div>
+
+<div class="faq"><strong>Es obligatorio aprobar el blueprint antes de implementar?</strong><p>Si. HARD GATE impide escribir codigo sin tu aprobacion del blueprint.</p></div>
+
+<div class="faq"><strong>blueprint-compliance-auditor funciona con FEATURE_BLUEPRINT.md?</strong><p>No. Solo con PROJECT_BLUEPRINT.md (del generator o del rescue).</p></div>
+
+<div class="faq"><strong>Cuando usar context-aware-coder vs feature-builder?</strong><p><strong>context-aware-coder</strong> para cambios pequenos, QA fixes, agregar campos, ajustes menores. <strong>feature-builder</strong> para funcionalidad nueva completa que necesita discovery, diseno y blueprint.</p></div>
+
+<div class="faq"><strong>project-setup-enforcer se ejecuta una vez o siempre?</strong><p>Una vez al inicio del proyecto para configurar todo. Despues solo para verificar que no se desconfiguro.</p></div>
+
+<div class="faq"><strong>frontend-nextjs-auditor reemplaza a senior-code-auditor?</strong><p>No. code-auditor ve backend + estructura general. frontend-auditor profundiza especificamente en Next.js: RSC boundaries, error.tsx, loading.tsx, performance, middleware.</p></div>
+
+<div class="faq"><strong>Las auditorias individuales o la maestra (compliance)?</strong><p>Con blueprint &rarr; maestra (una pasada). Sin blueprint &rarr; individuales. Despues de un feature &rarr; individuales para profundidad.</p></div>
+
+<div class="faq"><strong>Cuando usar brainstorming vs senior-feature-builder?</strong><p>feature-builder tiene Fase 0 de brainstorming integrada. Usa la skill brainstorming separada solo para explorar ideas que no son features (ej: decisiones de arquitectura, eleccion de libreria).</p></div>
+
+<div class="faq"><strong>Cuantas skills hay en total?</strong><p>19 skills: 1 generator, 2 builders, 7 auditors, 2 enforcers, 1 rescue, 6 reference/support.</p></div>
+</section>
+
+<footer style="margin-top:4rem;padding:2rem 0;border-top:1px solid var(--bd);text-align:center;color:var(--tx2);font-size:.8rem">CTO Skills Ecosystem &middot; 19 Skills &middot; NestJS + Next.js + Prisma &middot; 2026</footer>
+</main>
+
+<script>
+function showPath(i){
+  document.querySelectorAll('.flow-btn').forEach((b,j)=>b.classList.toggle('active',j===i));
+  document.querySelectorAll('.flow-detail').forEach((d,j)=>d.classList.toggle('show',j===i));
+}
+function toggleCard(el){el.classList.toggle('open')}
+function copyText(btn){
+  const box=btn.parentElement;
+  const text=box.textContent.replace('Copiar','').replace('✓ Copiado','').trim();
+  navigator.clipboard.writeText(text);
+  btn.textContent='✓ Copiado';
+  setTimeout(()=>btn.textContent='Copiar',1500);
+}
+// Sidebar active tracking
+const sects=document.querySelectorAll('section');
+const navAs=document.querySelectorAll('.nav a');
+window.addEventListener('scroll',()=>{
+  let c='';
+  sects.forEach(s=>{if(scrollY>=s.offsetTop-120)c=s.id});
+  navAs.forEach(a=>a.classList.toggle('on',a.getAttribute('href')==='#'+c));
+});
+</script>
+</body>
+</html>
