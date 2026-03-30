@@ -28,12 +28,13 @@ import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
+import { Throttle, SkipThrottle } from '@nestjs/throttler';
 import { CurrentUser } from '../../common/decorators';
 import { AuthenticatedUser, AuthenticatedRequest } from '../../common/interfaces/request.interface';
 import { AppConfigService } from '../../config/app.config';
 
 const SESSION_COOKIE = 'zentik.session_token';
-const SESSION_MAX_AGE = 30 * 24 * 60 * 60 * 1000; // 30 days
+const SESSION_MAX_AGE = 30 * 60 * 1000; // 30 minutes
 
 @ApiTags('Auth')
 @Controller('auth')
@@ -44,6 +45,7 @@ export class AuthController {
   ) {}
 
   @Post('register')
+  @Throttle({ short: { ttl: 60000, limit: 3 } })
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
     summary: 'Registrar nuevo usuario',
@@ -63,6 +65,7 @@ export class AuthController {
   }
 
   @Post('login')
+  @Throttle({ short: { ttl: 60000, limit: 5 } })
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Iniciar sesion',
@@ -101,6 +104,7 @@ export class AuthController {
   }
 
   @Post('forgot-password')
+  @Throttle({ short: { ttl: 60000, limit: 3 } })
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Solicitar restablecimiento de contrasena',
@@ -113,6 +117,7 @@ export class AuthController {
   }
 
   @Post('reset-password')
+  @Throttle({ short: { ttl: 60000, limit: 3 } })
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Restablecer contrasena',
@@ -237,7 +242,7 @@ export class AuthController {
     res.cookie(SESSION_COOKIE, token, {
       httpOnly: true,
       secure: isProduction,
-      sameSite: isProduction ? 'none' : 'lax',
+      sameSite: 'lax',
       maxAge: SESSION_MAX_AGE,
       path: '/',
     });
@@ -248,7 +253,7 @@ export class AuthController {
     res.clearCookie(SESSION_COOKIE, {
       httpOnly: true,
       secure: isProduction,
-      sameSite: isProduction ? 'none' : 'lax',
+      sameSite: 'lax',
       path: '/',
     });
   }

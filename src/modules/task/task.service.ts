@@ -152,9 +152,12 @@ export class TaskService {
     return { data: tasks, total, page, limit };
   }
 
-  async getTaskById(taskId: string) {
-    const task = await this.prisma.task.findUnique({
-      where: { id: taskId },
+  async getTaskById(taskId: string, organizationId?: string) {
+    const task = await this.prisma.task.findFirst({
+      where: {
+        id: taskId,
+        ...(organizationId && { project: { organizationId } }),
+      },
       include: {
         project: { select: { id: true, name: true, slug: true, organizationId: true } },
         assignments: { include: { user: { select: { id: true, name: true, email: true, image: true } } } },
@@ -196,9 +199,12 @@ export class TaskService {
     return { ...task, totalDuration };
   }
 
-  async updateTask(taskId: string, dto: UpdateTaskDto, userId: string) {
-    const task = await this.prisma.task.findUnique({
-      where: { id: taskId },
+  async updateTask(taskId: string, dto: UpdateTaskDto, userId: string, organizationId?: string) {
+    const task = await this.prisma.task.findFirst({
+      where: {
+        id: taskId,
+        ...(organizationId && { project: { organizationId } }),
+      },
       include: { project: { select: { organizationId: true } } },
     });
 
@@ -348,9 +354,12 @@ export class TaskService {
     return updated;
   }
 
-  async deleteTask(taskId: string, userId: string) {
-    const task = await this.prisma.task.findUnique({
-      where: { id: taskId },
+  async deleteTask(taskId: string, userId: string, organizationId?: string) {
+    const task = await this.prisma.task.findFirst({
+      where: {
+        id: taskId,
+        ...(organizationId && { project: { organizationId } }),
+      },
       include: { project: { select: { organizationId: true } } },
     });
 

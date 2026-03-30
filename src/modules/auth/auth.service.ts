@@ -16,7 +16,7 @@ import { VerifyEmailDto } from './dto/verify-email.dto';
 import { OrganizationService } from '../organization/organization.service';
 
 const SALT_ROUNDS = 12;
-const SESSION_EXPIRY_DAYS = 30;
+const SESSION_EXPIRY_MINUTES = 30;
 const RESET_TOKEN_EXPIRY_HOURS = 1;
 const VERIFICATION_TOKEN_EXPIRY_HOURS = 24;
 
@@ -480,7 +480,7 @@ export class AuthService {
   ) {
     const token = randomBytes(48).toString('hex');
     const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + SESSION_EXPIRY_DAYS);
+    expiresAt.setMinutes(expiresAt.getMinutes() + SESSION_EXPIRY_MINUTES);
 
     const session = await this.prisma.session.create({
       data: {

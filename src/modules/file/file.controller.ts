@@ -12,6 +12,7 @@ import {
   ParseFilePipe,
   MaxFileSizeValidator,
   NotFoundException,
+  FileTypeValidator,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
@@ -53,7 +54,12 @@ export class FileController {
   async upload(
     @UploadedFile(
       new ParseFilePipe({
-        validators: [new MaxFileSizeValidator({ maxSize: 10 * 1024 * 1024 })], // 10MB
+        validators: [
+          new MaxFileSizeValidator({ maxSize: 10 * 1024 * 1024 }), // 10MB
+          new FileTypeValidator({
+            fileType: /^(image\/(jpeg|png|webp|gif)|application\/pdf|text\/(plain|csv)|application\/vnd\.openxmlformats)$/,
+          }),
+        ],
       }),
     )
     file: Express.Multer.File,

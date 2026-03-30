@@ -73,8 +73,9 @@ export class TaskController {
   @ApiResponse({ status: 200, description: 'Detalle de la tarea' })
   async getTask(
     @Param('taskId') taskId: string,
+    @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.taskService.getTaskById(taskId);
+    return this.taskService.getTaskById(taskId, user.organizationId);
   }
 
   @Patch('tasks/:taskId')
@@ -86,7 +87,7 @@ export class TaskController {
     @Body() dto: UpdateTaskDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.taskService.updateTask(taskId, dto, user.id);
+    return this.taskService.updateTask(taskId, dto, user.id, user.organizationId);
   }
 
   @Delete('tasks/:taskId')
@@ -98,7 +99,7 @@ export class TaskController {
     @Param('taskId') taskId: string,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    await this.taskService.deleteTask(taskId, user.id);
+    await this.taskService.deleteTask(taskId, user.id, user.organizationId);
   }
 
   // ============================================

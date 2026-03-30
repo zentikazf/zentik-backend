@@ -1,6 +1,8 @@
 import { Module, MiddlewareConsumer, NestModule } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { APP_GUARD } from '@nestjs/core';
 import { EventEmitterModule } from '@nestjs/event-emitter';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { CorrelationIdMiddleware } from './common/middleware';
 import { PrismaModule } from './database/prisma.module';
 import { RedisModule } from './infrastructure/redis/redis.module';
@@ -46,6 +48,11 @@ import { MeetingModule } from './modules/meeting/meeting.module';
     }),
     AppConfigModule,
     EventEmitterModule.forRoot(),
+    ThrottlerModule.forRoot([
+      { name: 'short', ttl: 1000, limit: 3 },
+      { name: 'medium', ttl: 10000, limit: 20 },
+      { name: 'long', ttl: 60000, limit: 100 },
+    ]),
 
     // Infrastructure
     PrismaModule,
@@ -79,7 +86,9 @@ import { MeetingModule } from './modules/meeting/meeting.module';
     LabelModule,
     MeetingModule,
   ],
-  providers: [],
+  providers: [
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
+  ],
   exports: [],
 })
 export class AppModule implements NestModule {

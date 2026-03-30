@@ -144,9 +144,12 @@ export class ProjectService {
     return { data, total, page, limit };
   }
 
-  async findById(projectId: string) {
-    const project = await this.prisma.project.findUnique({
-      where: { id: projectId },
+  async findById(projectId: string, organizationId?: string) {
+    const project = await this.prisma.project.findFirst({
+      where: {
+        id: projectId,
+        ...(organizationId && { organizationId }),
+      },
       include: {
         createdBy: {
           select: {
@@ -214,8 +217,8 @@ export class ProjectService {
     };
   }
 
-  async update(projectId: string, dto: UpdateProjectDto) {
-    await this.findById(projectId);
+  async update(projectId: string, dto: UpdateProjectDto, organizationId?: string) {
+    await this.findById(projectId, organizationId);
 
     const project = await this.prisma.project.update({
       where: { id: projectId },
@@ -272,8 +275,8 @@ export class ProjectService {
     return project;
   }
 
-  async softDelete(projectId: string, userId: string) {
-    const project = await this.findById(projectId);
+  async softDelete(projectId: string, userId: string, organizationId?: string) {
+    const project = await this.findById(projectId, organizationId);
 
     const updated = await this.prisma.project.update({
       where: { id: projectId },

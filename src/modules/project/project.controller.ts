@@ -64,8 +64,11 @@ export class ProjectController {
   @Get('projects/:projectId')
   @Permissions('read:projects')
   @ApiOperation({ summary: 'Obtener detalles de un proyecto' })
-  findById(@Param('projectId') projectId: string) {
-    return this.projectService.findById(projectId);
+  findById(
+    @Param('projectId') projectId: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.projectService.findById(projectId, user.organizationId);
   }
 
   @Patch('projects/:projectId')
@@ -74,8 +77,9 @@ export class ProjectController {
   update(
     @Param('projectId') projectId: string,
     @Body() dto: UpdateProjectDto,
+    @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.projectService.update(projectId, dto);
+    return this.projectService.update(projectId, dto, user.organizationId);
   }
 
   @Delete('projects/:projectId')
@@ -86,7 +90,7 @@ export class ProjectController {
     @Param('projectId') projectId: string,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.projectService.softDelete(projectId, user.id);
+    return this.projectService.softDelete(projectId, user.id, user.organizationId);
   }
 
   // ============================================
