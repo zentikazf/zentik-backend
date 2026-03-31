@@ -38,12 +38,10 @@ export class BoardService {
     });
 
     const defaultColumns = [
-      { name: 'Descubrimiento', position: 0, color: '#8B5CF6', mappedStatus: 'BACKLOG' as TaskStatus },
-      { name: 'Planificación', position: 1, color: '#3B82F6', mappedStatus: 'TODO' as TaskStatus },
-      { name: 'Desarrollo', position: 2, color: '#F59E0B', mappedStatus: 'IN_PROGRESS' as TaskStatus },
-      { name: 'Testing', position: 3, color: '#10B981', mappedStatus: 'IN_REVIEW' as TaskStatus },
-      { name: 'Deploy', position: 4, color: '#06B6D4', mappedStatus: 'DONE' as TaskStatus },
-      { name: 'Soporte', position: 5, color: '#EF4444', mappedStatus: 'DONE' as TaskStatus },
+      { name: 'Pendiente',   position: 0, color: '#8B5CF6', mappedStatus: 'BACKLOG' as TaskStatus },
+      { name: 'Desarrollo',  position: 1, color: '#F59E0B', mappedStatus: 'IN_PROGRESS' as TaskStatus },
+      { name: 'Testing',     position: 2, color: '#10B981', mappedStatus: 'IN_REVIEW' as TaskStatus },
+      { name: 'Produccion',  position: 3, color: '#06B6D4', mappedStatus: 'DONE' as TaskStatus },
     ];
 
     const board = await this.prisma.$transaction(async (tx) => {
