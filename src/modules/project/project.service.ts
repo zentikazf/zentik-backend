@@ -47,7 +47,7 @@ export class ProjectService {
           name: dto.name,
           description: dto.description,
           slug,
-          status: dto.status || 'DEFINITION',
+          status: dto.status || 'DISCOVERY',
           startDate: dto.startDate ? new Date(dto.startDate) : null,
           endDate: dto.endDate ? new Date(dto.endDate) : null,
           createdById: userId,

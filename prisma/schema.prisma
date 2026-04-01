@@ -18,9 +18,12 @@ datasource db {
 // ============================================================================
 
 enum ProjectStatus {
-  DEFINITION
+  DISCOVERY
+  PLANNING
   DEVELOPMENT
-  PRODUCTION
+  TESTING
+  DEPLOY
+  SUPPORT
   ON_HOLD
   COMPLETED
 }
