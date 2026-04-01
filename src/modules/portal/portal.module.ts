@@ -7,5 +7,6 @@ import { PortalService } from './portal.service';
   imports: [PrismaModule],
   controllers: [PortalController],
   providers: [PortalService],
+  exports: [PortalService],
 })
 export class PortalModule {}

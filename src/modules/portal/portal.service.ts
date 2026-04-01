@@ -5,6 +5,7 @@ import { AppException } from '../../common/filters/app-exception';
 import { CreateSuggestionDto } from './dto/create-suggestion.dto';
 import { UpdateSuggestionDto } from './dto/update-suggestion.dto';
 import { domainEvent } from '../../common/events/domain-event.helper';
+import { CreateTicketDto } from '../ticket/dto/create-ticket.dto';
 
 @Injectable()
 export class PortalService {
@@ -232,6 +233,139 @@ export class PortalService {
         client: { select: { id: true, name: true, email: true } },
       },
     });
+  }
+
+  // ── Ticket methods (Portal) ────────────────────────────
+
+  async getTickets(userId: string) {
+    const client = await this.getClientByUserId(userId);
+
+    return this.prisma.ticket.findMany({
+      where: { clientId: client.id },
+      include: {
+        project: { select: { id: true, name: true } },
+        task: { select: { id: true, status: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async getTicketDetail(userId: string, ticketId: string) {
+    const client = await this.getClientByUserId(userId);
+
+    const ticket = await this.prisma.ticket.findFirst({
+      where: { id: ticketId, clientId: client.id },
+      include: {
+        project: { select: { id: true, name: true } },
+        task: { select: { id: true, title: true, status: true } },
+        channel: { select: { id: true, name: true } },
+      },
+    });
+
+    if (!ticket) {
+      throw new AppException('Ticket no encontrado', 'TICKET_NOT_FOUND', 404);
+    }
+
+    return ticket;
+  }
+
+  async createTicket(userId: string, projectId: string, dto: CreateTicketDto) {
+    const client = await this.getClientByUserId(userId);
+
+    const project = await this.prisma.project.findFirst({
+      where: { id: projectId, clientId: client.id },
+      select: {
+        id: true,
+        name: true,
+        organizationId: true,
+        createdById: true,
+        members: { select: { userId: true } },
+      },
+    });
+
+    if (!project) {
+      throw new AppException('Proyecto no encontrado', 'PROJECT_NOT_FOUND', 404);
+    }
+
+    const categoryLabel = dto.category === 'SUPPORT_REQUEST' ? 'Soporte' : 'Desarrollo';
+    const channelName = `[${categoryLabel}] ${dto.title}`;
+    const taskTitle = `[Ticket] ${dto.title}`;
+
+    // Collect all org member user IDs for the channel
+    const orgMemberIds = project.members.map((m) => m.userId);
+    // Add client user if not already present
+    if (userId && !orgMemberIds.includes(userId)) {
+      orgMemberIds.push(userId);
+    }
+
+    const ticket = await this.prisma.$transaction(async (tx) => {
+      // 1. Create the task in the project kanban
+      const maxPosition = await tx.task.aggregate({
+        where: { projectId },
+        _max: { position: true },
+      });
+
+      const task = await tx.task.create({
+        data: {
+          projectId,
+          title: taskTitle,
+          description: dto.description,
+          priority: (dto.priority as any) ?? 'MEDIUM',
+          status: 'BACKLOG',
+          position: (maxPosition._max.position ?? -1) + 1,
+          createdById: project.createdById,
+          clientVisible: true,
+        },
+      });
+
+      // 2. Create the TICKET channel with all members
+      const channel = await tx.channel.create({
+        data: {
+          name: channelName,
+          type: 'TICKET',
+          organizationId: project.organizationId,
+          createdById: project.createdById,
+          members: {
+            create: orgMemberIds.map((id) => ({ userId: id })),
+          },
+        },
+      });
+
+      // 3. Create the ticket linking task and channel
+      const created = await tx.ticket.create({
+        data: {
+          organizationId: project.organizationId,
+          projectId,
+          clientId: client.id,
+          title: dto.title,
+          description: dto.description,
+          category: dto.category as any,
+          priority: (dto.priority as any) ?? 'MEDIUM',
+          taskId: task.id,
+          channelId: channel.id,
+        },
+        include: {
+          project: { select: { id: true, name: true } },
+          task: { select: { id: true, title: true, status: true } },
+          channel: { select: { id: true, name: true } },
+        },
+      });
+
+      return created;
+    });
+
+    this.logger.log(`Ticket created: ${ticket.id} by client: ${client.id} for project: ${projectId}`);
+
+    this.eventEmitter.emit('ticket.created', {
+      ...domainEvent('ticket.created', 'ticket', ticket.id, project.organizationId, userId),
+      ticketId: ticket.id,
+      title: dto.title,
+      category: dto.category,
+      projectId,
+      clientName: client.name,
+    });
+
+    return ticket;
   }
 
   async convertToTask(projectId: string, suggestionId: string) {

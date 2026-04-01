@@ -37,6 +37,7 @@ import { ClientModule } from './modules/client/client.module';
 import { PortalModule } from './modules/portal/portal.module';
 import { LabelModule } from './modules/label/label.module';
 import { MeetingModule } from './modules/meeting/meeting.module';
+import { TicketModule } from './modules/ticket/ticket.module';
 
 @Module({
   imports: [
@@ -85,6 +86,7 @@ import { MeetingModule } from './modules/meeting/meeting.module';
     PortalModule,
     LabelModule,
     MeetingModule,
+    TicketModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

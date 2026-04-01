@@ -113,6 +113,9 @@ enum NotificationType {
   ALCANCE_REJECTED
   MEETING_SCHEDULED
   SUGGESTION_RECEIVED
+  TICKET_CREATED
+  TICKET_MESSAGE
+  TICKET_UPDATED
 }
 
 enum AlcanceStatus {
@@ -126,6 +129,19 @@ enum ChannelType {
   DM
   GROUP
   PROJECT
+  TICKET
+}
+
+enum TicketCategory {
+  SUPPORT_REQUEST
+  NEW_DEVELOPMENT
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
 }
 
 enum FileCategory {
@@ -242,6 +258,7 @@ model Organization {
   files        File[]
   labels       Label[]
   clients      Client[]
+  tickets      Ticket[]
 
   @@index([slug])
   @@map("organizations")
@@ -396,6 +413,7 @@ model Project {
   invoices     Invoice[]
   budgetItems  BudgetItem[]
   suggestions  Suggestion[]
+  tickets      Ticket[]
   meetings     Meeting[]
 
   @@unique([organizationId, slug])
@@ -527,6 +545,7 @@ model Task {
   files        File[]
   invoiceItems InvoiceItem[]
   suggestion   Suggestion?
+  ticket       Ticket?
 
   @@index([projectId])
   @@index([boardColumnId])
@@ -636,6 +655,7 @@ model Channel {
   createdBy    User            @relation("ChannelCreator", fields: [createdById], references: [id])
   messages     Message[]
   members      ChannelMember[]
+  ticket       Ticket?
 
   @@index([organizationId])
   @@index([projectId])
@@ -861,6 +881,7 @@ model Client {
   user         User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
   projects     Project[]
   suggestions  Suggestion[]
+  tickets      Ticket[]
 
   @@index([organizationId])
   @@map("clients")
@@ -933,4 +954,37 @@ model Meeting {
   @@index([projectId])
   @@index([date])
   @@map("meetings")
+}
+
+// ============================================================================
+// TICKETS (Portal de Clientes - Solicitudes)
+// ============================================================================
+
+model Ticket {
+  id             String             @id @default(cuid())
+  organizationId String             @map("organization_id")
+  projectId      String             @map("project_id")
+  clientId       String             @map("client_id")
+  title          String
+  description    String?
+  category       TicketCategory
+  status         TicketStatus       @default(OPEN)
+  priority       SuggestionPriority @default(MEDIUM)
+  adminNotes     String?            @map("admin_notes")
+  taskId         String?            @unique @map("task_id")
+  channelId      String?            @unique @map("channel_id")
+  createdAt      DateTime           @default(now()) @map("created_at")
+  updatedAt      DateTime           @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  project      Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  client       Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  task         Task?        @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  channel      Channel?     @relation(fields: [channelId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+  @@index([projectId])
+  @@index([clientId])
+  @@index([status])
+  @@map("tickets")
 }

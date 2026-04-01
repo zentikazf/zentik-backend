@@ -16,6 +16,7 @@ import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { PortalService } from './portal.service';
 import { CreateSuggestionDto } from './dto/create-suggestion.dto';
 import { UpdateSuggestionDto } from './dto/update-suggestion.dto';
+import { CreateTicketDto } from '../ticket/dto/create-ticket.dto';
 
 @ApiTags('Portal')
 @ApiBearerAuth()
@@ -92,5 +93,33 @@ export class PortalController {
     @Param('suggestionId') suggestionId: string,
   ) {
     return this.portalService.convertToTask(projectId, suggestionId);
+  }
+
+  // ── Ticket endpoints (Portal) ─────────────────────────────
+
+  @Get('portal/tickets')
+  @ApiOperation({ summary: 'Listar tickets del cliente autenticado' })
+  getTickets(@CurrentUser() user: AuthenticatedUser) {
+    return this.portalService.getTickets(user.id);
+  }
+
+  @Get('portal/tickets/:ticketId')
+  @ApiOperation({ summary: 'Detalle de un ticket del cliente' })
+  getTicketDetail(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('ticketId') ticketId: string,
+  ) {
+    return this.portalService.getTicketDetail(user.id, ticketId);
+  }
+
+  @Post('portal/projects/:projectId/tickets')
+  @ApiOperation({ summary: 'Crear un ticket en un proyecto' })
+  @HttpCode(HttpStatus.CREATED)
+  createTicket(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('projectId') projectId: string,
+    @Body() dto: CreateTicketDto,
+  ) {
+    return this.portalService.createTicket(user.id, projectId, dto);
   }
 }
