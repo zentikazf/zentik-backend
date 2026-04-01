@@ -76,7 +76,7 @@ export class ReportService {
     ] = await Promise.all([
       this.prisma.project.count({ where: { organizationId: orgId } }),
       this.prisma.project.count({
-        where: { organizationId: orgId, status: { in: ['DEFINITION', 'DEVELOPMENT', 'PRODUCTION'] } },
+        where: { organizationId: orgId, status: { in: ['DISCOVERY', 'PLANNING', 'DEVELOPMENT', 'TESTING', 'DEPLOY', 'SUPPORT'] } },
       }),
       this.prisma.organizationMember.count({
         where: { organizationId: orgId },
