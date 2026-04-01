@@ -1,24 +1,11 @@
--- Actualizar datos existentes ANTES de cambiar el tipo
-UPDATE "Project" SET status = 'DISCOVERY' WHERE status = 'DEFINITION';
-UPDATE "Project" SET status = 'DEPLOY' WHERE status = 'PRODUCTION';
+-- Renombrar valores existentes del enum (PostgreSQL 10+)
+ALTER TYPE "ProjectStatus" RENAME VALUE 'DEFINITION' TO 'DISCOVERY';
+ALTER TYPE "ProjectStatus" RENAME VALUE 'PRODUCTION' TO 'DEPLOY';
 
--- Renombrar enum viejo
-ALTER TYPE "ProjectStatus" RENAME TO "ProjectStatus_old";
+-- Agregar valores nuevos
+ALTER TYPE "ProjectStatus" ADD VALUE IF NOT EXISTS 'PLANNING';
+ALTER TYPE "ProjectStatus" ADD VALUE IF NOT EXISTS 'TESTING';
+ALTER TYPE "ProjectStatus" ADD VALUE IF NOT EXISTS 'SUPPORT';
 
--- Crear enum nuevo con los 8 valores
-CREATE TYPE "ProjectStatus" AS ENUM (
-  'DISCOVERY', 'PLANNING', 'DEVELOPMENT', 'TESTING',
-  'DEPLOY', 'SUPPORT', 'ON_HOLD', 'COMPLETED'
-);
-
--- Migrar la columna al nuevo tipo
-ALTER TABLE "Project"
-  ALTER COLUMN "status" TYPE "ProjectStatus"
-  USING "status"::text::"ProjectStatus";
-
--- Cambiar default
-ALTER TABLE "Project"
-  ALTER COLUMN "status" SET DEFAULT 'DISCOVERY'::"ProjectStatus";
-
--- Limpiar
-DROP TYPE "ProjectStatus_old";
+-- Actualizar el default del modelo Project
+ALTER TABLE "Project" ALTER COLUMN "status" SET DEFAULT 'DISCOVERY'::"ProjectStatus";
