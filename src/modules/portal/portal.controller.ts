@@ -95,6 +95,14 @@ export class PortalController {
     return this.portalService.convertToTask(projectId, suggestionId);
   }
 
+  // ── Hours endpoint (Portal) ──────────────────────────────
+
+  @Get('portal/hours')
+  @ApiOperation({ summary: 'Resumen de horas contratadas del cliente' })
+  getMyHours(@CurrentUser() user: AuthenticatedUser) {
+    return this.portalService.getMyHours(user.id);
+  }
+
   // ── Ticket endpoints (Portal) ─────────────────────────────
 
   @Get('portal/tickets')

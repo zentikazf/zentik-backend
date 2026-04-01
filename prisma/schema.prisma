@@ -165,6 +165,7 @@ model User {
   image         String?
   onboardingCompleted Boolean @default(false) @map("onboarding_completed")
   mustChangePassword  Boolean @default(false) @map("must_change_password")
+  clientId      String?  @map("client_id")
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @updatedAt @map("updated_at")
 
@@ -190,9 +191,11 @@ model User {
   createdSprints      Sprint[]             @relation("SprintCreator")
   channelMemberships  ChannelMember[]
   responsibleProjects Project[]            @relation("projectResponsible")
-  clientProfile       Client?
+  clientProfile       Client?              @relation("ClientOwner")
+  clientGroup         Client?              @relation("ClientUsers", fields: [clientId], references: [id], onDelete: SetNull)
   createdMeetings     Meeting[]            @relation("MeetingCreator")
 
+  @@index([clientId])
   @@map("users")
 }
 
@@ -544,8 +547,9 @@ model Task {
   comments     Comment[]
   files        File[]
   invoiceItems InvoiceItem[]
-  suggestion   Suggestion?
-  ticket       Ticket?
+  suggestion        Suggestion?
+  ticket            Ticket?
+  hoursTransactions HoursTransaction[]
 
   @@index([projectId])
   @@index([boardColumnId])
@@ -867,21 +871,26 @@ model AuditLog {
 // ============================================================================
 
 model Client {
-  id             String   @id @default(cuid())
-  organizationId String   @map("organization_id")
-  name           String
-  email          String?
-  phone          String?
-  notes          String?
-  userId         String?  @unique @map("user_id")
-  createdAt      DateTime @default(now()) @map("created_at")
-  updatedAt      DateTime @updatedAt @map("updated_at")
+  id              String   @id @default(cuid())
+  organizationId  String   @map("organization_id")
+  name            String
+  email           String?
+  phone           String?
+  notes           String?
+  userId          String?  @unique @map("user_id")
+  contractedHours Float    @default(0) @map("contracted_hours")
+  usedHours       Float    @default(0) @map("used_hours")
+  loanedHours     Float    @default(0) @map("loaned_hours")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  user         User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
-  projects     Project[]
-  suggestions  Suggestion[]
-  tickets      Ticket[]
+  organization      Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user              User?              @relation("ClientOwner", fields: [userId], references: [id], onDelete: SetNull)
+  users             User[]             @relation("ClientUsers")
+  projects          Project[]
+  suggestions       Suggestion[]
+  tickets           Ticket[]
+  hoursTransactions HoursTransaction[]
 
   @@index([organizationId])
   @@map("clients")
@@ -987,4 +996,27 @@ model Ticket {
   @@index([clientId])
   @@index([status])
   @@map("tickets")
+}
+
+// ============================================================================
+// HOURS TRACKING (Horas Contratadas)
+// ============================================================================
+
+model HoursTransaction {
+  id        String   @id @default(cuid())
+  clientId  String   @map("client_id")
+  type      String   // USAGE | LOAN | PURCHASE | REFUND
+  hours     Float
+  taskId    String?  @map("task_id")
+  note      String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  task   Task?  @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  @@index([clientId])
+  @@index([taskId])
+  @@index([type])
+  @@index([createdAt])
+  @@map("hours_transactions")
 }

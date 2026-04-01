@@ -88,4 +88,56 @@ export class ClientController {
   ) {
     return this.clientService.createClientUser(orgId, clientId, dto);
   }
+
+  // ── Sub-usuarios ──────────────────────────────────────
+
+  @Post(':clientId/users')
+  @ApiOperation({ summary: 'Crear sub-usuario para un cliente' })
+  @HttpCode(HttpStatus.CREATED)
+  createSubUser(
+    @Param('orgId') orgId: string,
+    @Param('clientId') clientId: string,
+    @Body() dto: CreateClientUserDto,
+  ) {
+    return this.clientService.createSubUser(orgId, clientId, dto);
+  }
+
+  @Get(':clientId/users')
+  @ApiOperation({ summary: 'Listar sub-usuarios de un cliente' })
+  listSubUsers(@Param('clientId') clientId: string) {
+    return this.clientService.listSubUsers(clientId);
+  }
+
+  @Delete(':clientId/users/:userId')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({ summary: 'Eliminar sub-usuario de un cliente' })
+  deleteSubUser(
+    @Param('orgId') orgId: string,
+    @Param('clientId') clientId: string,
+    @Param('userId') userId: string,
+  ) {
+    return this.clientService.deleteSubUser(orgId, clientId, userId);
+  }
+
+  // ── Horas contratadas ─────────────────────────────────
+
+  @Get(':clientId/hours')
+  @ApiOperation({ summary: 'Resumen de horas contratadas del cliente' })
+  getHoursSummary(
+    @Param('orgId') orgId: string,
+    @Param('clientId') clientId: string,
+  ) {
+    return this.clientService.getHoursSummary(orgId, clientId);
+  }
+
+  @Post(':clientId/hours')
+  @ApiOperation({ summary: 'Agregar horas contratadas a un cliente' })
+  @HttpCode(HttpStatus.CREATED)
+  addHours(
+    @Param('orgId') orgId: string,
+    @Param('clientId') clientId: string,
+    @Body() body: { hours: number; note?: string },
+  ) {
+    return this.clientService.addHours(orgId, clientId, body.hours, body.note);
+  }
 }

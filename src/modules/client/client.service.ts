@@ -66,12 +66,14 @@ export class ClientService {
     const client = await this.prisma.client.findFirst({
       where: { id: clientId, organizationId: orgId },
       include: {
-        _count: { select: { projects: true } },
+        _count: { select: { projects: true, users: true } },
         projects: {
           select: { id: true, name: true, status: true },
           orderBy: { createdAt: 'desc' },
           take: 10,
         },
+        user: { select: { id: true, name: true, email: true } },
+        users: { select: { id: true, name: true, email: true, createdAt: true } },
       },
     });
 
@@ -216,5 +218,194 @@ export class ClientService {
 
     this.logger.log(`Client user created: ${updatedClient.userId} for client: ${clientId}`);
     return updatedClient;
+  }
+
+  // ── Sub-usuarios ──────────────────────────────────────
+
+  async createSubUser(orgId: string, clientId: string, dto: CreateClientUserDto) {
+    const client = await this.findById(orgId, clientId);
+
+    const existingUser = await this.prisma.user.findUnique({
+      where: { email: dto.email.toLowerCase() },
+    });
+    if (existingUser) {
+      throw new DuplicateResourceException('usuario', 'email', dto.email);
+    }
+
+    let clienteRole = await this.prisma.role.findFirst({
+      where: { organizationId: orgId, name: 'Cliente' },
+    });
+    if (!clienteRole) {
+      clienteRole = await this.prisma.role.create({
+        data: {
+          organizationId: orgId,
+          name: 'Cliente',
+          description: 'Cliente externo con acceso al portal',
+          isSystem: true,
+          isDefault: false,
+        },
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(dto.password, 12);
+
+    const user = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.user.create({
+        data: {
+          email: dto.email.toLowerCase(),
+          name: dto.name,
+          emailVerified: true,
+          mustChangePassword: true,
+          clientId: client.id,
+        },
+      });
+
+      await tx.account.create({
+        data: {
+          userId: created.id,
+          accountId: created.id,
+          providerId: 'credential',
+          password: hashedPassword,
+        },
+      });
+
+      await tx.organizationMember.create({
+        data: {
+          organizationId: orgId,
+          userId: created.id,
+          roleId: clienteRole.id,
+        },
+      });
+
+      return created;
+    });
+
+    this.logger.log(`Sub-user created: ${user.id} for client: ${clientId}`);
+    return { id: user.id, name: user.name, email: user.email, createdAt: user.createdAt };
+  }
+
+  async listSubUsers(clientId: string) {
+    return this.prisma.user.findMany({
+      where: { clientId },
+      select: { id: true, name: true, email: true, createdAt: true },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async deleteSubUser(orgId: string, clientId: string, userId: string) {
+    const user = await this.prisma.user.findFirst({
+      where: { id: userId, clientId },
+    });
+    if (!user) {
+      throw new AppException('Sub-usuario no encontrado', 'SUB_USER_NOT_FOUND', 404);
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.organizationMember.deleteMany({
+        where: { userId, organizationId: orgId },
+      });
+      await tx.account.deleteMany({ where: { userId } });
+      await tx.session.deleteMany({ where: { userId } });
+      await tx.user.delete({ where: { id: userId } });
+    });
+
+    this.logger.log(`Sub-user deleted: ${userId} from client: ${clientId}`);
+  }
+
+  // ── Horas contratadas ─────────────────────────────────
+
+  async getHoursSummary(orgId: string, clientId: string) {
+    const client = await this.findById(orgId, clientId);
+    const available = Math.max(client.contractedHours - client.usedHours - client.loanedHours, 0);
+
+    const transactions = await this.prisma.hoursTransaction.findMany({
+      where: { clientId },
+      include: {
+        task: { select: { id: true, title: true, project: { select: { id: true, name: true } } } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    });
+
+    return {
+      contractedHours: client.contractedHours,
+      usedHours: client.usedHours,
+      loanedHours: client.loanedHours,
+      availableHours: available,
+      transactions,
+    };
+  }
+
+  async addHours(orgId: string, clientId: string, hours: number, note?: string) {
+    const client = await this.findById(orgId, clientId);
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      await tx.hoursTransaction.create({
+        data: {
+          clientId,
+          type: 'PURCHASE',
+          hours,
+          note: note || `Carga de ${hours} horas`,
+        },
+      });
+
+      return tx.client.update({
+        where: { id: clientId },
+        data: { contractedHours: { increment: hours } },
+      });
+    });
+
+    this.logger.log(`Added ${hours} hours to client: ${clientId}`);
+    return updated;
+  }
+
+  async recordHoursUsage(taskId: string, durationMinutes: number) {
+    const task = await this.prisma.task.findUnique({
+      where: { id: taskId },
+      select: {
+        id: true,
+        title: true,
+        project: {
+          select: { clientId: true },
+        },
+      },
+    });
+
+    if (!task?.project?.clientId) return;
+
+    const clientId = task.project.clientId;
+    const hours = parseFloat((durationMinutes / 60).toFixed(4));
+
+    const client = await this.prisma.client.findUnique({ where: { id: clientId } });
+    if (!client) return;
+
+    const available = client.contractedHours - client.usedHours;
+    const isLoan = available <= 0;
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.hoursTransaction.create({
+        data: {
+          clientId,
+          type: isLoan ? 'LOAN' : 'USAGE',
+          hours,
+          taskId,
+          note: `Tiempo registrado en: ${task.title}`,
+        },
+      });
+
+      if (isLoan) {
+        await tx.client.update({
+          where: { id: clientId },
+          data: { loanedHours: { increment: hours } },
+        });
+      } else {
+        await tx.client.update({
+          where: { id: clientId },
+          data: { usedHours: { increment: hours } },
+        });
+      }
+    });
+
+    this.logger.log(`Recorded ${hours}h ${isLoan ? '(loan)' : '(usage)'} for client: ${clientId}, task: ${taskId}`);
   }
 }

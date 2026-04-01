@@ -17,13 +17,25 @@ export class PortalService {
   ) {}
 
   private async getClientByUserId(userId: string) {
-    const client = await this.prisma.client.findFirst({
+    // Check if owner
+    const clientAsOwner = await this.prisma.client.findFirst({
       where: { userId },
     });
-    if (!client) {
-      throw new AppException('No se encontró un perfil de cliente', 'CLIENT_NOT_FOUND', 403);
+    if (clientAsOwner) return clientAsOwner;
+
+    // Check if sub-user
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { clientId: true },
+    });
+    if (user?.clientId) {
+      const client = await this.prisma.client.findUnique({
+        where: { id: user.clientId },
+      });
+      if (client) return client;
     }
-    return client;
+
+    throw new AppException('No se encontró un perfil de cliente', 'CLIENT_NOT_FOUND', 403);
   }
 
   async getProjects(userId: string) {
@@ -366,6 +378,37 @@ export class PortalService {
     });
 
     return ticket;
+  }
+
+  async getMyHours(userId: string) {
+    const client = await this.getClientByUserId(userId);
+    const available = Math.max(client.contractedHours - client.usedHours - client.loanedHours, 0);
+
+    const recentTransactions = await this.prisma.hoursTransaction.findMany({
+      where: { clientId: client.id },
+      include: {
+        task: {
+          select: {
+            id: true,
+            title: true,
+            project: { select: { id: true, name: true } },
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+    });
+
+    return {
+      contractedHours: client.contractedHours,
+      usedHours: client.usedHours,
+      loanedHours: client.loanedHours,
+      availableHours: available,
+      percentUsed: client.contractedHours > 0
+        ? parseFloat(((client.usedHours / client.contractedHours) * 100).toFixed(1))
+        : 0,
+      transactions: recentTransactions,
+    };
   }
 
   async convertToTask(projectId: string, suggestionId: string) {
