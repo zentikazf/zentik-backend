@@ -367,7 +367,7 @@ model Project {
   name           String
   description    String?
   slug           String
-  status         ProjectStatus @default(DEFINITION)
+  status         ProjectStatus @default(DISCOVERY)
   startDate      DateTime?     @map("start_date")
   endDate        DateTime?     @map("end_date")
   createdById    String        @map("created_by_id")
