@@ -7,5 +7,5 @@ ALTER TYPE "ProjectStatus" ADD VALUE IF NOT EXISTS 'PLANNING';
 ALTER TYPE "ProjectStatus" ADD VALUE IF NOT EXISTS 'TESTING';
 ALTER TYPE "ProjectStatus" ADD VALUE IF NOT EXISTS 'SUPPORT';
 
--- Actualizar el default del modelo Project
-ALTER TABLE "Project" ALTER COLUMN "status" SET DEFAULT 'DISCOVERY'::"ProjectStatus";
+-- Actualizar el default del modelo Project (tabla mapeada como "projects")
+ALTER TABLE "projects" ALTER COLUMN "status" SET DEFAULT 'DISCOVERY'::"ProjectStatus";

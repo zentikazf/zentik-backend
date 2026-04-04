@@ -89,6 +89,18 @@ export class ClientController {
     return this.clientService.createClientUser(orgId, clientId, dto);
   }
 
+  // ── Portal toggle ──────────────────────────────────────
+
+  @Patch(':clientId/portal')
+  @ApiOperation({ summary: 'Habilitar o deshabilitar portal de un cliente' })
+  togglePortal(
+    @Param('orgId') orgId: string,
+    @Param('clientId') clientId: string,
+    @Body() body: { enabled: boolean },
+  ) {
+    return this.clientService.togglePortal(orgId, clientId, body.enabled);
+  }
+
   // ── Sub-usuarios ──────────────────────────────────────
 
   @Post(':clientId/users')

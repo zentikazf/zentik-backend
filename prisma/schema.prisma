@@ -35,6 +35,11 @@ enum TaskPriority {
   LOW
 }
 
+enum TaskType {
+  PROJECT
+  SUPPORT
+}
+
 enum TaskStatus {
   BACKLOG
   TODO
@@ -520,6 +525,7 @@ model Task {
   title          String
   description    String?
   status         TaskStatus   @default(BACKLOG)
+  type           TaskType     @default(PROJECT)
   priority       TaskPriority @default(MEDIUM)
   position       Int          @default(0)
   storyPoints    Int?         @map("story_points")
@@ -878,6 +884,7 @@ model Client {
   phone           String?
   notes           String?
   userId          String?  @unique @map("user_id")
+  portalEnabled   Boolean  @default(false) @map("portal_enabled")
   contractedHours Float    @default(0) @map("contracted_hours")
   usedHours       Float    @default(0) @map("used_hours")
   loanedHours     Float    @default(0) @map("loaned_hours")

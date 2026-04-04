@@ -343,11 +343,11 @@ export class TaskService {
       });
     }
 
-    // Emit task.completed when status changes to DONE
+    // Emit task.completed when status changes to DONE (include type for hours listener)
     if (dto.status === 'DONE' && task.status !== 'DONE') {
       this.eventEmitter.emit('task.completed', {
         ...domainEvent('task.completed', 'task', taskId, task.project.organizationId, userId, { title: updated!.title, projectId: task.projectId }),
-        task: updated,
+        task: { ...updated, type: (updated as any).type },
       });
     }
 

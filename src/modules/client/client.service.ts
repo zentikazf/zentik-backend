@@ -6,12 +6,16 @@ import { CreateClientDto, UpdateClientDto } from './dto';
 import { CreateClientUserDto } from './dto/create-client-user.dto';
 import { AppException, DuplicateResourceException } from '../../common/filters/app-exception';
 import { PaginatedResult } from '../../common/interfaces/request.interface';
+import { AuditService } from '../audit/audit.service';
 
 @Injectable()
 export class ClientService {
   private readonly logger = new Logger(ClientService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly auditService: AuditService,
+  ) {}
 
   async create(orgId: string, dto: CreateClientDto) {
     const client = await this.prisma.client.create({
@@ -25,6 +29,13 @@ export class ClientService {
     });
 
     this.logger.log(`Client created: ${client.id} in org: ${orgId}`);
+    await this.auditService.create({
+      organizationId: orgId,
+      action: 'client.created',
+      resource: 'client',
+      resourceId: client.id,
+      newData: { name: dto.name, email: dto.email },
+    });
     return client;
   }
 
@@ -111,15 +122,30 @@ export class ClientService {
     });
 
     this.logger.log(`Client updated: ${clientId}`);
+    await this.auditService.create({
+      organizationId: orgId,
+      action: 'client.updated',
+      resource: 'client',
+      resourceId: clientId,
+      oldData: { name: existing.name, email: existing.email },
+      newData: { name: dto.name, email: dto.email },
+    });
     return client;
   }
 
   async delete(orgId: string, clientId: string) {
-    await this.findById(orgId, clientId);
+    const client = await this.findById(orgId, clientId);
 
     await this.prisma.client.delete({ where: { id: clientId } });
 
     this.logger.log(`Client deleted: ${clientId} from org: ${orgId}`);
+    await this.auditService.create({
+      organizationId: orgId,
+      action: 'client.deleted',
+      resource: 'client',
+      resourceId: clientId,
+      oldData: { name: client.name, email: client.email },
+    });
   }
 
   async createClientUser(orgId: string, clientId: string, dto: CreateClientUserDto) {
@@ -217,7 +243,33 @@ export class ClientService {
     });
 
     this.logger.log(`Client user created: ${updatedClient.userId} for client: ${clientId}`);
+    await this.auditService.create({
+      organizationId: orgId,
+      action: 'client.user.created',
+      resource: 'client',
+      resourceId: clientId,
+      newData: { email: dto.email, name: dto.name, userId: updatedClient.userId },
+    });
     return updatedClient;
+  }
+
+  // ── Portal toggle ──────────────────────────────────────
+
+  async togglePortal(orgId: string, clientId: string, enabled: boolean) {
+    await this.findById(orgId, clientId);
+    const updated = await this.prisma.client.update({
+      where: { id: clientId },
+      data: { portalEnabled: enabled },
+    });
+    this.logger.log(`Portal ${enabled ? 'enabled' : 'disabled'} for client: ${clientId}`);
+    await this.auditService.create({
+      organizationId: orgId,
+      action: 'client.portal.toggled',
+      resource: 'client',
+      resourceId: clientId,
+      newData: { portalEnabled: enabled },
+    });
+    return updated;
   }
 
   // ── Sub-usuarios ──────────────────────────────────────
@@ -281,6 +333,13 @@ export class ClientService {
     });
 
     this.logger.log(`Sub-user created: ${user.id} for client: ${clientId}`);
+    await this.auditService.create({
+      organizationId: orgId,
+      action: 'client.subuser.created',
+      resource: 'client',
+      resourceId: clientId,
+      newData: { email: dto.email, name: dto.name, userId: user.id },
+    });
     return { id: user.id, name: user.name, email: user.email, createdAt: user.createdAt };
   }
 
@@ -310,6 +369,13 @@ export class ClientService {
     });
 
     this.logger.log(`Sub-user deleted: ${userId} from client: ${clientId}`);
+    await this.auditService.create({
+      organizationId: orgId,
+      action: 'client.subuser.deleted',
+      resource: 'client',
+      resourceId: clientId,
+      oldData: { userId, name: user.name, email: user.email },
+    });
   }
 
   // ── Horas contratadas ─────────────────────────────────
@@ -356,6 +422,13 @@ export class ClientService {
     });
 
     this.logger.log(`Added ${hours} hours to client: ${clientId}`);
+    await this.auditService.create({
+      organizationId: orgId,
+      action: 'client.hours.purchased',
+      resource: 'client',
+      resourceId: clientId,
+      newData: { hours, note, totalContracted: updated.contractedHours },
+    });
     return updated;
   }
 
@@ -366,7 +439,7 @@ export class ClientService {
         id: true,
         title: true,
         project: {
-          select: { clientId: true },
+          select: { clientId: true, organizationId: true },
         },
       },
     });
@@ -407,5 +480,12 @@ export class ClientService {
     });
 
     this.logger.log(`Recorded ${hours}h ${isLoan ? '(loan)' : '(usage)'} for client: ${clientId}, task: ${taskId}`);
+    await this.auditService.create({
+      organizationId: task.project.organizationId,
+      action: isLoan ? 'client.hours.loaned' : 'client.hours.consumed',
+      resource: 'client',
+      resourceId: clientId,
+      newData: { hours, taskId, taskTitle: task.title, type: isLoan ? 'LOAN' : 'USAGE' },
+    });
   }
 }

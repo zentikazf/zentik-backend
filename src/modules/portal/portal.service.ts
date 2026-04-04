@@ -6,6 +6,7 @@ import { CreateSuggestionDto } from './dto/create-suggestion.dto';
 import { UpdateSuggestionDto } from './dto/update-suggestion.dto';
 import { domainEvent } from '../../common/events/domain-event.helper';
 import { CreateTicketDto } from '../ticket/dto/create-ticket.dto';
+import { AuditService } from '../audit/audit.service';
 
 @Injectable()
 export class PortalService {
@@ -14,6 +15,7 @@ export class PortalService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly eventEmitter: EventEmitter2,
+    private readonly auditService: AuditService,
   ) {}
 
   private async getClientByUserId(userId: string) {
@@ -324,6 +326,7 @@ export class PortalService {
           description: dto.description,
           priority: (dto.priority as any) ?? 'MEDIUM',
           status: 'BACKLOG',
+          type: 'SUPPORT',
           position: (maxPosition._max.position ?? -1) + 1,
           createdById: project.createdById,
           clientVisible: true,
@@ -367,6 +370,15 @@ export class PortalService {
     });
 
     this.logger.log(`Ticket created: ${ticket.id} by client: ${client.id} for project: ${projectId}`);
+
+    await this.auditService.create({
+      organizationId: project.organizationId,
+      userId,
+      action: 'ticket.created',
+      resource: 'ticket',
+      resourceId: ticket.id,
+      newData: { title: dto.title, category: dto.category, projectId, clientName: client.name },
+    });
 
     this.eventEmitter.emit('ticket.created', {
       ...domainEvent('ticket.created', 'ticket', ticket.id, project.organizationId, userId),
