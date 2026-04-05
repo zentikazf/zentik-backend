@@ -10,6 +10,7 @@ import {
 import { Logger } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 import { MessageService } from './chat.service';
+import { PrismaService } from '../../database/prisma.service';
 
 @WebSocketGateway({ cors: { origin: '*' }, namespace: '/chat' })
 export class ChatGateway
@@ -20,9 +21,12 @@ export class ChatGateway
   @WebSocketServer()
   server: Server;
 
-  constructor(private readonly messageService: MessageService) {}
+  constructor(
+    private readonly messageService: MessageService,
+    private readonly prisma: PrismaService,
+  ) {}
 
-  handleConnection(client: Socket) {
+  async handleConnection(client: Socket) {
     const token =
       client.handshake.auth?.token ||
       client.handshake.headers?.authorization;
@@ -35,8 +39,31 @@ export class ChatGateway
       return;
     }
 
-    // TODO: Validar el token contra la base de datos de sesiones
-    this.logger.log(`Cliente conectado: ${client.id}`);
+    const sessionToken = token.startsWith('Bearer ') ? token.slice(7) : token;
+
+    try {
+      const session = await this.prisma.session.findFirst({
+        where: { token: sessionToken, expiresAt: { gt: new Date() } },
+        select: { userId: true, user: { select: { id: true, name: true } } },
+      });
+
+      if (!session) {
+        this.logger.warn(`Cliente ${client.id} rechazado: session invalida`);
+        client.disconnect();
+        return;
+      }
+
+      (client as any).userId = session.userId;
+      (client as any).userName = session.user.name;
+
+      // Join personal room for real-time notifications
+      client.join(`user:${session.userId}`);
+
+      this.logger.log(`Cliente conectado: ${client.id} (user: ${session.userId})`);
+    } catch (error) {
+      this.logger.error(`Error validando session para ${client.id}`, error);
+      client.disconnect();
+    }
   }
 
   handleDisconnect(client: Socket) {
@@ -50,8 +77,11 @@ export class ChatGateway
     data: { channelId: string; content: string; parentId?: string },
   ) {
     try {
-      // TODO: Extraer userId del token validado en handleConnection
       const userId = (client as any).userId;
+
+      if (!userId) {
+        return { success: false, error: 'Usuario no autenticado' };
+      }
 
       const message = await this.messageService.create(
         data.channelId,

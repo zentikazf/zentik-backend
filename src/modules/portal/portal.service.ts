@@ -293,6 +293,7 @@ export class PortalService {
         name: true,
         organizationId: true,
         createdById: true,
+        responsibleId: true,
         members: { select: { userId: true } },
       },
     });
@@ -310,6 +311,23 @@ export class PortalService {
     // Add client user if not already present
     if (userId && !orgMemberIds.includes(userId)) {
       orgMemberIds.push(userId);
+    }
+    // Add project responsible if exists
+    if (project.responsibleId && !orgMemberIds.includes(project.responsibleId)) {
+      orgMemberIds.push(project.responsibleId);
+    }
+    // Add Product Owners and Project Managers from the organization
+    const poAndPm = await this.prisma.organizationMember.findMany({
+      where: {
+        organizationId: project.organizationId,
+        role: { name: { in: ['Product Owner', 'Project Manager'] } },
+      },
+      select: { userId: true },
+    });
+    for (const member of poAndPm) {
+      if (!orgMemberIds.includes(member.userId)) {
+        orgMemberIds.push(member.userId);
+      }
     }
 
     const ticket = await this.prisma.$transaction(async (tx) => {

@@ -351,4 +351,101 @@ export class NotificationListener {
       this.logger.error(`Error notifying about suggestion: ${err?.message}`);
     }
   }
+
+  // ============================================
+  // TICKET EVENTS
+  // ============================================
+
+  @OnEvent('ticket.created')
+  async handleTicketCreated(event: {
+    ticketId: string;
+    title: string;
+    category: string;
+    projectId: string;
+    clientName: string;
+  }) {
+    this.logger.log(`Ticket creado: ${event.ticketId}`);
+
+    try {
+      const project = await this.prisma.project.findUnique({
+        where: { id: event.projectId },
+        select: { responsibleId: true, organizationId: true },
+      });
+
+      if (!project) return;
+
+      const notificationData = {
+        type: 'TICKET_CREATED' as const,
+        title: 'Nuevo ticket de soporte',
+        body: `${event.clientName} ha creado el ticket "${event.title}"`,
+        metadata: { ticketId: event.ticketId, projectId: event.projectId },
+      };
+
+      // Notify project responsible
+      if (project.responsibleId) {
+        await this.notificationService.create({
+          userId: project.responsibleId,
+          ...notificationData,
+        });
+      }
+
+      // Notify Product Owners
+      const poMembers = await this.prisma.organizationMember.findMany({
+        where: {
+          organizationId: project.organizationId,
+          role: { name: 'Product Owner' },
+          userId: { not: project.responsibleId ?? undefined },
+        },
+        select: { userId: true },
+      });
+
+      await Promise.all(
+        poMembers.map((member) =>
+          this.notificationService.create({
+            userId: member.userId,
+            ...notificationData,
+          }),
+        ),
+      );
+    } catch (err: any) {
+      this.logger.error(`Error notifying about ticket creation: ${err?.message}`);
+    }
+  }
+
+  @OnEvent('ticket.updated')
+  async handleTicketUpdated(event: {
+    ticketId: string;
+    title: string;
+    status: string;
+    projectId: string;
+    clientId: string;
+  }) {
+    this.logger.log(`Ticket actualizado: ${event.ticketId} status=${event.status}`);
+
+    try {
+      const client = await this.prisma.client.findUnique({
+        where: { id: event.clientId },
+        select: { userId: true },
+      });
+
+      const statusLabels: Record<string, string> = {
+        OPEN: 'Abierto',
+        IN_PROGRESS: 'En progreso',
+        RESOLVED: 'Resuelto',
+        CLOSED: 'Cerrado',
+      };
+
+      if (client?.userId) {
+        await this.notificationService.create({
+          userId: client.userId,
+          type: 'TICKET_UPDATED',
+          title: 'Ticket actualizado',
+          body: `Tu ticket "${event.title}" cambio a estado: ${statusLabels[event.status] || event.status}`,
+          metadata: { ticketId: event.ticketId, status: event.status },
+        });
+      }
+    } catch (err: any) {
+      this.logger.error(`Error notifying about ticket update: ${err?.message}`);
+    }
+  }
 }

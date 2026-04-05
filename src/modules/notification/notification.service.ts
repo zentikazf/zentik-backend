@@ -1,12 +1,16 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../database/prisma.service';
 import { AppException } from '../../common/filters/app-exception';
+import { ChatGateway } from '../chat/chat.gateway';
 
 @Injectable()
 export class NotificationService {
   private readonly logger = new Logger(NotificationService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly chatGateway: ChatGateway,
+  ) {}
 
   async create(data: {
     userId: string;
@@ -28,6 +32,15 @@ export class NotificationService {
     this.logger.log(
       `Notificacion creada: ${notification.id} para usuario ${data.userId}`,
     );
+
+    // Emit via WebSocket to user's personal room
+    try {
+      this.chatGateway.server
+        .to(`user:${data.userId}`)
+        .emit('notification:new', notification);
+    } catch (err) {
+      this.logger.warn(`No se pudo emitir notificacion via WebSocket: ${err}`);
+    }
 
     return notification;
   }
