@@ -21,6 +21,21 @@ export class ProjectService {
     private readonly eventEmitter: EventEmitter2,
   ) {}
 
+  async assertProjectNotFrozen(projectId: string) {
+    const project = await this.prisma.project.findUnique({
+      where: { id: projectId },
+      select: { clientId: true, client: { select: { status: true } } },
+    });
+    if (project?.client && project.client.status !== 'ACTIVE') {
+      throw new AppException(
+        'Proyecto congelado - cliente deshabilitado',
+        'PROJECT_FROZEN',
+        403,
+        { projectId },
+      );
+    }
+  }
+
   async create(orgId: string, dto: CreateProjectDto, userId: string) {
     await this.validateOrganization(orgId);
 
@@ -121,7 +136,7 @@ export class ProjectService {
             },
           },
           client: {
-            select: { id: true, name: true },
+            select: { id: true, name: true, status: true },
           },
           responsible: {
             select: { id: true, name: true },

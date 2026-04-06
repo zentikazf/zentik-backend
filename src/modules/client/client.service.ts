@@ -41,13 +41,17 @@ export class ClientService {
 
   async findAll(
     orgId: string,
-    params: { search?: string; page?: number; limit?: number },
+    params: { search?: string; page?: number; limit?: number; status?: string },
   ): Promise<PaginatedResult<any>> {
     const page = params.page ?? 1;
     const limit = params.limit ?? 50;
     const skip = (page - 1) * limit;
 
     const where: Prisma.ClientWhereInput = { organizationId: orgId };
+
+    if (params.status) {
+      where.status = params.status as any;
+    }
 
     if (params.search) {
       where.OR = [
@@ -133,18 +137,56 @@ export class ClientService {
     return client;
   }
 
-  async delete(orgId: string, clientId: string) {
+  async changeStatus(orgId: string, clientId: string, newStatus: 'ACTIVE' | 'DISABLED' | 'ARCHIVED') {
     const client = await this.findById(orgId, clientId);
 
-    await this.prisma.client.delete({ where: { id: clientId } });
+    await this.prisma.$transaction(async (tx) => {
+      // Update client status
+      await tx.client.update({
+        where: { id: clientId },
+        data: { status: newStatus },
+      });
 
-    this.logger.log(`Client deleted: ${clientId} from org: ${orgId}`);
+      if (newStatus === 'DISABLED' || newStatus === 'ARCHIVED') {
+        // Collect all user IDs linked to this client
+        const userIds: string[] = [];
+        if (client.userId) userIds.push(client.userId);
+
+        const subUsers = await tx.user.findMany({
+          where: { clientId },
+          select: { id: true },
+        });
+        subUsers.forEach((u) => userIds.push(u.id));
+
+        // Invalidate all sessions immediately
+        if (userIds.length > 0) {
+          await tx.session.deleteMany({ where: { userId: { in: userIds } } });
+        }
+
+        // Close open tickets
+        await tx.ticket.updateMany({
+          where: {
+            clientId,
+            status: { in: ['OPEN', 'IN_PROGRESS'] },
+          },
+          data: { status: 'CLOSED', adminNotes: 'Cliente deshabilitado' },
+        });
+      }
+    });
+
+    const actionMap = {
+      ACTIVE: 'client.reactivated',
+      DISABLED: 'client.disabled',
+      ARCHIVED: 'client.archived',
+    };
+
+    this.logger.log(`Client ${newStatus}: ${clientId} in org: ${orgId}`);
     await this.auditService.create({
       organizationId: orgId,
-      action: 'client.deleted',
+      action: actionMap[newStatus],
       resource: 'client',
       resourceId: clientId,
-      oldData: { name: client.name, email: client.email },
+      newData: { status: newStatus, name: client.name },
     });
   }
 

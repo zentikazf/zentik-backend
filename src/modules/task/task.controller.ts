@@ -64,8 +64,13 @@ export class TaskController {
   async getTasks(
     @Param('projectId') projectId: string,
     @Query() filters: TaskFilterDto,
+    @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.taskService.getTasks(projectId, filters);
+    return this.taskService.getTasks(projectId, filters, {
+      userId: user.id,
+      roleId: user.roleId,
+      roleName: user.roleName,
+    });
   }
 
   @Get('tasks/:taskId')

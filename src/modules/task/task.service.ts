@@ -5,6 +5,7 @@ import { PrismaService } from '../../database/prisma.service';
 import { AppException, TaskNotFoundException } from '../../common/filters/app-exception';
 import { PaginatedResult } from '../../common/interfaces/request.interface';
 import { domainEvent } from '../../common/events/domain-event.helper';
+import { ProjectService } from '../project/project.service';
 import {
   CreateTaskDto,
   UpdateTaskDto,
@@ -18,9 +19,12 @@ export class TaskService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly eventEmitter: EventEmitter2,
+    private readonly projectService: ProjectService,
   ) {}
 
   async createTask(projectId: string, dto: CreateTaskDto, userId: string) {
+    await this.projectService.assertProjectNotFrozen(projectId);
+
     const project = await this.prisma.project.findUnique({
       where: { id: projectId },
     });
@@ -106,7 +110,13 @@ export class TaskService {
     return task;
   }
 
-  async getTasks(projectId: string, filters: TaskFilterDto): Promise<PaginatedResult<any>> {
+  private static readonly SENIOR_ROLES = ['Owner', 'Product Owner', 'Project Manager', 'Tech Lead'];
+
+  async getTasks(
+    projectId: string,
+    filters: TaskFilterDto,
+    roleContext?: { userId?: string; roleId?: string; roleName?: string },
+  ): Promise<PaginatedResult<any>> {
     const { page = 1, limit = 20, sort, search, status, priority, assigneeId, sprintId } = filters;
     const skip = (page - 1) * limit;
 
@@ -128,6 +138,25 @@ export class TaskService {
       }),
     };
 
+    // Role-based visibility filter
+    if (
+      roleContext?.roleName &&
+      !TaskService.SENIOR_ROLES.includes(roleContext.roleName) &&
+      roleContext.userId &&
+      roleContext.roleId
+    ) {
+      where.AND = [
+        ...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []),
+        {
+          OR: [
+            { roleId: roleContext.roleId },
+            { roleId: null },
+            { assignments: { some: { userId: roleContext.userId } } },
+          ],
+        },
+      ];
+    }
+
     // Parse sort field
     const orderBy = this.parseSortField(sort);
 
@@ -140,6 +169,7 @@ export class TaskService {
           boardColumn: true,
           sprint: { select: { id: true, name: true, status: true } },
           createdBy: { select: { id: true, name: true, email: true, image: true } },
+          role: { select: { id: true, name: true } },
           _count: { select: { subTasks: true, comments: true } },
         },
         orderBy,
@@ -200,6 +230,14 @@ export class TaskService {
   }
 
   async updateTask(taskId: string, dto: UpdateTaskDto, userId: string, organizationId?: string) {
+    const taskForFreeze = await this.prisma.task.findFirst({
+      where: { id: taskId },
+      select: { projectId: true },
+    });
+    if (taskForFreeze) {
+      await this.projectService.assertProjectNotFrozen(taskForFreeze.projectId);
+    }
+
     const task = await this.prisma.task.findFirst({
       where: {
         id: taskId,
@@ -349,6 +387,28 @@ export class TaskService {
         ...domainEvent('task.completed', 'task', taskId, task.project.organizationId, userId, { title: updated!.title, projectId: task.projectId }),
         task: { ...updated, type: (updated as any).type },
       });
+
+      // Cross-role comment: log when user completes a task assigned to a different role
+      const taskWithRole = await this.prisma.task.findUnique({
+        where: { id: taskId },
+        select: { roleId: true, role: { select: { name: true } } },
+      });
+      if (taskWithRole?.roleId) {
+        const userMembership = await this.prisma.organizationMember.findFirst({
+          where: { userId, organizationId: task.project.organizationId },
+          select: { roleId: true, role: { select: { name: true } } },
+        });
+        if (userMembership?.roleId && userMembership.roleId !== taskWithRole.roleId) {
+          const userName = (await this.prisma.user.findUnique({ where: { id: userId }, select: { name: true } }))?.name || 'Usuario';
+          await this.prisma.comment.create({
+            data: {
+              taskId,
+              userId,
+              content: `Tarea completada por ${userName} (rol: ${userMembership.role?.name}) — asignada originalmente al rol ${taskWithRole.role?.name}`,
+            },
+          });
+        }
+      }
     }
 
     return updated;
@@ -478,6 +538,7 @@ export class TaskService {
           taskLabels: { include: { label: true } },
           boardColumn: true,
           sprint: { select: { id: true, name: true, status: true } },
+          role: { select: { id: true, name: true } },
           _count: { select: { subTasks: true, comments: true } },
         },
         orderBy,

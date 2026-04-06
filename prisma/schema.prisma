@@ -158,6 +158,12 @@ enum FileCategory {
   OTHER
 }
 
+enum ClientStatus {
+  ACTIVE
+  DISABLED
+  ARCHIVED
+}
+
 // ============================================================================
 // AUTH MODELS (Better Auth managed)
 // ============================================================================
@@ -884,6 +890,7 @@ model Client {
   phone           String?
   notes           String?
   userId          String?  @unique @map("user_id")
+  status          ClientStatus @default(ACTIVE)
   portalEnabled   Boolean  @default(false) @map("portal_enabled")
   contractedHours Float    @default(0) @map("contracted_hours")
   usedHours       Float    @default(0) @map("used_hours")
@@ -900,6 +907,7 @@ model Client {
   hoursTransactions HoursTransaction[]
 
   @@index([organizationId])
+  @@index([organizationId, status])
   @@map("clients")
 }
 

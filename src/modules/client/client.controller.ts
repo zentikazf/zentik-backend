@@ -41,11 +41,13 @@ export class ClientController {
     @Query('search') search?: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
+    @Query('status') status?: string,
   ) {
     return this.clientService.findAll(orgId, {
       search,
       page: page ? Number(page) : undefined,
       limit: limit ? Number(limit) : undefined,
+      status,
     });
   }
 
@@ -68,14 +70,24 @@ export class ClientController {
     return this.clientService.update(orgId, clientId, dto);
   }
 
+  @Patch(':clientId/status')
+  @ApiOperation({ summary: 'Cambiar estado del cliente (ACTIVE, DISABLED, ARCHIVED)' })
+  changeStatus(
+    @Param('orgId') orgId: string,
+    @Param('clientId') clientId: string,
+    @Body() body: { status: 'ACTIVE' | 'DISABLED' | 'ARCHIVED' },
+  ) {
+    return this.clientService.changeStatus(orgId, clientId, body.status);
+  }
+
   @Delete(':clientId')
   @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({ summary: 'Eliminar un cliente' })
+  @ApiOperation({ summary: 'Archivar un cliente (soft-delete)' })
   remove(
     @Param('orgId') orgId: string,
     @Param('clientId') clientId: string,
   ) {
-    return this.clientService.delete(orgId, clientId);
+    return this.clientService.changeStatus(orgId, clientId, 'ARCHIVED');
   }
 
   @Post(':clientId/create-user')

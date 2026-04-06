@@ -75,6 +75,24 @@ export class AuthGuard implements CanActivate {
         permissions = ['*:*'];
       }
 
+      // Validate client status for portal users
+      if (membership?.role?.name === 'Cliente') {
+        const client = await this.prisma.client.findFirst({
+          where: {
+            OR: [
+              { userId: user.id },
+              { users: { some: { id: user.id } } },
+            ],
+          },
+          select: { status: true },
+        });
+
+        if (client && client.status !== 'ACTIVE') {
+          await this.prisma.session.delete({ where: { id: session.id } }).catch(() => {});
+          throw new UnauthorizedException('Acceso deshabilitado - cliente inactivo');
+        }
+      }
+
       const authenticatedUser: AuthenticatedUser = {
         id: user.id,
         email: user.email,
