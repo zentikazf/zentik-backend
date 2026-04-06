@@ -427,16 +427,14 @@ export class TaskService {
       throw new TaskNotFoundException(taskId);
     }
 
-    // Soft delete: set status to CANCELLED
-    await this.prisma.task.update({
+    await this.prisma.task.delete({
       where: { id: taskId },
-      data: { status: 'CANCELLED' },
     });
 
     this.eventEmitter.emit('task.deleted', {
       ...domainEvent('task.deleted', 'task', taskId, task.project.organizationId, userId, { title: task.title, projectId: task.projectId }),
     });
-    this.logger.log(`Task soft-deleted: ${taskId}`);
+    this.logger.log(`Task deleted: ${taskId}`);
   }
 
   // ============================================

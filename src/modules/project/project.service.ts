@@ -84,6 +84,24 @@ export class ProjectService {
         },
       });
 
+      // Auto-create default Kanban board
+      const board = await tx.board.create({
+        data: {
+          projectId: newProject.id,
+          name: 'Kanban',
+          position: 0,
+        },
+      });
+
+      await tx.boardColumn.createMany({
+        data: [
+          { boardId: board.id, name: 'Por hacer',    position: 0, color: '#8B5CF6', mappedStatus: 'BACKLOG' },
+          { boardId: board.id, name: 'En progreso',  position: 1, color: '#F59E0B', mappedStatus: 'IN_PROGRESS' },
+          { boardId: board.id, name: 'En revision',  position: 2, color: '#10B981', mappedStatus: 'IN_REVIEW' },
+          { boardId: board.id, name: 'Hecho',        position: 3, color: '#06B6D4', mappedStatus: 'DONE' },
+        ],
+      });
+
       return newProject;
     });
 
@@ -288,6 +306,64 @@ export class ProjectService {
     }
 
     return project;
+  }
+
+  async acceptClientProject(projectId: string, userId: string, organizationId?: string) {
+    const project = await this.prisma.project.findFirst({
+      where: {
+        id: projectId,
+        pendingClientReview: true,
+        ...(organizationId && { organizationId }),
+      },
+    });
+
+    if (!project) {
+      throw new ProjectNotFoundException(projectId);
+    }
+
+    const result = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.project.update({
+        where: { id: projectId },
+        data: { pendingClientReview: false },
+      });
+
+      // Add the accepting admin as project member
+      await tx.projectMember.create({
+        data: { projectId, userId },
+      }).catch(() => {
+        // Ignore if already member
+      });
+
+      // Auto-create default Kanban board
+      const board = await tx.board.create({
+        data: {
+          projectId,
+          name: 'Kanban',
+          position: 0,
+        },
+      });
+
+      await tx.boardColumn.createMany({
+        data: [
+          { boardId: board.id, name: 'Por hacer',    position: 0, color: '#8B5CF6', mappedStatus: 'BACKLOG' },
+          { boardId: board.id, name: 'En progreso',  position: 1, color: '#F59E0B', mappedStatus: 'IN_PROGRESS' },
+          { boardId: board.id, name: 'En revision',  position: 2, color: '#10B981', mappedStatus: 'IN_REVIEW' },
+          { boardId: board.id, name: 'Hecho',        position: 3, color: '#06B6D4', mappedStatus: 'DONE' },
+        ],
+      });
+
+      return updated;
+    });
+
+    this.logger.log(`Client project accepted: ${projectId} by user: ${userId}`);
+    this.eventEmitter.emit('project.accepted', {
+      ...domainEvent('project.accepted', 'project', projectId, project.organizationId, userId, { name: project.name }),
+      projectId,
+      organizationId: project.organizationId,
+      userId,
+    });
+
+    return result;
   }
 
   async softDelete(projectId: string, userId: string, organizationId?: string) {

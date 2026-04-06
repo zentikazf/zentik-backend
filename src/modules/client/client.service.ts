@@ -206,43 +206,7 @@ export class ClientService {
     }
 
     // Find or create "Cliente" role for the organization
-    let clienteRole = await this.prisma.role.findFirst({
-      where: { organizationId: orgId, name: 'Cliente' },
-    });
-
-    if (!clienteRole) {
-      clienteRole = await this.prisma.role.create({
-        data: {
-          organizationId: orgId,
-          name: 'Cliente',
-          description: 'Cliente externo con acceso al portal',
-          isSystem: true,
-          isDefault: false,
-        },
-      });
-
-      // Assign default permissions for the client role
-      const permissions = await this.prisma.permission.findMany({
-        where: {
-          OR: [
-            { action: 'read', resource: 'projects' },
-            { action: 'read', resource: 'tasks' },
-          ],
-        },
-      });
-
-      if (permissions.length > 0) {
-        await this.prisma.rolePermission.createMany({
-          data: permissions.map((p) => ({
-            roleId: clienteRole!.id,
-            permissionId: p.id,
-          })),
-          skipDuplicates: true,
-        });
-      }
-
-      this.logger.log(`Created "Cliente" role for org: ${orgId}`);
-    }
+    const clienteRole = await this.ensureClienteRole(orgId);
 
     const hashedPassword = await bcrypt.hash(dto.password, 12);
 
@@ -326,20 +290,7 @@ export class ClientService {
       throw new DuplicateResourceException('usuario', 'email', dto.email);
     }
 
-    let clienteRole = await this.prisma.role.findFirst({
-      where: { organizationId: orgId, name: 'Cliente' },
-    });
-    if (!clienteRole) {
-      clienteRole = await this.prisma.role.create({
-        data: {
-          organizationId: orgId,
-          name: 'Cliente',
-          description: 'Cliente externo con acceso al portal',
-          isSystem: true,
-          isDefault: false,
-        },
-      });
-    }
+    const clienteRole = await this.ensureClienteRole(orgId);
 
     const hashedPassword = await bcrypt.hash(dto.password, 12);
 
@@ -529,5 +480,60 @@ export class ClientService {
       resourceId: clientId,
       newData: { hours, taskId, taskTitle: task.title, type: isLoan ? 'LOAN' : 'USAGE' },
     });
+  }
+
+  // ── Helpers ──────────────────────────────────────────
+
+  /**
+   * Find or create the "Cliente" role for an organization and ensure
+   * it always has the required permissions (read:projects, read:tasks, read:chat).
+   */
+  async ensureClienteRole(orgId: string) {
+    let clienteRole = await this.prisma.role.findFirst({
+      where: { organizationId: orgId, name: 'Cliente' },
+    });
+
+    if (!clienteRole) {
+      clienteRole = await this.prisma.role.create({
+        data: {
+          organizationId: orgId,
+          name: 'Cliente',
+          description: 'Cliente externo con acceso al portal',
+          isSystem: true,
+          isDefault: false,
+        },
+      });
+      this.logger.log(`Created "Cliente" role for org: ${orgId}`);
+    }
+
+    // Ensure read:chat permission exists globally
+    await this.prisma.permission.upsert({
+      where: { action_resource: { action: 'read', resource: 'chat' } },
+      update: {},
+      create: { action: 'read', resource: 'chat', description: 'Read chat' },
+    });
+
+    // Ensure all required permissions are assigned to the role
+    const requiredPermissions = await this.prisma.permission.findMany({
+      where: {
+        OR: [
+          { action: 'read', resource: 'projects' },
+          { action: 'read', resource: 'tasks' },
+          { action: 'read', resource: 'chat' },
+        ],
+      },
+    });
+
+    if (requiredPermissions.length > 0) {
+      await this.prisma.rolePermission.createMany({
+        data: requiredPermissions.map((p) => ({
+          roleId: clienteRole.id,
+          permissionId: p.id,
+        })),
+        skipDuplicates: true,
+      });
+    }
+
+    return clienteRole;
   }
 }

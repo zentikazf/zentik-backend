@@ -140,6 +140,7 @@ enum ChannelType {
 enum TicketCategory {
   SUPPORT_REQUEST
   NEW_DEVELOPMENT
+  NEW_PROJECT
 }
 
 enum TicketStatus {
@@ -411,8 +412,9 @@ model Project {
   investment     Decimal?      @db.Decimal(15, 0)
   billingMonth   String?       @map("billing_month")
   responsibleId  String?        @map("responsible_id")
-  alcanceStatus  AlcanceStatus? @map("alcance_status")
-  alcanceFileId  String?        @unique @map("alcance_file_id")
+  alcanceStatus        AlcanceStatus? @map("alcance_status")
+  alcanceFileId        String?        @unique @map("alcance_file_id")
+  pendingClientReview  Boolean        @default(false) @map("pending_client_review")
 
   organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   createdBy    User            @relation("ProjectCreator", fields: [createdById], references: [id])
@@ -719,6 +721,7 @@ model Comment {
   userId          String    @map("user_id")
   parentCommentId String?   @map("parent_comment_id")
   content         String
+  isSystem        Boolean   @default(false) @map("is_system")
   editedAt        DateTime? @map("edited_at")
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")

@@ -216,6 +216,48 @@ export class PortalService {
     return suggestion;
   }
 
+  // ── Project Request (Portal) ────────────────────────────
+
+  async requestProject(userId: string, dto: { name: string; description?: string }) {
+    const client = await this.getClientByUserId(userId);
+
+    if (!client.organizationId) {
+      throw new AppException('El cliente no tiene organización asociada', 'CLIENT_NO_ORG', 400);
+    }
+
+    const slug = dto.name
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9\s-]/g, '')
+      .replace(/\s+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '');
+
+    const project = await this.prisma.project.create({
+      data: {
+        organizationId: client.organizationId,
+        name: dto.name,
+        description: dto.description || null,
+        slug: `${slug}-${Date.now()}`,
+        status: 'DISCOVERY',
+        clientId: client.id,
+        pendingClientReview: true,
+        createdById: userId,
+      },
+    });
+
+    this.logger.log(`Project requested by client ${client.id}: ${project.id}`);
+
+    this.eventEmitter.emit('project.requested', {
+      ...domainEvent('project.requested', 'project', project.id, client.organizationId, userId, { name: dto.name }),
+      projectId: project.id,
+      clientName: client.name,
+    });
+
+    return project;
+  }
+
   // ── Admin methods ──────────────────────────────────────
 
   async getProjectSuggestions(projectId: string) {

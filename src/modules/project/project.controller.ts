@@ -82,6 +82,17 @@ export class ProjectController {
     return this.projectService.update(projectId, dto, user.organizationId);
   }
 
+  @Post('projects/:projectId/accept')
+  @HttpCode(HttpStatus.OK)
+  @Permissions('manage:projects')
+  @ApiOperation({ summary: 'Aceptar proyecto solicitado por cliente' })
+  acceptClientProject(
+    @Param('projectId') projectId: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.projectService.acceptClientProject(projectId, user.id, user.organizationId);
+  }
+
   @Delete('projects/:projectId')
   @HttpCode(HttpStatus.NO_CONTENT)
   @Permissions('manage:projects')

@@ -17,6 +17,7 @@ import { PortalService } from './portal.service';
 import { CreateSuggestionDto } from './dto/create-suggestion.dto';
 import { UpdateSuggestionDto } from './dto/update-suggestion.dto';
 import { CreateTicketDto } from '../ticket/dto/create-ticket.dto';
+import { CreateProjectRequestDto } from './dto/create-project-request.dto';
 
 @ApiTags('Portal')
 @ApiBearerAuth()
@@ -66,6 +67,16 @@ export class PortalController {
     @Body() dto: CreateSuggestionDto,
   ) {
     return this.portalService.createSuggestion(user.id, projectId, dto);
+  }
+
+  @Post('portal/project-requests')
+  @ApiOperation({ summary: 'Solicitar un nuevo proyecto (cliente)' })
+  @HttpCode(HttpStatus.CREATED)
+  requestProject(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: CreateProjectRequestDto,
+  ) {
+    return this.portalService.requestProject(user.id, dto);
   }
 
   // ── Admin endpoints (PM/PO) ──────────────────────────────

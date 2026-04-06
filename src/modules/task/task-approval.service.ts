@@ -101,6 +101,16 @@ export class TaskApprovalService {
       },
     });
 
+    // Create system comment with rejection reason
+    await this.prisma.comment.create({
+      data: {
+        taskId,
+        userId,
+        content: reason ? `Tarea rechazada: ${reason}` : 'Tarea rechazada (sin motivo)',
+        isSystem: true,
+      },
+    });
+
     this.eventEmitter.emit('task.approval.rejected', {
       ...domainEvent('task.approval.rejected', 'task', task.id, task.project.organizationId, userId, { taskTitle: task.title, projectId: task.projectId, reason: reason || '' }),
       taskId: task.id,

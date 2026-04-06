@@ -4,6 +4,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 export enum TicketCategoryDto {
   SUPPORT_REQUEST = 'SUPPORT_REQUEST',
   NEW_DEVELOPMENT = 'NEW_DEVELOPMENT',
+  NEW_PROJECT = 'NEW_PROJECT',
 }
 
 export enum TicketPriorityDto {

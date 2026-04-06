@@ -28,11 +28,13 @@ export class TicketController {
   @Get('organizations/:orgId/tickets')
   @ApiOperation({ summary: 'Listar todos los tickets de la organizacion' })
   @ApiQuery({ name: 'status', required: false, enum: ['OPEN', 'IN_PROGRESS', 'RESOLVED', 'CLOSED'] })
+  @ApiQuery({ name: 'clientId', required: false })
   getOrgTickets(
     @Param('orgId') orgId: string,
     @Query('status') status?: string,
+    @Query('clientId') clientId?: string,
   ) {
-    return this.ticketService.getOrgTickets(orgId, status);
+    return this.ticketService.getOrgTickets(orgId, status, clientId);
   }
 
   @Post('organizations/:orgId/tickets')

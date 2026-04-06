@@ -38,7 +38,8 @@ export class CalendarService {
         where: {
           ...projectFilter,
           dueDate: { gte: rangeStart, lte: rangeEnd },
-          assignments: { some: { userId } },
+          status: { not: 'CANCELLED' },
+          project: { members: { some: { userId } } },
         },
         select: {
           id: true,

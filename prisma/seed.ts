@@ -22,6 +22,7 @@ async function main() {
     { action: 'read', resource: 'boards', description: 'Read boards' },
     { action: 'read', resource: 'billing', description: 'Read billing' },
     { action: 'read', resource: 'audit', description: 'Read audit logs' },
+    { action: 'read', resource: 'chat', description: 'Read chat' },
   ];
 
   const permissions: Record<string, string> = {};

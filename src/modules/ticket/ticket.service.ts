@@ -15,11 +15,12 @@ export class TicketService {
     private readonly eventEmitter: EventEmitter2,
   ) {}
 
-  async getOrgTickets(orgId: string, status?: string) {
+  async getOrgTickets(orgId: string, status?: string, clientId?: string) {
     return this.prisma.ticket.findMany({
       where: {
         organizationId: orgId,
         ...(status && { status: status as any }),
+        ...(clientId && { clientId }),
       },
       include: {
         client: { select: { id: true, name: true, email: true } },
