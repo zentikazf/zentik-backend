@@ -93,6 +93,17 @@ export class ProjectController {
     return this.projectService.acceptClientProject(projectId, user.id, user.organizationId);
   }
 
+  @Patch('projects/:projectId/lifecycle-status')
+  @Permissions('manage:projects')
+  @ApiOperation({ summary: 'Cambiar estado de ciclo de vida del proyecto (ACTIVE, DISABLED, ARCHIVED)' })
+  changeLifecycleStatus(
+    @Param('projectId') projectId: string,
+    @Body() body: { status: 'ACTIVE' | 'DISABLED' | 'ARCHIVED' },
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.projectService.changeLifecycleStatus(projectId, body.status, user.id, user.organizationId);
+  }
+
   @Delete('projects/:projectId')
   @HttpCode(HttpStatus.NO_CONTENT)
   @Permissions('manage:projects')

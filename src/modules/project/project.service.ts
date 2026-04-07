@@ -21,6 +21,54 @@ export class ProjectService {
     private readonly eventEmitter: EventEmitter2,
   ) {}
 
+  async changeLifecycleStatus(
+    projectId: string,
+    newStatus: 'ACTIVE' | 'DISABLED' | 'ARCHIVED',
+    userId: string,
+    organizationId?: string,
+  ) {
+    const project = await this.findById(projectId, organizationId);
+
+    await this.prisma.project.update({
+      where: { id: projectId },
+      data: { lifecycleStatus: newStatus },
+    });
+
+    const actionMap = {
+      ACTIVE: 'project.reactivated',
+      DISABLED: 'project.disabled',
+      ARCHIVED: 'project.archived',
+    };
+
+    this.logger.log(`Project lifecycle changed: ${projectId} -> ${newStatus} by user: ${userId}`);
+    this.eventEmitter.emit(actionMap[newStatus], {
+      ...domainEvent(actionMap[newStatus], 'project', projectId, project.organizationId, userId, {
+        name: project.name,
+        lifecycleStatus: newStatus,
+      }),
+      projectId,
+      organizationId: project.organizationId,
+      userId,
+    });
+
+    return { id: projectId, lifecycleStatus: newStatus };
+  }
+
+  async assertProjectNotDisabled(projectId: string) {
+    const project = await this.prisma.project.findUnique({
+      where: { id: projectId },
+      select: { lifecycleStatus: true },
+    });
+    if (project && project.lifecycleStatus !== 'ACTIVE') {
+      throw new AppException(
+        'Proyecto deshabilitado o archivado',
+        'PROJECT_DISABLED',
+        403,
+        { projectId },
+      );
+    }
+  }
+
   async assertProjectNotFrozen(projectId: string) {
     const project = await this.prisma.project.findUnique({
       where: { id: projectId },
@@ -130,6 +178,13 @@ export class ProjectService {
 
     if (filters.status) {
       where.status = filters.status;
+    }
+
+    // Por defecto solo mostrar proyectos ACTIVE, a menos que se pida explícitamente otro
+    if (filters.lifecycleStatus) {
+      where.lifecycleStatus = filters.lifecycleStatus;
+    } else {
+      where.lifecycleStatus = 'ACTIVE';
     }
 
     if (filters.search) {

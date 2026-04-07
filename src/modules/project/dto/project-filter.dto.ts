@@ -1,7 +1,7 @@
 import { IsOptional, IsEnum, IsString, IsInt, Min, Max } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { ProjectStatus } from '@prisma/client';
+import { ProjectStatus, ProjectLifecycleStatus } from '@prisma/client';
 
 export class ProjectFilterDto {
   @ApiPropertyOptional({
@@ -12,6 +12,15 @@ export class ProjectFilterDto {
   @IsOptional()
   @IsEnum(ProjectStatus, { message: 'El estado del proyecto no es valido' })
   status?: ProjectStatus;
+
+  @ApiPropertyOptional({
+    example: 'ACTIVE',
+    description: 'Filtrar por estado de ciclo de vida',
+    enum: ProjectLifecycleStatus,
+  })
+  @IsOptional()
+  @IsEnum(ProjectLifecycleStatus, { message: 'El estado de ciclo de vida no es valido' })
+  lifecycleStatus?: ProjectLifecycleStatus;
 
   @ApiPropertyOptional({
     example: 'rediseno',

@@ -28,6 +28,12 @@ enum ProjectStatus {
   COMPLETED
 }
 
+enum ProjectLifecycleStatus {
+  ACTIVE
+  DISABLED
+  ARCHIVED
+}
+
 enum TaskPriority {
   URGENT
   HIGH
@@ -399,7 +405,8 @@ model Project {
   name           String
   description    String?
   slug           String
-  status         ProjectStatus @default(DISCOVERY)
+  status              ProjectStatus          @default(DISCOVERY)
+  lifecycleStatus     ProjectLifecycleStatus @default(ACTIVE) @map("lifecycle_status")
   startDate      DateTime?     @map("start_date")
   endDate        DateTime?     @map("end_date")
   createdById    String        @map("created_by_id")
@@ -435,6 +442,7 @@ model Project {
   @@unique([organizationId, slug])
   @@index([organizationId])
   @@index([status])
+  @@index([organizationId, lifecycleStatus])
   @@index([createdById])
   @@index([clientId])
   @@index([responsibleId])
