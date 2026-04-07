@@ -486,7 +486,7 @@ export class ClientService {
 
   /**
    * Find or create the "Cliente" role for an organization and ensure
-   * it always has the required permissions (read:projects, read:tasks, read:chat).
+   * it always has the required permissions (read:projects, read:tasks, read:chat, write:chat).
    */
   async ensureClienteRole(orgId: string) {
     let clienteRole = await this.prisma.role.findFirst({
@@ -506,11 +506,16 @@ export class ClientService {
       this.logger.log(`Created "Cliente" role for org: ${orgId}`);
     }
 
-    // Ensure read:chat permission exists globally
+    // Ensure chat permissions exist globally
     await this.prisma.permission.upsert({
       where: { action_resource: { action: 'read', resource: 'chat' } },
       update: {},
       create: { action: 'read', resource: 'chat', description: 'Read chat' },
+    });
+    await this.prisma.permission.upsert({
+      where: { action_resource: { action: 'write', resource: 'chat' } },
+      update: {},
+      create: { action: 'write', resource: 'chat', description: 'Write chat' },
     });
 
     // Ensure all required permissions are assigned to the role
@@ -520,6 +525,7 @@ export class ClientService {
           { action: 'read', resource: 'projects' },
           { action: 'read', resource: 'tasks' },
           { action: 'read', resource: 'chat' },
+          { action: 'write', resource: 'chat' },
         ],
       },
     });
