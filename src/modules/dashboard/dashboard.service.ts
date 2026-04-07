@@ -106,10 +106,7 @@ export class DashboardService {
       take: 100,
     });
 
-    return {
-      count: await this.prisma.task.count({ where }),
-      items: tasks,
-    };
+    return { count: tasks.length, items: tasks };
   }
 
   private async getCompletedTasks(
@@ -146,10 +143,7 @@ export class DashboardService {
       take: 100,
     });
 
-    return {
-      count: await this.prisma.task.count({ where }),
-      items: tasks,
-    };
+    return { count: tasks.length, items: tasks };
   }
 
   private async getTeamMembers(
@@ -163,48 +157,44 @@ export class DashboardService {
       ...(clientId && { clientId }),
     };
 
-    const members = await this.prisma.organizationMember.findMany({
-      where: { organizationId: orgId },
-      select: {
-        user: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-            image: true,
+    const [members, activeTaskCounts, completedTaskCounts] = await Promise.all([
+      this.prisma.organizationMember.findMany({
+        where: { organizationId: orgId },
+        select: {
+          user: { select: { id: true, name: true, email: true, image: true } },
+          role: { select: { id: true, name: true } },
+        },
+      }),
+      this.prisma.taskAssignment.groupBy({
+        by: ['userId'],
+        where: {
+          task: { ...projectFilter ? { project: projectFilter } : {},
+            status: { in: ['TODO', 'IN_PROGRESS', 'IN_REVIEW'] },
           },
         },
-        role: { select: { id: true, name: true } },
-      },
-    });
-
-    const memberStats = await Promise.all(
-      members.map(async (m: typeof members[number]) => {
-        const [activeTasks, completedTasks] = await Promise.all([
-          this.prisma.task.count({
-            where: {
-              project: projectFilter,
-              status: { in: ['TODO', 'IN_PROGRESS', 'IN_REVIEW'] },
-              assignments: { some: { userId: m.user.id } },
-            },
-          }),
-          this.prisma.task.count({
-            where: {
-              project: projectFilter,
-              status: 'DONE',
-              updatedAt: { gte: dateRange.start, lte: dateRange.end },
-              assignments: { some: { userId: m.user.id } },
-            },
-          }),
-        ]);
-        return {
-          ...m.user,
-          role: m.role?.name || null,
-          activeTasks,
-          completedTasks,
-        };
+        _count: true,
       }),
-    );
+      this.prisma.taskAssignment.groupBy({
+        by: ['userId'],
+        where: {
+          task: { ...projectFilter ? { project: projectFilter } : {},
+            status: 'DONE',
+            updatedAt: { gte: dateRange.start, lte: dateRange.end },
+          },
+        },
+        _count: true,
+      }),
+    ]);
+
+    const activeMap = new Map(activeTaskCounts.map((r) => [r.userId, r._count]));
+    const completedMap = new Map(completedTaskCounts.map((r) => [r.userId, r._count]));
+
+    const memberStats = members.map((m) => ({
+      ...m.user,
+      role: m.role?.name || null,
+      activeTasks: activeMap.get(m.user.id) || 0,
+      completedTasks: completedMap.get(m.user.id) || 0,
+    }));
 
     return {
       count: memberStats.length,
