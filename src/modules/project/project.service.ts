@@ -180,11 +180,11 @@ export class ProjectService {
       where.status = filters.status;
     }
 
-    // Por defecto solo mostrar proyectos ACTIVE, a menos que se pida explícitamente otro
-    if (filters.lifecycleStatus) {
-      where.lifecycleStatus = filters.lifecycleStatus;
+    // "ACTIVE" devuelve ACTIVE + DISABLED (disabled se muestran grayed-out en el kanban)
+    if (filters.lifecycleStatus === 'ACTIVE' || !filters.lifecycleStatus) {
+      where.lifecycleStatus = { in: ['ACTIVE', 'DISABLED'] };
     } else {
-      where.lifecycleStatus = 'ACTIVE';
+      where.lifecycleStatus = filters.lifecycleStatus;
     }
 
     if (filters.search) {
