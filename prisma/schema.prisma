@@ -547,6 +547,7 @@ model Task {
   storyPoints    Int?         @map("story_points")
   dueDate        DateTime?    @map("due_date")
   startDate      DateTime?    @map("start_date")
+  endDate        DateTime?    @map("end_date")
   estimatedHours Float?       @map("estimated_hours")
   hourlyRate     Decimal?     @map("hourly_rate") @db.Decimal(12, 2)
   roleId         String?      @map("role_id")

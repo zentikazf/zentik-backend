@@ -290,6 +290,15 @@ export class TaskService {
           );
         }
 
+        // Auto-set startDate al pasar a IN_PROGRESS (si no tenía valor manual)
+        if (dto.status === 'IN_PROGRESS' && !task.startDate && updatePayload.startDate === undefined) {
+          updatePayload.startDate = new Date();
+        }
+        // Auto-set endDate al pasar a DONE (si no tenía valor manual)
+        if (dto.status === 'DONE' && !task.endDate) {
+          updatePayload.endDate = new Date();
+        }
+
         // Reverse sync: find matching board column and update boardColumnId
         const matchingColumn = await tx.boardColumn.findFirst({
           where: {
