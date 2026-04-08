@@ -343,6 +343,15 @@ export class BoardService {
 
     if (targetColumn.mappedStatus) {
       updateData.status = targetColumn.mappedStatus;
+
+      // Auto-set startDate al pasar a IN_PROGRESS (si no tenía valor manual)
+      if (targetColumn.mappedStatus === 'IN_PROGRESS' && !task.startDate) {
+        updateData.startDate = new Date();
+      }
+      // Auto-set endDate al pasar a DONE (si no tenía valor)
+      if (targetColumn.mappedStatus === 'DONE' && !task.endDate) {
+        updateData.endDate = new Date();
+      }
     }
 
     const updatedTask = await this.prisma.task.update({

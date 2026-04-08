@@ -12,30 +12,15 @@ export class HoursListener {
     private readonly prisma: PrismaService,
   ) {}
 
-  @OnEvent('time_entry.created')
-  async onTimeEntryCreated(event: { taskId: string; duration: number }) {
-    try {
-      const durationMinutes = event.duration / 60; // duration is stored as seconds
-      if (durationMinutes > 0) {
-        await this.clientService.recordHoursUsage(event.taskId, durationMinutes);
-      }
-    } catch (err) {
-      this.logger.error(`Error recording hours usage for task ${event.taskId}`, err);
-    }
-  }
-
-  @OnEvent('timer.stopped')
-  async onTimerStopped(event: { taskId: string; duration: number }) {
-    try {
-      const durationMinutes = event.duration / 60;
-      if (durationMinutes > 0) {
-        await this.clientService.recordHoursUsage(event.taskId, durationMinutes);
-      }
-    } catch (err) {
-      this.logger.error(`Error recording hours usage for task ${event.taskId}`, err);
-    }
-  }
-
+  /**
+   * Time entries y timers manuales NO descuentan del cupo de soporte.
+   * El cupo de horas del cliente (contractedHours) representa unicamente
+   * horas de SOPORTE/CONFIGURACION. Las tareas de tipo PROJECT (desarrollo)
+   * se facturan via time entries pero no consumen del cupo.
+   *
+   * El descuento automatico de cupo sucede unicamente cuando una tarea
+   * SUPPORT pasa a DONE (ver onTaskCompleted mas abajo).
+   */
   @OnEvent('task.completed')
   async onTaskCompleted(event: { task: any }) {
     try {

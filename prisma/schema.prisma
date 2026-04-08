@@ -907,6 +907,9 @@ model Client {
   contractedHours Float    @default(0) @map("contracted_hours")
   usedHours       Float    @default(0) @map("used_hours")
   loanedHours     Float    @default(0) @map("loaned_hours")
+  developmentHourlyRate Decimal? @map("development_hourly_rate") @db.Decimal(12, 2)
+  supportHourlyRate     Decimal? @map("support_hourly_rate")     @db.Decimal(12, 2)
+  currency        String   @default("PYG")
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
 

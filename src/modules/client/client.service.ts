@@ -25,6 +25,9 @@ export class ClientService {
         email: dto.email,
         phone: dto.phone,
         notes: dto.notes,
+        developmentHourlyRate: dto.developmentHourlyRate,
+        supportHourlyRate: dto.supportHourlyRate,
+        ...(dto.currency && { currency: dto.currency }),
       },
     });
 
@@ -110,6 +113,9 @@ export class ClientService {
           ...(dto.email !== undefined && { email: dto.email }),
           ...(dto.phone !== undefined && { phone: dto.phone }),
           ...(dto.notes !== undefined && { notes: dto.notes }),
+          ...(dto.developmentHourlyRate !== undefined && { developmentHourlyRate: dto.developmentHourlyRate }),
+          ...(dto.supportHourlyRate !== undefined && { supportHourlyRate: dto.supportHourlyRate }),
+          ...(dto.currency !== undefined && { currency: dto.currency }),
         },
         include: { user: { select: { id: true, name: true, email: true } } },
       });
@@ -391,6 +397,9 @@ export class ClientService {
       usedHours: client.usedHours,
       loanedHours: client.loanedHours,
       availableHours: available,
+      developmentHourlyRate: client.developmentHourlyRate,
+      supportHourlyRate: client.supportHourlyRate,
+      currency: client.currency,
       transactions,
     };
   }
@@ -431,6 +440,7 @@ export class ClientService {
       select: {
         id: true,
         title: true,
+        type: true,
         project: {
           select: { clientId: true, organizationId: true },
         },
@@ -438,6 +448,11 @@ export class ClientService {
     });
 
     if (!task?.project?.clientId) return;
+
+    // Guard: solo tareas SUPPORT descuentan del cupo contratado del cliente.
+    // Las tareas de tipo PROJECT (desarrollo) se facturan via invoice pero
+    // no consumen horas de soporte/configuracion.
+    if (task.type !== 'SUPPORT') return;
 
     const clientId = task.project.clientId;
     const hours = parseFloat((durationMinutes / 60).toFixed(4));

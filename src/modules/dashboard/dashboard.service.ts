@@ -18,12 +18,14 @@ export class DashboardService {
       completedTasks,
       teamMembers,
       hours,
+      overdueTasks,
     ] = await Promise.all([
       this.getActiveProjects(orgId, clientId, memberId),
       this.getPendingTasks(orgId, dateRange, clientId, memberId),
       this.getCompletedTasks(orgId, dateRange, clientId, memberId),
       this.getTeamMembers(orgId, dateRange, clientId),
       this.getHours(orgId, dateRange, clientId, memberId),
+      this.getOverdueTasks(orgId, clientId, memberId),
     ]);
 
     return {
@@ -32,6 +34,7 @@ export class DashboardService {
       completedTasks,
       teamMembers,
       hours,
+      overdueTasks,
       period: { startDate: dateRange.start, endDate: dateRange.end },
     };
   }
@@ -200,6 +203,45 @@ export class DashboardService {
       count: memberStats.length,
       items: memberStats,
     };
+  }
+
+  private async getOverdueTasks(
+    orgId: string,
+    clientId?: string,
+    memberId?: string,
+  ) {
+    // dueDate es un target no bloqueante: exponemos como métrica las tareas
+    // con fecha límite vencida que todavía no están cerradas.
+    const where: Prisma.TaskWhereInput = {
+      project: {
+        organizationId: orgId,
+        lifecycleStatus: 'ACTIVE',
+        ...(clientId && { clientId }),
+      },
+      status: { notIn: ['DONE', 'CANCELLED'] },
+      dueDate: { lt: new Date() },
+    };
+    if (memberId) where.assignments = { some: { userId: memberId } };
+
+    const tasks = await this.prisma.task.findMany({
+      where,
+      select: {
+        id: true,
+        title: true,
+        status: true,
+        priority: true,
+        dueDate: true,
+        project: { select: { id: true, name: true, slug: true } },
+        assignments: {
+          select: { user: { select: { id: true, name: true } } },
+          take: 3,
+        },
+      },
+      orderBy: { dueDate: 'asc' },
+      take: 100,
+    });
+
+    return { count: tasks.length, items: tasks };
   }
 
   private async getHours(

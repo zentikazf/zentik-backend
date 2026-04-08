@@ -18,12 +18,24 @@ export class InvoiceService {
   async generate(projectId: string, createdById: string, dto: CreateInvoiceDto) {
     const project = await this.prisma.project.findUnique({
       where: { id: projectId },
-      select: { id: true, organizationId: true, name: true },
+      select: { id: true, organizationId: true, name: true, clientId: true },
     });
 
     if (!project) {
       throw new AppException('El proyecto no existe', 'PROJECT_NOT_FOUND', 404, { projectId });
     }
+
+    // Cargar tarifas y moneda del cliente para fallback por tipo de tarea.
+    const client = project.clientId
+      ? await this.prisma.client.findUnique({
+          where: { id: project.clientId },
+          select: {
+            developmentHourlyRate: true,
+            supportHourlyRate: true,
+            currency: true,
+          },
+        })
+      : null;
 
     const timeEntries = await this.prisma.timeEntry.findMany({
       where: {
@@ -33,7 +45,7 @@ export class InvoiceService {
         endTime: { lte: new Date(dto.periodEnd) },
       },
       include: {
-        task: { select: { id: true, title: true, hourlyRate: true } },
+        task: { select: { id: true, title: true, type: true, hourlyRate: true } },
         user: { select: { name: true } },
       },
     });
@@ -41,6 +53,18 @@ export class InvoiceService {
     const invoiceNumber = await this.generateInvoiceNumber(project.organizationId);
 
     const fallbackRate = dto.defaultHourlyRate ?? 0;
+
+    // Tarifa por tipo: task.hourlyRate (override) → client rate por tipo → fallback
+    const resolveRate = (task: { type: string; hourlyRate: any }): number => {
+      if (task.hourlyRate) return Number(task.hourlyRate);
+      if (task.type === 'SUPPORT' && client?.supportHourlyRate) {
+        return Number(client.supportHourlyRate);
+      }
+      if (task.type === 'PROJECT' && client?.developmentHourlyRate) {
+        return Number(client.developmentHourlyRate);
+      }
+      return fallbackRate;
+    };
 
     // Group time entries by task, using per-task hourlyRate
     const taskGroups = new Map<string, { taskId: string; description: string; totalSeconds: number; rate: number }>();
@@ -51,7 +75,7 @@ export class InvoiceService {
       if (existing) {
         existing.totalSeconds += duration;
       } else {
-        const taskRate = entry.task.hourlyRate ? Number(entry.task.hourlyRate) : fallbackRate;
+        const taskRate = resolveRate(entry.task);
         taskGroups.set(key, {
           taskId: entry.task.id,
           description: entry.task.title,
