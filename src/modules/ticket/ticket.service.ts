@@ -4,7 +4,11 @@ import { PrismaService } from '../../database/prisma.service';
 import { AppException } from '../../common/filters/app-exception';
 import { UpdateTicketDto } from './dto/update-ticket.dto';
 import { CreateAdminTicketDto } from './dto/create-admin-ticket.dto';
+import { CreateCategoryConfigDto, UpdateCategoryConfigDto } from './dto/create-category-config.dto';
+import { UpsertSlaConfigDto } from './dto/upsert-sla-config.dto';
+import { UpsertBusinessHoursDto } from './dto/upsert-business-hours.dto';
 import { domainEvent } from '../../common/events/domain-event.helper';
+import { calculateBusinessDeadline, parseBusinessDays } from './sla.util';
 
 @Injectable()
 export class TicketService {
@@ -15,18 +19,30 @@ export class TicketService {
     private readonly eventEmitter: EventEmitter2,
   ) {}
 
-  async getOrgTickets(orgId: string, status?: string, clientId?: string) {
+  // ── Ticket CRUD ──────────────────────────────────────────
+
+  async getOrgTickets(orgId: string, status?: string, clientId?: string, search?: string, createdByUserId?: string, categoryConfigId?: string) {
     return this.prisma.ticket.findMany({
       where: {
         organizationId: orgId,
         ...(status && { status: status as any }),
         ...(clientId && { clientId }),
+        ...(createdByUserId && { createdByUserId }),
+        ...(categoryConfigId && { categoryConfigId }),
+        ...(search && {
+          OR: [
+            { title: { contains: search, mode: 'insensitive' as const } },
+            { id: { contains: search, mode: 'insensitive' as const } },
+          ],
+        }),
       },
       include: {
         client: { select: { id: true, name: true, email: true } },
         project: { select: { id: true, name: true, slug: true } },
         task: { select: { id: true, title: true, status: true } },
         channel: { select: { id: true, name: true, _count: { select: { messages: true } } } },
+        categoryConfig: { select: { id: true, name: true, criticality: true } },
+        createdByUser: { select: { id: true, name: true } },
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -39,6 +55,7 @@ export class TicketService {
         client: { select: { id: true, name: true, email: true } },
         task: { select: { id: true, title: true, status: true } },
         channel: { select: { id: true, name: true, _count: { select: { messages: true } } } },
+        categoryConfig: { select: { id: true, name: true, criticality: true } },
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -58,6 +75,8 @@ export class TicketService {
             _count: { select: { messages: true } },
           },
         },
+        categoryConfig: { select: { id: true, name: true, criticality: true } },
+        createdByUser: { select: { id: true, name: true } },
       },
     });
 
@@ -74,12 +93,23 @@ export class TicketService {
       throw new AppException('Ticket no encontrado', 'TICKET_NOT_FOUND', 404);
     }
 
+    const data: Record<string, any> = {};
+    if (dto.status !== undefined) data.status = dto.status;
+    if (dto.adminNotes !== undefined) data.adminNotes = dto.adminNotes;
+
+    // SLA tracking: first response when moving to IN_PROGRESS
+    if (dto.status === 'IN_PROGRESS' && !ticket.firstResponseAt) {
+      data.firstResponseAt = new Date();
+    }
+
+    // SLA tracking: resolved timestamp
+    if (dto.status === 'RESOLVED' && !ticket.resolvedAt) {
+      data.resolvedAt = new Date();
+    }
+
     const updated = await this.prisma.ticket.update({
       where: { id: ticketId },
-      data: {
-        ...(dto.status !== undefined && { status: dto.status }),
-        ...(dto.adminNotes !== undefined && { adminNotes: dto.adminNotes }),
-      },
+      data,
       include: {
         client: { select: { id: true, name: true, email: true } },
         project: { select: { id: true, name: true } },
@@ -90,7 +120,6 @@ export class TicketService {
 
     this.logger.log(`Ticket ${ticketId} updated: status=${dto.status}`);
 
-    // Emit event for notifications when status changes
     if (dto.status !== undefined) {
       this.eventEmitter.emit('ticket.updated', {
         ticketId: updated.id,
@@ -127,21 +156,50 @@ export class TicketService {
       throw new AppException('Proyecto no encontrado o no pertenece al cliente', 'PROJECT_NOT_FOUND', 404);
     }
 
+    // Resolve SLA deadlines if category config exists
+    let categoryConfig: any = null;
+    let criticality: string | null = null;
+    let responseDeadline: Date | null = null;
+    let resolutionDeadline: Date | null = null;
+
+    if (dto.categoryConfigId) {
+      categoryConfig = await this.prisma.ticketCategoryConfig.findFirst({
+        where: { id: dto.categoryConfigId, organizationId: orgId, isActive: true },
+      });
+    }
+
+    if (categoryConfig) {
+      criticality = categoryConfig.criticality;
+      const slaConfig = await this.prisma.slaConfig.findUnique({
+        where: { organizationId_criticality: { organizationId: orgId, criticality: categoryConfig.criticality } },
+      });
+
+      if (slaConfig) {
+        const businessHours = await this.prisma.businessHoursConfig.findUnique({
+          where: { organizationId: orgId },
+        });
+
+        const bhConfig = businessHours
+          ? { start: businessHours.businessHoursStart, end: businessHours.businessHoursEnd, days: parseBusinessDays(businessHours.businessDays), timezone: businessHours.timezone }
+          : undefined;
+
+        const now = new Date();
+        responseDeadline = calculateBusinessDeadline(now, slaConfig.responseTimeMinutes, bhConfig);
+        resolutionDeadline = calculateBusinessDeadline(now, slaConfig.resolutionTimeMinutes, bhConfig);
+      }
+    }
+
     const categoryLabel = dto.category === 'SUPPORT_REQUEST' ? 'Soporte' : 'Desarrollo';
     const channelName = `[${categoryLabel}] ${dto.title}`;
     const taskTitle = `[Ticket] ${dto.title}`;
 
-    // Collect channel members
     const memberIds = project.members.map((m) => m.userId);
-    // Add client user if has portal access
     if (client.userId && !memberIds.includes(client.userId)) {
       memberIds.push(client.userId);
     }
-    // Add project responsible
     if (project.responsibleId && !memberIds.includes(project.responsibleId)) {
       memberIds.push(project.responsibleId);
     }
-    // Add PO/PM
     const poAndPm = await this.prisma.organizationMember.findMany({
       where: {
         organizationId: orgId,
@@ -198,12 +256,18 @@ export class TicketService {
           priority: (dto.priority as any) ?? 'MEDIUM',
           taskId: task.id,
           channelId: channel.id,
+          createdByUserId,
+          ...(categoryConfig && { categoryConfigId: categoryConfig.id }),
+          ...(criticality && { criticality: criticality as any }),
+          ...(responseDeadline && { responseDeadline }),
+          ...(resolutionDeadline && { resolutionDeadline }),
         },
         include: {
           project: { select: { id: true, name: true } },
           client: { select: { id: true, name: true } },
           task: { select: { id: true, title: true, status: true } },
           channel: { select: { id: true, name: true } },
+          categoryConfig: { select: { id: true, name: true, criticality: true } },
         },
       });
 
@@ -222,5 +286,130 @@ export class TicketService {
     });
 
     return ticket;
+  }
+
+  // ── Category Configs ─────────────────────────────────────
+
+  async getCategories(orgId: string) {
+    return this.prisma.ticketCategoryConfig.findMany({
+      where: { organizationId: orgId },
+      orderBy: { createdAt: 'asc' },
+    });
+  }
+
+  async getActiveCategories(orgId: string) {
+    return this.prisma.ticketCategoryConfig.findMany({
+      where: { organizationId: orgId, isActive: true },
+      orderBy: { name: 'asc' },
+    });
+  }
+
+  async createCategory(orgId: string, dto: CreateCategoryConfigDto) {
+    return this.prisma.ticketCategoryConfig.create({
+      data: {
+        organizationId: orgId,
+        name: dto.name,
+        description: dto.description,
+        criticality: dto.criticality as any,
+      },
+    });
+  }
+
+  async updateCategory(orgId: string, categoryId: string, dto: UpdateCategoryConfigDto) {
+    const existing = await this.prisma.ticketCategoryConfig.findFirst({
+      where: { id: categoryId, organizationId: orgId },
+    });
+    if (!existing) {
+      throw new AppException('Categoría no encontrada', 'CATEGORY_NOT_FOUND', 404);
+    }
+
+    return this.prisma.ticketCategoryConfig.update({
+      where: { id: categoryId },
+      data: {
+        ...(dto.name !== undefined && { name: dto.name }),
+        ...(dto.description !== undefined && { description: dto.description }),
+        ...(dto.criticality !== undefined && { criticality: dto.criticality as any }),
+        ...(dto.isActive !== undefined && { isActive: dto.isActive }),
+      },
+    });
+  }
+
+  async deleteCategory(orgId: string, categoryId: string) {
+    const existing = await this.prisma.ticketCategoryConfig.findFirst({
+      where: { id: categoryId, organizationId: orgId },
+    });
+    if (!existing) {
+      throw new AppException('Categoría no encontrada', 'CATEGORY_NOT_FOUND', 404);
+    }
+
+    // Soft-delete: deactivate instead of deleting to preserve ticket references
+    return this.prisma.ticketCategoryConfig.update({
+      where: { id: categoryId },
+      data: { isActive: false },
+    });
+  }
+
+  // ── SLA Config ───────────────────────────────────────────
+
+  async getSlaConfigs(orgId: string) {
+    return this.prisma.slaConfig.findMany({
+      where: { organizationId: orgId },
+      orderBy: { criticality: 'asc' },
+    });
+  }
+
+  async upsertSlaConfigs(orgId: string, dto: UpsertSlaConfigDto) {
+    const results = await this.prisma.$transaction(
+      dto.configs.map((config) =>
+        this.prisma.slaConfig.upsert({
+          where: { organizationId_criticality: { organizationId: orgId, criticality: config.criticality as any } },
+          create: {
+            organizationId: orgId,
+            criticality: config.criticality as any,
+            responseTimeMinutes: config.responseTimeMinutes,
+            resolutionTimeMinutes: config.resolutionTimeMinutes,
+          },
+          update: {
+            responseTimeMinutes: config.responseTimeMinutes,
+            resolutionTimeMinutes: config.resolutionTimeMinutes,
+          },
+        }),
+      ),
+    );
+    return results;
+  }
+
+  // ── Business Hours ───────────────────────────────────────
+
+  async getBusinessHours(orgId: string) {
+    const config = await this.prisma.businessHoursConfig.findUnique({
+      where: { organizationId: orgId },
+    });
+
+    return config || {
+      businessHoursStart: '08:30',
+      businessHoursEnd: '17:30',
+      businessDays: '1,2,3,4,5',
+      timezone: 'America/Asuncion',
+    };
+  }
+
+  async upsertBusinessHours(orgId: string, dto: UpsertBusinessHoursDto) {
+    return this.prisma.businessHoursConfig.upsert({
+      where: { organizationId: orgId },
+      create: {
+        organizationId: orgId,
+        businessHoursStart: dto.businessHoursStart,
+        businessHoursEnd: dto.businessHoursEnd,
+        businessDays: dto.businessDays,
+        timezone: dto.timezone || 'America/Asuncion',
+      },
+      update: {
+        businessHoursStart: dto.businessHoursStart,
+        businessHoursEnd: dto.businessHoursEnd,
+        businessDays: dto.businessDays,
+        ...(dto.timezone && { timezone: dto.timezone }),
+      },
+    });
   }
 }

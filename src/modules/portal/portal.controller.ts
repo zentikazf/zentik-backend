@@ -141,4 +141,10 @@ export class PortalController {
   ) {
     return this.portalService.createTicket(user.id, projectId, dto);
   }
+
+  @Get('portal/ticket-categories')
+  @ApiOperation({ summary: 'Listar categorías activas de tickets para el portal' })
+  getTicketCategories(@CurrentUser() user: AuthenticatedUser) {
+    return this.portalService.getActiveTicketCategories(user.id);
+  }
 }

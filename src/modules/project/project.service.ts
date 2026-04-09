@@ -337,6 +337,21 @@ export class ProjectService {
       projectId: project.id,
     });
 
+    // Emit event when project transitions to DEVELOPMENT
+    if (dto.status === 'DEVELOPMENT') {
+      const fullProject = await this.prisma.project.findUnique({
+        where: { id: projectId },
+        select: { name: true, clientId: true },
+      });
+
+      this.eventEmitter.emit('project.development.started', {
+        projectId: project.id,
+        projectName: fullProject?.name || '',
+        organizationId: project.organizationId,
+        clientId: fullProject?.clientId,
+      });
+    }
+
     // Emit alcance-specific events
     if (dto.alcanceStatus) {
       if (dto.alcanceStatus === 'PENDING_APPROVAL') {
@@ -650,5 +665,17 @@ export class ProjectService {
     }
 
     return org;
+  }
+
+  async getPendingReviewCount(orgId: string): Promise<{ count: number }> {
+    const count = await this.prisma.project.count({
+      where: {
+        organizationId: orgId,
+        pendingClientReview: true,
+        lifecycleStatus: 'ACTIVE',
+      },
+    });
+
+    return { count };
   }
 }

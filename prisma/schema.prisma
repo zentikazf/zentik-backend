@@ -127,6 +127,9 @@ enum NotificationType {
   TICKET_CREATED
   TICKET_MESSAGE
   TICKET_UPDATED
+  SLA_BREACH_WARNING
+  SLA_BREACHED
+  PROJECT_DEVELOPMENT_STARTED
 }
 
 enum AlcanceStatus {
@@ -147,6 +150,12 @@ enum TicketCategory {
   SUPPORT_REQUEST
   NEW_DEVELOPMENT
   NEW_PROJECT
+}
+
+enum TicketCriticality {
+  HIGH
+  MEDIUM
+  LOW
 }
 
 enum TicketStatus {
@@ -212,6 +221,7 @@ model User {
   clientProfile       Client?              @relation("ClientOwner")
   clientGroup         Client?              @relation("ClientUsers", fields: [clientId], references: [id], onDelete: SetNull)
   createdMeetings     Meeting[]            @relation("MeetingCreator")
+  createdTickets      Ticket[]             @relation("TicketCreator")
 
   @@index([clientId])
   @@map("users")
@@ -279,7 +289,10 @@ model Organization {
   files        File[]
   labels       Label[]
   clients      Client[]
-  tickets      Ticket[]
+  tickets              Ticket[]
+  ticketCategoryConfigs TicketCategoryConfig[]
+  slaConfigs            SlaConfig[]
+  businessHoursConfig   BusinessHoursConfig?
 
   @@index([slug])
   @@map("organizations")
@@ -1012,20 +1025,85 @@ model Ticket {
   adminNotes     String?            @map("admin_notes")
   taskId         String?            @unique @map("task_id")
   channelId      String?            @unique @map("channel_id")
+
+  // SLA fields
+  categoryConfigId      String?            @map("category_config_id")
+  criticality           TicketCriticality?
+  responseDeadline      DateTime?          @map("response_deadline")
+  resolutionDeadline    DateTime?          @map("resolution_deadline")
+  firstResponseAt       DateTime?          @map("first_response_at")
+  resolvedAt            DateTime?          @map("resolved_at")
+  slaResponseBreached   Boolean            @default(false) @map("sla_response_breached")
+  slaResolutionBreached Boolean            @default(false) @map("sla_resolution_breached")
+  createdByUserId       String?            @map("created_by_user_id")
+
   createdAt      DateTime           @default(now()) @map("created_at")
   updatedAt      DateTime           @updatedAt @map("updated_at")
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  project      Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  client       Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  task         Task?        @relation(fields: [taskId], references: [id], onDelete: SetNull)
-  channel      Channel?     @relation(fields: [channelId], references: [id], onDelete: SetNull)
+  organization   Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  project        Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  client         Client                @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  task           Task?                 @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  channel        Channel?              @relation(fields: [channelId], references: [id], onDelete: SetNull)
+  categoryConfig TicketCategoryConfig? @relation(fields: [categoryConfigId], references: [id], onDelete: SetNull)
+  createdByUser  User?                 @relation("TicketCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
 
   @@index([organizationId])
   @@index([projectId])
   @@index([clientId])
   @@index([status])
+  @@index([categoryConfigId])
+  @@index([slaResponseBreached])
+  @@index([slaResolutionBreached])
   @@map("tickets")
+}
+
+// ============================================================================
+// SLA SYSTEM (Categorias configurables + SLA + Horario habil)
+// ============================================================================
+
+model TicketCategoryConfig {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  name           String
+  description    String?
+  criticality    TicketCriticality @default(MEDIUM)
+  isActive       Boolean  @default(true) @map("is_active")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  tickets      Ticket[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@map("ticket_category_configs")
+}
+
+model SlaConfig {
+  id                    String            @id @default(cuid())
+  organizationId        String            @map("organization_id")
+  criticality           TicketCriticality
+  responseTimeMinutes   Int               @map("response_time_minutes")
+  resolutionTimeMinutes Int               @map("resolution_time_minutes")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, criticality])
+  @@map("sla_configs")
+}
+
+model BusinessHoursConfig {
+  id                 String @id @default(cuid())
+  organizationId     String @unique @map("organization_id")
+  businessHoursStart String @default("08:30") @map("business_hours_start")
+  businessHoursEnd   String @default("17:30") @map("business_hours_end")
+  businessDays       String @default("1,2,3,4,5") @map("business_days")
+  timezone           String @default("America/Asuncion")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("business_hours_configs")
 }
 
 // ============================================================================

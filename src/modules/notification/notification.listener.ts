@@ -412,6 +412,92 @@ export class NotificationListener {
     }
   }
 
+  // ============================================
+  // SLA EVENTS
+  // ============================================
+
+  @OnEvent('sla.breached')
+  async handleSlaBreach(event: {
+    ticketId: string;
+    title: string;
+    type: 'response' | 'resolution';
+    organizationId: string;
+    projectId: string;
+  }) {
+    this.logger.warn(`SLA ${event.type} breached for ticket ${event.ticketId}`);
+
+    const typeLabel = event.type === 'response' ? 'respuesta' : 'resolución';
+
+    try {
+      await this.notificationService.notifyProjectManagers(event.projectId, {
+        type: 'SLA_BREACHED',
+        title: `SLA de ${typeLabel} vencido`,
+        body: `El ticket "${event.title}" ha excedido el tiempo de ${typeLabel} permitido`,
+        metadata: { ticketId: event.ticketId, slaType: event.type },
+      });
+    } catch (err: any) {
+      this.logger.error(`Error notifying SLA breach: ${err?.message}`);
+    }
+  }
+
+  @OnEvent('sla.warning')
+  async handleSlaWarning(event: {
+    ticketId: string;
+    title: string;
+    type: 'response' | 'resolution';
+    organizationId: string;
+    projectId: string;
+    progress: number;
+  }) {
+    this.logger.log(`SLA warning at ${event.progress}% for ticket ${event.ticketId}`);
+
+    try {
+      await this.notificationService.notifyProjectManagers(event.projectId, {
+        type: 'SLA_BREACH_WARNING',
+        title: 'Advertencia de SLA',
+        body: `El ticket "${event.title}" está al ${event.progress}% del tiempo de respuesta permitido`,
+        metadata: { ticketId: event.ticketId, slaType: event.type, progress: event.progress },
+      });
+    } catch (err: any) {
+      this.logger.error(`Error notifying SLA warning: ${err?.message}`);
+    }
+  }
+
+  // ============================================
+  // PROJECT DEVELOPMENT STARTED
+  // ============================================
+
+  @OnEvent('project.development.started')
+  async handleProjectDevelopmentStarted(event: {
+    projectId: string;
+    projectName: string;
+    organizationId: string;
+    clientId?: string;
+  }) {
+    this.logger.log(`Proyecto ${event.projectId} pasó a Desarrollo`);
+
+    if (!event.clientId) return;
+
+    try {
+      const client = await this.prisma.client.findUnique({
+        where: { id: event.clientId },
+        select: { userId: true },
+      });
+
+      if (client?.userId) {
+        await this.notificationService.create({
+          userId: client.userId,
+          type: 'PROJECT_DEVELOPMENT_STARTED',
+          title: 'Tu proyecto ha comenzado la fase de desarrollo',
+          body: `El proyecto "${event.projectName}" ha iniciado su fase de desarrollo`,
+          metadata: { projectId: event.projectId },
+        });
+      }
+    } catch (err: any) {
+      this.logger.error(`Error notifying project development started: ${err?.message}`);
+    }
+  }
+
   @OnEvent('ticket.updated')
   async handleTicketUpdated(event: {
     ticketId: string;

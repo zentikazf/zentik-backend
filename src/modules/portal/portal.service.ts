@@ -529,4 +529,16 @@ export class PortalService {
     this.logger.log(`Suggestion ${suggestionId} converted to task ${result.taskId}`);
     return result;
   }
+
+  // ── Ticket Categories (Portal) ─────────────────────────
+
+  async getActiveTicketCategories(userId: string) {
+    const client = await this.getClientByUserId(userId);
+
+    return this.prisma.ticketCategoryConfig.findMany({
+      where: { organizationId: client.organizationId, isActive: true },
+      select: { id: true, name: true, description: true },
+      orderBy: { name: 'asc' },
+    });
+  }
 }

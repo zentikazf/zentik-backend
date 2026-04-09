@@ -57,6 +57,13 @@ export class ProjectController {
     return this.projectService.findAll(orgId, filters);
   }
 
+  @Get('organizations/:orgId/projects/pending-count')
+  @Permissions('read:projects')
+  @ApiOperation({ summary: 'Contar proyectos pendientes de revisión del cliente' })
+  getPendingReviewCount(@Param('orgId') orgId: string) {
+    return this.projectService.getPendingReviewCount(orgId);
+  }
+
   // ============================================
   // PROJECT CRUD
   // ============================================

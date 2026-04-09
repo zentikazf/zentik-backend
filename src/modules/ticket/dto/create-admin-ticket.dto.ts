@@ -31,4 +31,9 @@ export class CreateAdminTicketDto {
   @ApiProperty({ description: 'ID del proyecto' })
   @IsString()
   projectId: string;
+
+  @ApiPropertyOptional({ description: 'ID de la categoría configurable' })
+  @IsOptional()
+  @IsString()
+  categoryConfigId?: string;
 }
