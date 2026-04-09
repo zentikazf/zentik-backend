@@ -3,6 +3,20 @@ import { PrismaService } from '../../database/prisma.service';
 import { DashboardFilterDto } from './dto';
 import { Prisma } from '@prisma/client';
 
+// Umbrales absolutos mensuales de cumplimiento de horas por miembro.
+// Verde: >= 120h | Naranja: [100, 120) h | Rojo: < 100h
+// (el tramo [100, 103) también entra en naranja, tal como lo pidió el usuario).
+const HOURS_COMPLIANCE_GREEN_MIN = 120;
+const HOURS_COMPLIANCE_ORANGE_MIN = 100;
+
+type ComplianceStatus = 'GREEN' | 'ORANGE' | 'RED';
+
+const getComplianceStatus = (totalHours: number): ComplianceStatus => {
+  if (totalHours >= HOURS_COMPLIANCE_GREEN_MIN) return 'GREEN';
+  if (totalHours >= HOURS_COMPLIANCE_ORANGE_MIN) return 'ORANGE';
+  return 'RED';
+};
+
 @Injectable()
 export class DashboardService {
   constructor(private readonly prisma: PrismaService) {}
@@ -11,6 +25,7 @@ export class DashboardService {
     const { startDate, endDate, clientId, memberId } = filters;
 
     const dateRange = this.buildDateRange(startDate, endDate);
+    const monthRange = this.buildCurrentMonthRange();
 
     const [
       activeProjects,
@@ -23,7 +38,7 @@ export class DashboardService {
       this.getActiveProjects(orgId, clientId, memberId),
       this.getPendingTasks(orgId, dateRange, clientId, memberId),
       this.getCompletedTasks(orgId, dateRange, clientId, memberId),
-      this.getTeamMembers(orgId, dateRange, clientId),
+      this.getTeamMembers(orgId, dateRange, monthRange, clientId, memberId),
       this.getHours(orgId, dateRange, clientId, memberId),
       this.getOverdueTasks(orgId, clientId, memberId),
     ]);
@@ -36,6 +51,7 @@ export class DashboardService {
       hours,
       overdueTasks,
       period: { startDate: dateRange.start, endDate: dateRange.end },
+      complianceMonth: { start: monthRange.start, end: monthRange.end },
     };
   }
 
@@ -45,6 +61,13 @@ export class DashboardService {
       ? new Date(startDate)
       : new Date(now.getFullYear(), now.getMonth(), 1);
     const end = endDate ? new Date(endDate) : now;
+    return { start, end };
+  }
+
+  private buildCurrentMonthRange() {
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+    const end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
     return { start, end };
   }
 
@@ -80,6 +103,9 @@ export class DashboardService {
     clientId?: string,
     memberId?: string,
   ) {
+    // Filtramos por updatedAt: tareas que siguen pendientes y que tuvieron
+    // movimiento dentro del rango (más útil que createdAt, que ocultaba las
+    // tareas antiguas que siguen activas).
     const where: Prisma.TaskWhereInput = {
       project: {
         organizationId: orgId,
@@ -87,7 +113,7 @@ export class DashboardService {
         ...(clientId && { clientId }),
       },
       status: { in: ['TODO', 'IN_PROGRESS', 'IN_REVIEW'] },
-      createdAt: { gte: dateRange.start, lte: dateRange.end },
+      updatedAt: { gte: dateRange.start, lte: dateRange.end },
     };
     if (memberId) where.assignments = { some: { userId: memberId } };
 
@@ -152,7 +178,9 @@ export class DashboardService {
   private async getTeamMembers(
     orgId: string,
     dateRange: { start: Date; end: Date },
+    monthRange: { start: Date; end: Date },
     clientId?: string,
+    memberId?: string,
   ) {
     const projectFilter: Prisma.ProjectWhereInput = {
       organizationId: orgId,
@@ -160,18 +188,32 @@ export class DashboardService {
       ...(clientId && { clientId }),
     };
 
-    const [members, activeTaskCounts, completedTaskCounts] = await Promise.all([
-      this.prisma.organizationMember.findMany({
-        where: { organizationId: orgId },
-        select: {
-          user: { select: { id: true, name: true, email: true, image: true } },
-          role: { select: { id: true, name: true } },
-        },
-      }),
+    // Traemos miembros excluyendo el rol "Cliente" (externos con acceso al portal).
+    const members = await this.prisma.organizationMember.findMany({
+      where: {
+        organizationId: orgId,
+        role: { name: { not: 'Cliente' } },
+        ...(memberId && { userId: memberId }),
+      },
+      select: {
+        user: { select: { id: true, name: true, email: true, image: true } },
+        role: { select: { id: true, name: true } },
+      },
+    });
+
+    const memberIds = members.map((m) => m.user.id);
+    if (memberIds.length === 0) {
+      return { count: 0, items: [] };
+    }
+
+    // Tareas activas por usuario (filtradas por cliente si aplica).
+    const [activeTaskCounts, completedTaskCounts, monthlyMinutes] = await Promise.all([
       this.prisma.taskAssignment.groupBy({
         by: ['userId'],
         where: {
-          task: { ...projectFilter ? { project: projectFilter } : {},
+          userId: { in: memberIds },
+          task: {
+            project: projectFilter,
             status: { in: ['TODO', 'IN_PROGRESS', 'IN_REVIEW'] },
           },
         },
@@ -180,28 +222,64 @@ export class DashboardService {
       this.prisma.taskAssignment.groupBy({
         by: ['userId'],
         where: {
-          task: { ...projectFilter ? { project: projectFilter } : {},
+          userId: { in: memberIds },
+          task: {
+            project: projectFilter,
             status: 'DONE',
             updatedAt: { gte: dateRange.start, lte: dateRange.end },
           },
         },
         _count: true,
       }),
+      // Minutos del mes natural corriente por miembro (independiente de filtros
+      // de rango de fechas: la barra de cumplimiento siempre refiere al mes).
+      this.prisma.timeEntry.groupBy({
+        by: ['userId'],
+        where: {
+          userId: { in: memberIds },
+          startTime: { gte: monthRange.start, lte: monthRange.end },
+          task: { project: { organizationId: orgId } },
+        },
+        _sum: { duration: true },
+      }),
     ]);
 
     const activeMap = new Map(activeTaskCounts.map((r) => [r.userId, r._count]));
     const completedMap = new Map(completedTaskCounts.map((r) => [r.userId, r._count]));
+    const minutesMap = new Map(
+      monthlyMinutes.map((r) => [r.userId, r._sum.duration || 0]),
+    );
 
-    const memberStats = members.map((m) => ({
-      ...m.user,
-      role: m.role?.name || null,
-      activeTasks: activeMap.get(m.user.id) || 0,
-      completedTasks: completedMap.get(m.user.id) || 0,
-    }));
+    const memberStats = members.map((m) => {
+      const minutes = minutesMap.get(m.user.id) || 0;
+      const hours = Math.round((minutes / 60) * 100) / 100;
+      return {
+        ...m.user,
+        role: m.role?.name || null,
+        activeTasks: activeMap.get(m.user.id) || 0,
+        completedTasks: completedMap.get(m.user.id) || 0,
+        monthlyMinutes: minutes,
+        monthlyHours: hours,
+        complianceStatus: getComplianceStatus(hours),
+      };
+    });
+
+    // Orden: primero los que están en rojo para priorizar atención, luego
+    // naranja, luego verde. Dentro de cada grupo, por horas ascendentes.
+    const statusWeight: Record<ComplianceStatus, number> = { RED: 0, ORANGE: 1, GREEN: 2 };
+    memberStats.sort((a, b) => {
+      const sw = statusWeight[a.complianceStatus] - statusWeight[b.complianceStatus];
+      if (sw !== 0) return sw;
+      return a.monthlyHours - b.monthlyHours;
+    });
 
     return {
       count: memberStats.length,
       items: memberStats,
+      thresholds: {
+        green: HOURS_COMPLIANCE_GREEN_MIN,
+        orange: HOURS_COMPLIANCE_ORANGE_MIN,
+      },
     };
   }
 

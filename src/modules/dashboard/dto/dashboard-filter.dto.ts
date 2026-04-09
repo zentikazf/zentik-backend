@@ -1,5 +1,9 @@
-import { IsOptional, IsDateString, IsUUID } from 'class-validator';
+import { IsOptional, IsDateString, IsString, Matches } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
+
+// Prisma usa cuid() para los IDs, no UUIDs reales, por eso validamos con una
+// expresión permisiva en vez de @IsUUID() (que rompía todos los filtros con 400).
+const CUID_LIKE = /^[a-z0-9]{8,}$/i;
 
 export class DashboardFilterDto {
   @ApiPropertyOptional({
@@ -19,16 +23,18 @@ export class DashboardFilterDto {
   endDate?: string;
 
   @ApiPropertyOptional({
-    description: 'Filtrar por cliente',
+    description: 'Filtrar por cliente (cuid)',
   })
   @IsOptional()
-  @IsUUID()
+  @IsString()
+  @Matches(CUID_LIKE, { message: 'clientId inválido' })
   clientId?: string;
 
   @ApiPropertyOptional({
-    description: 'Filtrar por miembro del equipo',
+    description: 'Filtrar por miembro del equipo (cuid)',
   })
   @IsOptional()
-  @IsUUID()
+  @IsString()
+  @Matches(CUID_LIKE, { message: 'memberId inválido' })
   memberId?: string;
 }
