@@ -151,4 +151,32 @@ export class TicketController {
   ) {
     return this.ticketService.upsertBusinessHours(orgId, dto);
   }
+
+  // ── Holidays ─────────────────────────────────
+
+  @Get('organizations/:orgId/holidays')
+  @ApiOperation({ summary: 'Listar feriados de la organización' })
+  getHolidays(@Param('orgId') orgId: string) {
+    return this.ticketService.getHolidays(orgId);
+  }
+
+  @Post('organizations/:orgId/holidays')
+  @ApiOperation({ summary: 'Crear un feriado' })
+  @HttpCode(HttpStatus.CREATED)
+  createHoliday(
+    @Param('orgId') orgId: string,
+    @Body() dto: { name: string; date: string; recurring?: boolean },
+  ) {
+    return this.ticketService.createHoliday(orgId, dto);
+  }
+
+  @Delete('organizations/:orgId/holidays/:holidayId')
+  @ApiOperation({ summary: 'Eliminar un feriado' })
+  @HttpCode(HttpStatus.NO_CONTENT)
+  deleteHoliday(
+    @Param('orgId') orgId: string,
+    @Param('holidayId') holidayId: string,
+  ) {
+    return this.ticketService.deleteHoliday(orgId, holidayId);
+  }
 }

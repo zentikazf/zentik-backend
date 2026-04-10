@@ -23,17 +23,29 @@ function getBusinessMinutesInDay(config: BusinessHours): number {
   return (end.hours * 60 + end.minutes) - (start.hours * 60 + start.minutes);
 }
 
-function isBusinessDay(date: Date, config: BusinessHours): boolean {
+function isBusinessDay(date: Date, config: BusinessHours, holidays?: Date[]): boolean {
   // JS getDay: 0=Sun, convert to ISO: 1=Mon...7=Sun
   const jsDay = date.getDay();
   const isoDay = jsDay === 0 ? 7 : jsDay;
-  return config.days.includes(isoDay);
+  if (!config.days.includes(isoDay)) return false;
+
+  // Check if date is a holiday
+  if (holidays?.length) {
+    const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    return !holidays.some((h) => {
+      const hStr = `${h.getFullYear()}-${String(h.getMonth() + 1).padStart(2, '0')}-${String(h.getDate()).padStart(2, '0')}`;
+      return hStr === dateStr;
+    });
+  }
+
+  return true;
 }
 
 export function calculateBusinessDeadline(
   startTime: Date,
   totalMinutes: number,
   config?: Partial<BusinessHours>,
+  holidays?: Date[],
 ): Date {
   const bh: BusinessHours = {
     ...DEFAULT_BUSINESS_HOURS,
@@ -51,11 +63,11 @@ export function calculateBusinessDeadline(
 
   // If start is outside business hours, move to next business start
   const cursorMinutes = cursor.getHours() * 60 + cursor.getMinutes();
-  if (!isBusinessDay(cursor, bh) || cursorMinutes >= endOfDayMinutes) {
+  if (!isBusinessDay(cursor, bh, holidays) || cursorMinutes >= endOfDayMinutes) {
     // Move to next day's start
     cursor.setDate(cursor.getDate() + 1);
     cursor.setHours(startParsed.hours, startParsed.minutes, 0, 0);
-    while (!isBusinessDay(cursor, bh)) {
+    while (!isBusinessDay(cursor, bh, holidays)) {
       cursor.setDate(cursor.getDate() + 1);
     }
   } else if (cursorMinutes < startOfDayMinutes) {
@@ -63,7 +75,7 @@ export function calculateBusinessDeadline(
   }
 
   while (remaining > 0) {
-    if (!isBusinessDay(cursor, bh)) {
+    if (!isBusinessDay(cursor, bh, holidays)) {
       cursor.setDate(cursor.getDate() + 1);
       cursor.setHours(startParsed.hours, startParsed.minutes, 0, 0);
       continue;

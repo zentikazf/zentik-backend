@@ -164,4 +164,13 @@ export class ClientController {
   ) {
     return this.clientService.addHours(orgId, clientId, body.hours, body.note);
   }
+
+  @Post(':clientId/hours/sync')
+  @ApiOperation({ summary: 'Sincronizar horas de tareas SUPPORT completadas no procesadas' })
+  syncHours(
+    @Param('orgId') orgId: string,
+    @Param('clientId') clientId: string,
+  ) {
+    return this.clientService.syncMissedHours(orgId, clientId);
+  }
 }

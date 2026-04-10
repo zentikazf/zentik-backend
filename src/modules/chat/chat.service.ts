@@ -368,6 +368,7 @@ export class MessageService {
       channelId,
       userId,
       content: dto.content,
+      enrichedMessage: enriched,
     });
 
     this.logger.log(

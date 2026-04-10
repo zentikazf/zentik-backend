@@ -1,3 +1,8 @@
+-- Rename "Hecho" -> "Completada"
+UPDATE "board_columns"
+SET "name" = 'Completada'
+WHERE "name" = 'Hecho' AND "mapped_status" = 'DONE';
+
 -- Rename "En progreso" -> "En desarrollo"
 UPDATE "board_columns"
 SET "name" = 'En desarrollo'

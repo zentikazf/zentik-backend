@@ -175,17 +175,19 @@ export class TicketService {
       });
 
       if (slaConfig) {
-        const businessHours = await this.prisma.businessHoursConfig.findUnique({
-          where: { organizationId: orgId },
-        });
+        const [businessHours, holidayRows] = await Promise.all([
+          this.prisma.businessHoursConfig.findUnique({ where: { organizationId: orgId } }),
+          this.prisma.holiday.findMany({ where: { organizationId: orgId }, select: { date: true } }),
+        ]);
 
         const bhConfig = businessHours
           ? { start: businessHours.businessHoursStart, end: businessHours.businessHoursEnd, days: parseBusinessDays(businessHours.businessDays), timezone: businessHours.timezone }
           : undefined;
 
+        const holidays = holidayRows.map((h) => h.date);
         const now = new Date();
-        responseDeadline = calculateBusinessDeadline(now, slaConfig.responseTimeMinutes, bhConfig);
-        resolutionDeadline = calculateBusinessDeadline(now, slaConfig.resolutionTimeMinutes, bhConfig);
+        responseDeadline = calculateBusinessDeadline(now, slaConfig.responseTimeMinutes, bhConfig, holidays);
+        resolutionDeadline = calculateBusinessDeadline(now, slaConfig.resolutionTimeMinutes, bhConfig, holidays);
       }
     }
 
@@ -411,5 +413,37 @@ export class TicketService {
         ...(dto.timezone && { timezone: dto.timezone }),
       },
     });
+  }
+
+  // ── Holidays ─────────────────────────────────
+
+  async getHolidays(orgId: string) {
+    return this.prisma.holiday.findMany({
+      where: { organizationId: orgId },
+      orderBy: { date: 'asc' },
+    });
+  }
+
+  async createHoliday(orgId: string, dto: { name: string; date: string; recurring?: boolean }) {
+    return this.prisma.holiday.create({
+      data: {
+        organizationId: orgId,
+        name: dto.name,
+        date: new Date(dto.date),
+        recurring: dto.recurring ?? false,
+      },
+    });
+  }
+
+  async deleteHoliday(orgId: string, holidayId: string) {
+    const holiday = await this.prisma.holiday.findFirst({
+      where: { id: holidayId, organizationId: orgId },
+    });
+
+    if (!holiday) {
+      throw new AppException('El feriado no existe', 'HOLIDAY_NOT_FOUND', 404);
+    }
+
+    await this.prisma.holiday.delete({ where: { id: holidayId } });
   }
 }

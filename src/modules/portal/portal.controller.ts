@@ -152,4 +152,10 @@ export class PortalController {
   getTicketCategories(@CurrentUser() user: AuthenticatedUser) {
     return this.portalService.getActiveTicketCategories(user.id);
   }
+
+  @Get('portal/business-hours')
+  @ApiOperation({ summary: 'Horario de atención de la organización del cliente' })
+  getBusinessHours(@CurrentUser() user: AuthenticatedUser) {
+    return this.portalService.getBusinessHours(user.id);
+  }
 }

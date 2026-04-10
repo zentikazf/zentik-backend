@@ -497,6 +497,59 @@ export class ClientService {
     });
   }
 
+  /**
+   * Find SUPPORT tasks in DONE status that were never recorded as hour usage
+   * and process them. Fixes tasks that were completed before the event emit was added.
+   */
+  async syncMissedHours(orgId: string, clientId: string) {
+    const client = await this.findById(orgId, clientId);
+
+    // Find all DONE SUPPORT tasks for this client's projects that don't have a corresponding USAGE/LOAN transaction
+    const tasks = await this.prisma.task.findMany({
+      where: {
+        status: 'DONE',
+        type: 'SUPPORT',
+        project: {
+          clientId,
+          organizationId: orgId,
+        },
+      },
+      select: {
+        id: true,
+        title: true,
+        estimatedHours: true,
+        createdAt: true,
+      },
+    });
+
+    const existingTxns = await this.prisma.hoursTransaction.findMany({
+      where: {
+        clientId,
+        type: { in: ['USAGE', 'LOAN'] },
+        taskId: { in: tasks.map((t) => t.id) },
+      },
+      select: { taskId: true },
+    });
+
+    const processedTaskIds = new Set(existingTxns.map((t) => t.taskId));
+    const missed = tasks.filter((t) => !processedTaskIds.has(t.id));
+
+    let synced = 0;
+    for (const task of missed) {
+      const minutes = task.estimatedHours
+        ? task.estimatedHours * 60
+        : Math.round((Date.now() - new Date(task.createdAt).getTime()) / 60000);
+
+      if (minutes > 0) {
+        await this.recordHoursUsage(task.id, minutes);
+        synced++;
+        this.logger.log(`Synced missed hours: ${(minutes / 60).toFixed(2)}h for task ${task.id} (${task.title})`);
+      }
+    }
+
+    return { total: tasks.length, alreadyProcessed: processedTaskIds.size, synced };
+  }
+
   // ── Helpers ──────────────────────────────────────────
 
   /**

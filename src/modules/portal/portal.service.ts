@@ -7,6 +7,7 @@ import { UpdateSuggestionDto } from './dto/update-suggestion.dto';
 import { domainEvent } from '../../common/events/domain-event.helper';
 import { CreateTicketDto } from '../ticket/dto/create-ticket.dto';
 import { AuditService } from '../audit/audit.service';
+import { calculateBusinessDeadline, parseBusinessDays } from '../ticket/sla.util';
 
 @Injectable()
 export class PortalService {
@@ -352,7 +353,45 @@ export class PortalService {
       throw new AppException('Proyecto no encontrado', 'PROJECT_NOT_FOUND', 404);
     }
 
-    const categoryLabel = dto.category === 'SUPPORT_REQUEST' ? 'Soporte' : 'Desarrollo';
+    // Resolve dynamic category → categoryConfigId + SLA
+    let categoryConfigId: string | undefined;
+    let criticality: string | undefined;
+    let responseDeadline: Date | undefined;
+    let resolutionDeadline: Date | undefined;
+    const rawCategory = dto.category;
+
+    if (rawCategory.startsWith('dynamic:')) {
+      const configId = rawCategory.slice('dynamic:'.length);
+      const categoryConfig = await this.prisma.ticketCategoryConfig.findFirst({
+        where: { id: configId, organizationId: project.organizationId, isActive: true },
+      });
+      if (categoryConfig) {
+        categoryConfigId = categoryConfig.id;
+        criticality = categoryConfig.criticality;
+
+        const slaConfig = await this.prisma.slaConfig.findUnique({
+          where: { organizationId_criticality: { organizationId: project.organizationId, criticality: categoryConfig.criticality } },
+        });
+        if (slaConfig) {
+          const [bhConfig, holidayRows] = await Promise.all([
+            this.prisma.businessHoursConfig.findUnique({ where: { organizationId: project.organizationId } }),
+            this.prisma.holiday.findMany({ where: { organizationId: project.organizationId }, select: { date: true } }),
+          ]);
+          const bh = bhConfig ? {
+            start: bhConfig.businessHoursStart,
+            end: bhConfig.businessHoursEnd,
+            days: parseBusinessDays(bhConfig.businessDays),
+            timezone: bhConfig.timezone,
+          } : undefined;
+          const holidays = holidayRows.map((h) => h.date);
+          const now = new Date();
+          responseDeadline = calculateBusinessDeadline(now, slaConfig.responseTimeMinutes, bh, holidays);
+          resolutionDeadline = calculateBusinessDeadline(now, slaConfig.resolutionTimeMinutes, bh, holidays);
+        }
+      }
+    }
+
+    const categoryLabel = rawCategory === 'SUPPORT_REQUEST' || rawCategory.startsWith('dynamic:') ? 'Soporte' : 'Desarrollo';
     const channelName = `[${categoryLabel}] ${dto.title}`;
     const taskTitle = `[Ticket] ${dto.title}`;
 
@@ -422,10 +461,15 @@ export class PortalService {
           clientId: client.id,
           title: dto.title,
           description: dto.description,
-          category: dto.category as any,
+          category: 'SUPPORT_REQUEST' as any,
           priority: (dto.priority as any) ?? 'MEDIUM',
           taskId: task.id,
           channelId: channel.id,
+          createdByUserId: userId,
+          ...(categoryConfigId && { categoryConfigId }),
+          ...(criticality && { criticality: criticality as any }),
+          ...(responseDeadline && { responseDeadline }),
+          ...(resolutionDeadline && { resolutionDeadline }),
         },
         include: {
           project: { select: { id: true, name: true } },
@@ -548,5 +592,28 @@ export class PortalService {
       select: { id: true, name: true, description: true },
       orderBy: { name: 'asc' },
     });
+  }
+
+  async getBusinessHours(userId: string) {
+    const client = await this.getClientByUserId(userId);
+
+    const config = await this.prisma.businessHoursConfig.findUnique({
+      where: { organizationId: client.organizationId },
+    });
+
+    if (!config) return null;
+
+    const dayNames: Record<string, string> = {
+      '1': 'Lunes', '2': 'Martes', '3': 'Miércoles',
+      '4': 'Jueves', '5': 'Viernes', '6': 'Sábado', '0': 'Domingo',
+    };
+    const days = config.businessDays.split(',').map((d) => dayNames[d.trim()] || d.trim());
+
+    return {
+      start: config.businessHoursStart,
+      end: config.businessHoursEnd,
+      days,
+      timezone: config.timezone,
+    };
   }
 }

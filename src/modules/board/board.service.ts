@@ -42,7 +42,7 @@ export class BoardService {
       { name: 'Pendiente',     position: 1, color: '#8B5CF6', mappedStatus: 'TODO' as TaskStatus },
       { name: 'En desarrollo', position: 2, color: '#F59E0B', mappedStatus: 'IN_PROGRESS' as TaskStatus },
       { name: 'En revision',   position: 3, color: '#10B981', mappedStatus: 'IN_REVIEW' as TaskStatus },
-      { name: 'Hecho',         position: 4, color: '#06B6D4', mappedStatus: 'DONE' as TaskStatus },
+      { name: 'Completada',     position: 4, color: '#06B6D4', mappedStatus: 'DONE' as TaskStatus },
     ];
 
     const board = await this.prisma.$transaction(async (tx) => {

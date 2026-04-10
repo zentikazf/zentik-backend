@@ -8,6 +8,7 @@ import {
   ConnectedSocket,
 } from '@nestjs/websockets';
 import { Logger } from '@nestjs/common';
+import { OnEvent } from '@nestjs/event-emitter';
 import { Server, Socket } from 'socket.io';
 import { MessageService } from './chat.service';
 import { PrismaService } from '../../database/prisma.service';
@@ -106,13 +107,12 @@ export class ChatGateway
         return { success: false, error: 'Usuario no autenticado' };
       }
 
+      // Message created via WS — the OnEvent listener will broadcast it
       const message = await this.messageService.create(
         data.channelId,
         userId,
         { content: data.content },
       );
-
-      this.server.to(data.channelId).emit('message:new', message);
 
       return { success: true, data: message };
     } catch (error) {
@@ -153,5 +153,15 @@ export class ChatGateway
     this.logger.log(
       `Cliente ${client.id} salio del canal ${data.channelId}`,
     );
+  }
+
+  /**
+   * Broadcast messages created via REST to WebSocket subscribers.
+   * MessageService emits 'message.sent' with enrichedMessage.
+   */
+  @OnEvent('message.sent')
+  handleMessageSentEvent(payload: { channelId: string; enrichedMessage: any }) {
+    if (!payload.enrichedMessage) return;
+    this.server.to(payload.channelId).emit('message:new', payload.enrichedMessage);
   }
 }

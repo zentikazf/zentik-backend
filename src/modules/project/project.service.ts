@@ -143,10 +143,11 @@ export class ProjectService {
 
       await tx.boardColumn.createMany({
         data: [
-          { boardId: board.id, name: 'Por hacer',    position: 0, color: '#8B5CF6', mappedStatus: 'BACKLOG' },
-          { boardId: board.id, name: 'En progreso',  position: 1, color: '#F59E0B', mappedStatus: 'IN_PROGRESS' },
-          { boardId: board.id, name: 'En revision',  position: 2, color: '#10B981', mappedStatus: 'IN_REVIEW' },
-          { boardId: board.id, name: 'Hecho',        position: 3, color: '#06B6D4', mappedStatus: 'DONE' },
+          { boardId: board.id, name: 'Nuevo',         position: 0, color: '#6366F1', mappedStatus: 'BACKLOG' },
+          { boardId: board.id, name: 'Pendiente',     position: 1, color: '#8B5CF6', mappedStatus: 'TODO' },
+          { boardId: board.id, name: 'En desarrollo',  position: 2, color: '#F59E0B', mappedStatus: 'IN_PROGRESS' },
+          { boardId: board.id, name: 'En revision',   position: 3, color: '#10B981', mappedStatus: 'IN_REVIEW' },
+          { boardId: board.id, name: 'Completada',    position: 4, color: '#06B6D4', mappedStatus: 'DONE' },
         ],
       });
 
@@ -415,10 +416,11 @@ export class ProjectService {
 
       await tx.boardColumn.createMany({
         data: [
-          { boardId: board.id, name: 'Por hacer',    position: 0, color: '#8B5CF6', mappedStatus: 'BACKLOG' },
-          { boardId: board.id, name: 'En progreso',  position: 1, color: '#F59E0B', mappedStatus: 'IN_PROGRESS' },
-          { boardId: board.id, name: 'En revision',  position: 2, color: '#10B981', mappedStatus: 'IN_REVIEW' },
-          { boardId: board.id, name: 'Hecho',        position: 3, color: '#06B6D4', mappedStatus: 'DONE' },
+          { boardId: board.id, name: 'Nuevo',         position: 0, color: '#6366F1', mappedStatus: 'BACKLOG' },
+          { boardId: board.id, name: 'Pendiente',     position: 1, color: '#8B5CF6', mappedStatus: 'TODO' },
+          { boardId: board.id, name: 'En desarrollo',  position: 2, color: '#F59E0B', mappedStatus: 'IN_PROGRESS' },
+          { boardId: board.id, name: 'En revision',   position: 3, color: '#10B981', mappedStatus: 'IN_REVIEW' },
+          { boardId: board.id, name: 'Completada',    position: 4, color: '#06B6D4', mappedStatus: 'DONE' },
         ],
       });
 

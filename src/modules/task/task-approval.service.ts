@@ -20,7 +20,7 @@ export class TaskApprovalService {
         project: { select: { id: true, name: true, responsibleId: true, organizationId: true } },
         assignments: { select: { userId: true } },
       },
-    });
+    }) as any;
 
     if (!task) {
       throw new TaskNotFoundException(taskId);
@@ -46,6 +46,7 @@ export class TaskApprovalService {
       where: { id: taskId },
       data: {
         status: 'DONE',
+        endDate: task.endDate ?? new Date(),
         ...(deployColumn && { boardColumnId: deployColumn.id }),
       },
     });
@@ -57,7 +58,13 @@ export class TaskApprovalService {
       projectId: task.projectId,
       projectName: task.project.name,
       approvedById: userId,
-      assigneeIds: task.assignments.map((a) => a.userId),
+      assigneeIds: task.assignments.map((a: { userId: string }) => a.userId),
+    });
+
+    // Emit task.completed so HoursListener deducts SUPPORT hours
+    this.eventEmitter.emit('task.completed', {
+      ...domainEvent('task.completed', 'task', task.id, task.project.organizationId, userId, { title: task.title, projectId: task.projectId }),
+      task: { ...updated, type: (task as any).type, projectId: task.projectId, createdAt: task.createdAt, estimatedHours: (task as any).estimatedHours },
     });
 
     return updated;

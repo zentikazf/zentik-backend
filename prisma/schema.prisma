@@ -293,6 +293,7 @@ model Organization {
   ticketCategoryConfigs TicketCategoryConfig[]
   slaConfigs            SlaConfig[]
   businessHoursConfig   BusinessHoursConfig?
+  holidays              Holiday[]
 
   @@index([slug])
   @@map("organizations")
@@ -1108,6 +1109,20 @@ model BusinessHoursConfig {
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   @@map("business_hours_configs")
+}
+
+model Holiday {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  name           String
+  date           DateTime @db.Date
+  recurring      Boolean  @default(false)
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, date])
+  @@map("holidays")
 }
 
 // ============================================================================
