@@ -5,6 +5,7 @@ import {
   Patch,
   Body,
   Param,
+  Query,
   UseGuards,
   HttpCode,
   HttpStatus,
@@ -118,8 +119,12 @@ export class PortalController {
 
   @Get('portal/tickets')
   @ApiOperation({ summary: 'Listar tickets del cliente autenticado' })
-  getTickets(@CurrentUser() user: AuthenticatedUser) {
-    return this.portalService.getTickets(user.id);
+  getTickets(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('projectId') projectId?: string,
+    @Query('createdByUserId') createdByUserId?: string,
+  ) {
+    return this.portalService.getTickets(user.id, { projectId, createdByUserId });
   }
 
   @Get('portal/tickets/:ticketId')

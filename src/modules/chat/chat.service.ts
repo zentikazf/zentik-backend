@@ -287,10 +287,28 @@ export class ChannelService {
 export class MessageService {
   private readonly logger = new Logger(MessageService.name);
 
+  /** Shared include for user + files in message queries */
+  private readonly messageInclude = {
+    user: { select: { id: true, name: true, email: true, image: true, clientId: true } },
+    files: {
+      select: { id: true, name: true, originalName: true, mimeType: true, size: true, key: true, url: true },
+    },
+  } as const;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly eventEmitter: EventEmitter2,
   ) {}
+
+  /** Enrich message with senderType: 'client' | 'team' */
+  private enrichMessage(message: any) {
+    const { clientId, ...userRest } = message.user;
+    return {
+      ...message,
+      user: userRest,
+      senderType: clientId ? ('client' as const) : ('team' as const),
+    };
+  }
 
   async findByChannel(
     channelId: string,
@@ -309,9 +327,7 @@ export class MessageService {
       where,
       take: limit,
       orderBy: { createdAt: 'desc' },
-      include: {
-        user: { select: { id: true, name: true, email: true, image: true } },
-      },
+      include: this.messageInclude,
     });
 
     const nextCursor =
@@ -320,7 +336,7 @@ export class MessageService {
         : null;
 
     return {
-      data: messages,
+      data: messages.map((m) => this.enrichMessage(m)),
       nextCursor,
     };
   }
@@ -336,9 +352,7 @@ export class MessageService {
         channelId,
         userId,
       },
-      include: {
-        user: { select: { id: true, name: true, email: true, image: true } },
-      },
+      include: this.messageInclude,
     });
 
     // Update channel's updatedAt
@@ -346,6 +360,8 @@ export class MessageService {
       where: { id: channelId },
       data: { updatedAt: new Date() },
     });
+
+    const enriched = this.enrichMessage(message);
 
     this.eventEmitter.emit('message.sent', {
       messageId: message.id,
@@ -358,7 +374,7 @@ export class MessageService {
       `Mensaje enviado: ${message.id} en canal ${channelId}`,
     );
 
-    return message;
+    return enriched;
   }
 
   async update(messageId: string, userId: string, dto: UpdateMessageDto) {
@@ -374,16 +390,16 @@ export class MessageService {
       );
     }
 
-    return this.prisma.message.update({
+    const updated = await this.prisma.message.update({
       where: { id: messageId },
       data: {
         content: dto.content,
         editedAt: new Date(),
       },
-      include: {
-        user: { select: { id: true, name: true, email: true, image: true } },
-      },
+      include: this.messageInclude,
     });
+
+    return this.enrichMessage(updated);
   }
 
   async delete(messageId: string, userId: string) {

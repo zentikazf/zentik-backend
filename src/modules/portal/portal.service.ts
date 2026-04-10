@@ -293,14 +293,22 @@ export class PortalService {
 
   // ── Ticket methods (Portal) ────────────────────────────
 
-  async getTickets(userId: string) {
+  async getTickets(
+    userId: string,
+    filters?: { projectId?: string; createdByUserId?: string },
+  ) {
     const client = await this.getClientByUserId(userId);
 
     return this.prisma.ticket.findMany({
-      where: { clientId: client.id },
+      where: {
+        clientId: client.id,
+        ...(filters?.projectId && { projectId: filters.projectId }),
+        ...(filters?.createdByUserId && { createdByUserId: filters.createdByUserId }),
+      },
       include: {
         project: { select: { id: true, name: true } },
         task: { select: { id: true, status: true } },
+        createdByUser: { select: { id: true, name: true } },
       },
       orderBy: { createdAt: 'desc' },
     });

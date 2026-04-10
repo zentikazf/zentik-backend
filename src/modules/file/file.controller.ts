@@ -65,12 +65,14 @@ export class FileController {
     file: Express.Multer.File,
     @CurrentUser() user: AuthenticatedUser,
     @Query('taskId') taskId?: string,
+    @Query('messageId') messageId?: string,
     @Query('category') category?: 'ATTACHMENT' | 'AVATAR' | 'LOGO' | 'DOCUMENT' | 'IMAGE' | 'OTHER',
   ) {
     return this.fileService.upload({
       organizationId: user.organizationId!,
       uploadedById: user.id,
       taskId,
+      messageId,
       originalName: file.originalname,
       mimeType: file.mimetype,
       size: file.size,

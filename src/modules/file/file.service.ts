@@ -11,6 +11,7 @@ export interface UploadFileParams {
   organizationId: string;
   uploadedById: string;
   taskId?: string;
+  messageId?: string;
   originalName: string;
   mimeType: string;
   size: number;
@@ -29,7 +30,7 @@ export class FileService {
   ) {}
 
   async upload(params: UploadFileParams) {
-    const { organizationId, uploadedById, taskId, originalName, mimeType, size, buffer, category } = params;
+    const { organizationId, uploadedById, taskId, messageId, originalName, mimeType, size, buffer, category } = params;
 
     const ext = extname(originalName);
     const uniqueKey = `${organizationId}/${uuidv4()}${ext}`;
@@ -41,6 +42,7 @@ export class FileService {
         organizationId,
         uploadedById,
         taskId: taskId || null,
+        messageId: messageId || null,
         name: originalName,
         originalName,
         mimeType,

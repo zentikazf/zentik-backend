@@ -730,6 +730,7 @@ model Message {
 
   channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
   user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  files   File[]
 
   @@index([channelId])
   @@index([userId])
@@ -793,6 +794,7 @@ model File {
   organizationId String       @map("organization_id")
   taskId         String?      @map("task_id")
   commentId      String?      @map("comment_id")
+  messageId      String?      @map("message_id")
   uploadedById   String       @map("uploaded_by_id")
   name           String
   originalName   String       @map("original_name")
@@ -807,12 +809,14 @@ model File {
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   task         Task?        @relation(fields: [taskId], references: [id], onDelete: SetNull)
   comment      Comment?     @relation(fields: [commentId], references: [id], onDelete: SetNull)
+  message      Message?     @relation(fields: [messageId], references: [id], onDelete: SetNull)
   uploadedBy     User         @relation(fields: [uploadedById], references: [id])
   alcanceProject Project?     @relation("ProjectAlcanceFile")
 
   @@index([organizationId])
   @@index([taskId])
   @@index([commentId])
+  @@index([messageId])
   @@index([uploadedById])
   @@index([category])
   @@map("files")
