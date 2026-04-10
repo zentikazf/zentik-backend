@@ -442,17 +442,20 @@ export class ClientService {
         title: true,
         type: true,
         project: {
-          select: { clientId: true, organizationId: true },
+          select: { id: true, name: true, clientId: true, organizationId: true },
         },
       },
     });
 
-    if (!task?.project?.clientId) return;
+    if (!task?.project?.clientId) {
+      this.logger.warn(`recordHoursUsage: Task ${taskId} — project ${task?.project?.id} (${task?.project?.name}) has no clientId. Cannot deduct hours.`);
+      return;
+    }
 
-    // Guard: solo tareas SUPPORT descuentan del cupo contratado del cliente.
-    // Las tareas de tipo PROJECT (desarrollo) se facturan via invoice pero
-    // no consumen horas de soporte/configuracion.
-    if (task.type !== 'SUPPORT') return;
+    if (task.type !== 'SUPPORT') {
+      this.logger.log(`recordHoursUsage: Task ${taskId} is type ${task.type}, skipping (only SUPPORT deducts)`);
+      return;
+    }
 
     const clientId = task.project.clientId;
     const hours = parseFloat((durationMinutes / 60).toFixed(4));
