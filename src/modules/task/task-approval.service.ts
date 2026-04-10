@@ -155,6 +155,15 @@ export class TaskApprovalService {
     }));
   }
 
+  async countPendingApprovals(orgId: string): Promise<number> {
+    return this.prisma.task.count({
+      where: {
+        status: 'IN_REVIEW',
+        project: { organizationId: orgId },
+      },
+    });
+  }
+
   async findPendingApprovals(orgId: string) {
     const tasks = await this.prisma.task.findMany({
       where: {

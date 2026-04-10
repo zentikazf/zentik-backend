@@ -523,7 +523,7 @@ export class TaskService {
     const where: Prisma.TaskWhereInput = {
       assignments: { some: { userId } },
       status: { not: 'CANCELLED' },
-      ...(organizationId && { project: { organizationId } }),
+      ...(organizationId && { project: { organizationId, lifecycleStatus: 'ACTIVE' } }),
       ...(status?.length && { status: { in: status } }),
       ...(priority?.length && { priority: { in: priority } }),
       ...(search && {

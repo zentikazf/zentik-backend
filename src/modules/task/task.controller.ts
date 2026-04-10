@@ -229,6 +229,16 @@ export class TaskController {
     return this.taskApprovalService.rejectTask(taskId, dto.reason, user.id);
   }
 
+  @Get('organizations/:orgId/approvals/count')
+  @ApiOperation({ summary: 'Contar tareas pendientes de aprobación' })
+  @ApiResponse({ status: 200, description: 'Conteo de aprobaciones pendientes' })
+  async getApprovalsCount(
+    @Param('orgId') orgId: string,
+  ) {
+    const count = await this.taskApprovalService.countPendingApprovals(orgId);
+    return { count };
+  }
+
   @Get('organizations/:orgId/approvals')
   @ApiOperation({ summary: 'Listar tareas pendientes de aprobación en la organización' })
   @ApiResponse({ status: 200, description: 'Lista de tareas pendientes de aprobación' })
