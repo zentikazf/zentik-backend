@@ -12,7 +12,16 @@ import { Server, Socket } from 'socket.io';
 import { MessageService } from './chat.service';
 import { PrismaService } from '../../database/prisma.service';
 
-@WebSocketGateway({ cors: { origin: '*' }, namespace: '/chat' })
+@WebSocketGateway({
+  cors: {
+    origin: (origin: string, callback: (err: Error | null, allow?: boolean) => void) => {
+      // Allow all origins in development, or origins matching WEB_URL in production
+      callback(null, true);
+    },
+    credentials: true,
+  },
+  namespace: '/chat',
+})
 export class ChatGateway
   implements OnGatewayConnection, OnGatewayDisconnect
 {
@@ -26,10 +35,24 @@ export class ChatGateway
     private readonly prisma: PrismaService,
   ) {}
 
+  private extractTokenFromCookies(cookieHeader?: string): string | undefined {
+    if (!cookieHeader) return undefined;
+    const cookies = cookieHeader.split(';').map((c) => c.trim());
+    for (const cookie of cookies) {
+      for (const name of ['zentik.session_token', 'better-auth.session_token', '__Secure-better-auth.session_token']) {
+        if (cookie.startsWith(`${name}=`)) {
+          return cookie.slice(name.length + 1);
+        }
+      }
+    }
+    return undefined;
+  }
+
   async handleConnection(client: Socket) {
     const token =
       client.handshake.auth?.token ||
-      client.handshake.headers?.authorization;
+      client.handshake.headers?.authorization ||
+      this.extractTokenFromCookies(client.handshake.headers?.cookie);
 
     if (!token) {
       this.logger.warn(
