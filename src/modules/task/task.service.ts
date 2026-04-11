@@ -390,6 +390,14 @@ export class TaskService {
       });
     }
 
+    // Emit task.reopened when status changes FROM DONE to another status (reverse hours)
+    if (task.status === 'DONE' && dto.status && dto.status !== 'DONE') {
+      this.eventEmitter.emit('task.reopened', {
+        ...domainEvent('task.reopened', 'task', taskId, task.project.organizationId, userId, { title: updated!.title, projectId: task.projectId }),
+        task: { ...updated, type: (updated as any).type, projectId: task.projectId },
+      });
+    }
+
     // Emit task.completed when status changes to DONE (include type for hours listener)
     if (dto.status === 'DONE' && task.status !== 'DONE') {
       this.eventEmitter.emit('task.completed', {

@@ -62,4 +62,65 @@ export class HoursListener {
       this.logger.error(`Error auto-consuming hours for support task`, err);
     }
   }
+
+  /**
+   * When a SUPPORT task moves FROM DONE back to another status,
+   * reverse the hours that were consumed.
+   */
+  @OnEvent('task.reopened')
+  async onTaskReopened(event: { task: any }) {
+    try {
+      const task = event.task;
+      this.logger.log(`task.reopened received — task: ${task?.id}, type: ${task?.type}`);
+
+      if (!task || task.type !== 'SUPPORT') return;
+
+      const project = await this.prisma.project.findUnique({
+        where: { id: task.projectId },
+        select: { clientId: true },
+      });
+      if (!project?.clientId) return;
+
+      // Find the USAGE or LOAN transaction for this task and reverse it
+      const txn = await this.prisma.hoursTransaction.findFirst({
+        where: { taskId: task.id, clientId: project.clientId, type: { in: ['USAGE', 'LOAN'] } },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      if (!txn) {
+        this.logger.log(`No hours transaction found for task ${task.id} — nothing to reverse`);
+        return;
+      }
+
+      await this.prisma.$transaction(async (tx) => {
+        // Create a REFUND transaction
+        await tx.hoursTransaction.create({
+          data: {
+            clientId: project.clientId!,
+            type: 'REFUND',
+            hours: txn.hours,
+            taskId: task.id,
+            note: `Reversión: tarea reabierta — ${task.title || task.id}`,
+          },
+        });
+
+        // Reverse the client counters
+        if (txn.type === 'LOAN') {
+          await tx.client.update({
+            where: { id: project.clientId! },
+            data: { loanedHours: { decrement: txn.hours } },
+          });
+        } else {
+          await tx.client.update({
+            where: { id: project.clientId! },
+            data: { usedHours: { decrement: txn.hours } },
+          });
+        }
+      });
+
+      this.logger.log(`Reversed ${txn.hours}h (${txn.type}) for reopened task ${task.id}`);
+    } catch (err) {
+      this.logger.error(`Error reversing hours for reopened task`, err);
+    }
+  }
 }
