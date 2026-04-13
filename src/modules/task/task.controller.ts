@@ -19,6 +19,7 @@ import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { TaskService } from './task.service';
 import { TaskRelationService } from './task-relation.service';
 import { TaskApprovalService } from './task-approval.service';
+import { ClientService } from '../client/client.service';
 import {
   CreateTaskDto,
   UpdateTaskDto,
@@ -37,7 +38,15 @@ export class TaskController {
     private readonly taskService: TaskService,
     private readonly taskRelationService: TaskRelationService,
     private readonly taskApprovalService: TaskApprovalService,
+    private readonly clientService: ClientService,
   ) {}
+
+  @Get('projects/:projectId/available-hours')
+  @Permissions('view:tasks')
+  @ApiOperation({ summary: 'Consultar horas disponibles del cliente vinculado al proyecto' })
+  async getAvailableHours(@Param('projectId') projectId: string) {
+    return this.clientService.getAvailableHoursByProject(projectId);
+  }
 
   // ============================================
   // TASK CRUD

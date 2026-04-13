@@ -553,6 +553,33 @@ export class ClientService {
     return { total: tasks.length, alreadyProcessed: processedTaskIds.size, synced };
   }
 
+  /**
+   * Get available hours for a client linked to a project.
+   * Returns null if the project has no client.
+   */
+  async getAvailableHoursByProject(projectId: string): Promise<{ clientId: string; clientName: string; availableHours: number; contractedHours: number; usedHours: number; loanedHours: number } | null> {
+    const project = await this.prisma.project.findUnique({
+      where: { id: projectId },
+      select: { clientId: true },
+    });
+    if (!project?.clientId) return null;
+
+    const client = await this.prisma.client.findUnique({
+      where: { id: project.clientId },
+      select: { id: true, name: true, contractedHours: true, usedHours: true, loanedHours: true },
+    });
+    if (!client) return null;
+
+    return {
+      clientId: client.id,
+      clientName: client.name,
+      availableHours: Math.max(client.contractedHours - client.usedHours - client.loanedHours, 0),
+      contractedHours: client.contractedHours,
+      usedHours: client.usedHours,
+      loanedHours: client.loanedHours,
+    };
+  }
+
   // ── Helpers ──────────────────────────────────────────
 
   /**

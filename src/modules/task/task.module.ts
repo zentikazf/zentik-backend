@@ -4,9 +4,10 @@ import { TaskService } from './task.service';
 import { TaskRelationService } from './task-relation.service';
 import { TaskApprovalService } from './task-approval.service';
 import { ProjectModule } from '../project/project.module';
+import { ClientModule } from '../client/client.module';
 
 @Module({
-  imports: [ProjectModule],
+  imports: [ProjectModule, ClientModule],
   controllers: [TaskController],
   providers: [TaskService, TaskRelationService, TaskApprovalService],
   exports: [TaskService, TaskRelationService, TaskApprovalService],

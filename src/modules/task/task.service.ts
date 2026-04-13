@@ -6,6 +6,7 @@ import { AppException, TaskNotFoundException } from '../../common/filters/app-ex
 import { PaginatedResult } from '../../common/interfaces/request.interface';
 import { domainEvent } from '../../common/events/domain-event.helper';
 import { ProjectService } from '../project/project.service';
+import { ClientService } from '../client/client.service';
 import {
   CreateTaskDto,
   UpdateTaskDto,
@@ -20,7 +21,47 @@ export class TaskService {
     private readonly prisma: PrismaService,
     private readonly eventEmitter: EventEmitter2,
     private readonly projectService: ProjectService,
+    private readonly clientService: ClientService,
   ) {}
+
+  /**
+   * Validates that the client linked to a project has enough available hours
+   * for a SUPPORT task with the given estimatedHours. Throws if insufficient.
+   */
+  private async assertSupportHoursAvailable(projectId: string, estimatedHours: number | undefined | null, excludeTaskId?: string) {
+    if (!estimatedHours || estimatedHours <= 0) return;
+
+    const hoursInfo = await this.clientService.getAvailableHoursByProject(projectId);
+    if (!hoursInfo) return; // No client linked — skip validation
+
+    // If updating, add back the hours that were previously estimated for this task (so we don't double-count)
+    let adjustedAvailable = hoursInfo.availableHours;
+    if (excludeTaskId) {
+      const existingTask = await this.prisma.task.findUnique({
+        where: { id: excludeTaskId },
+        select: { estimatedHours: true, type: true },
+      });
+      if (existingTask?.type === 'SUPPORT' && existingTask.estimatedHours) {
+        adjustedAvailable += existingTask.estimatedHours;
+      }
+    }
+
+    if (estimatedHours > adjustedAvailable) {
+      throw new AppException(
+        `Horas insuficientes: el cliente "${hoursInfo.clientName}" tiene ${adjustedAvailable.toFixed(1)}h disponibles, pero la tarea requiere ${estimatedHours}h. Contacta al encargado para gestionar más horas con el cliente.`,
+        'INSUFFICIENT_CLIENT_HOURS',
+        400,
+        {
+          availableHours: adjustedAvailable,
+          requestedHours: estimatedHours,
+          clientId: hoursInfo.clientId,
+          clientName: hoursInfo.clientName,
+          contractedHours: hoursInfo.contractedHours,
+          usedHours: hoursInfo.usedHours,
+        },
+      );
+    }
+  }
 
   async createTask(projectId: string, dto: CreateTaskDto, userId: string) {
     await this.projectService.assertProjectNotFrozen(projectId);
@@ -31,6 +72,16 @@ export class TaskService {
 
     if (!project) {
       throw new AppException('El proyecto no existe', 'PROJECT_NOT_FOUND', 404, { projectId });
+    }
+
+    // Validate SUPPORT hours availability before creating
+    if (dto.estimatedHours) {
+      // Check if task will be SUPPORT type (set by ticket creation or explicitly)
+      const isSupportProject = await this.prisma.task.count({
+        where: { projectId, type: 'SUPPORT' },
+      });
+      // For now, validate on all tasks with estimatedHours — the hours listener only deducts SUPPORT
+      await this.assertSupportHoursAvailable(projectId, dto.estimatedHours);
     }
 
     const task = await this.prisma.$transaction(async (tx) => {
@@ -248,6 +299,11 @@ export class TaskService {
 
     if (!task) {
       throw new TaskNotFoundException(taskId);
+    }
+
+    // Validate SUPPORT hours availability when estimatedHours changes
+    if (dto.estimatedHours !== undefined && (task as any).type === 'SUPPORT') {
+      await this.assertSupportHoursAvailable(task.projectId, dto.estimatedHours, taskId);
     }
 
     const oldData = { status: task.status, priority: task.priority, title: task.title };
