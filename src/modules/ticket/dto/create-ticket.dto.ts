@@ -1,4 +1,4 @@
-import { IsString, IsEnum, IsOptional, MinLength, MaxLength } from 'class-validator';
+import { IsString, IsEnum, IsOptional, MinLength, MaxLength, Matches, ValidateIf } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export enum TicketCategoryDto {
@@ -26,9 +26,11 @@ export class CreateTicketDto {
   @MaxLength(5000, { message: 'La descripcion no puede exceder 5000 caracteres' })
   description?: string;
 
-  @ApiProperty({ enum: TicketCategoryDto, description: 'Categoria del ticket' })
+  @ApiProperty({ description: 'Categoria del ticket (enum o dynamic:<configId>)' })
+  @IsString()
+  @ValidateIf((o) => !o.category?.startsWith('dynamic:'))
   @IsEnum(TicketCategoryDto, { message: 'La categoria no es valida' })
-  category: TicketCategoryDto;
+  category: string;
 
   @ApiPropertyOptional({ enum: TicketPriorityDto, default: TicketPriorityDto.MEDIUM, description: 'Prioridad del ticket' })
   @IsOptional()
