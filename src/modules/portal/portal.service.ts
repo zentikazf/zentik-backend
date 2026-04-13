@@ -8,6 +8,7 @@ import { domainEvent } from '../../common/events/domain-event.helper';
 import { CreateTicketDto } from '../ticket/dto/create-ticket.dto';
 import { AuditService } from '../audit/audit.service';
 import { calculateBusinessDeadline, parseBusinessDays } from '../ticket/sla.util';
+import { generateTicketNumber } from '../ticket/ticket.service';
 
 @Injectable()
 export class PortalService {
@@ -324,6 +325,7 @@ export class PortalService {
         project: { select: { id: true, name: true } },
         task: { select: { id: true, title: true, status: true } },
         channel: { select: { id: true, name: true } },
+        createdByUser: { select: { id: true, name: true } },
       },
     });
 
@@ -454,6 +456,8 @@ export class PortalService {
       });
 
       // 3. Create the ticket linking task and channel
+      const ticketNumber = await generateTicketNumber(tx, project.organizationId);
+
       const created = await tx.ticket.create({
         data: {
           organizationId: project.organizationId,
@@ -466,6 +470,7 @@ export class PortalService {
           taskId: task.id,
           channelId: channel.id,
           createdByUserId: userId,
+          ticketNumber,
           ...(categoryConfigId && { categoryConfigId }),
           ...(criticality && { criticality: criticality as any }),
           ...(responseDeadline && { responseDeadline }),

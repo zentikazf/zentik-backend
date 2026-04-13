@@ -10,6 +10,29 @@ import { UpsertBusinessHoursDto } from './dto/upsert-business-hours.dto';
 import { domainEvent } from '../../common/events/domain-event.helper';
 import { calculateBusinessDeadline, parseBusinessDays } from './sla.util';
 
+/**
+ * Generates a sequential ticket number per org: YYYYMMDD-NNN
+ * Uses the Prisma transaction client to ensure atomicity.
+ */
+export async function generateTicketNumber(
+  tx: { ticket: { count: (args: any) => Promise<number> } },
+  organizationId: string,
+): Promise<string> {
+  const now = new Date();
+  const dateStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`;
+  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const endOfDay = new Date(startOfDay.getTime() + 86400000);
+
+  const countToday = await tx.ticket.count({
+    where: {
+      organizationId,
+      createdAt: { gte: startOfDay, lt: endOfDay },
+    },
+  });
+
+  return `${dateStr}-${String(countToday + 1).padStart(3, '0')}`;
+}
+
 @Injectable()
 export class TicketService {
   private readonly logger = new Logger(TicketService.name);
@@ -247,6 +270,8 @@ export class TicketService {
         },
       });
 
+      const ticketNumber = await generateTicketNumber(tx, orgId);
+
       const created = await tx.ticket.create({
         data: {
           organizationId: orgId,
@@ -259,6 +284,7 @@ export class TicketService {
           taskId: task.id,
           channelId: channel.id,
           createdByUserId,
+          ticketNumber,
           ...(categoryConfig && { categoryConfigId: categoryConfig.id }),
           ...(criticality && { criticality: criticality as any }),
           ...(responseDeadline && { responseDeadline }),

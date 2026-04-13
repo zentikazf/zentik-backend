@@ -1041,6 +1041,7 @@ model Ticket {
   slaResponseBreached   Boolean            @default(false) @map("sla_response_breached")
   slaResolutionBreached Boolean            @default(false) @map("sla_resolution_breached")
   createdByUserId       String?            @map("created_by_user_id")
+  ticketNumber          String?            @unique @map("ticket_number")
 
   createdAt      DateTime           @default(now()) @map("created_at")
   updatedAt      DateTime           @updatedAt @map("updated_at")
