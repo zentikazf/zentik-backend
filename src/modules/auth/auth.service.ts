@@ -43,12 +43,14 @@ export class AuthService {
 
     const hashedPassword = await bcrypt.hash(dto.password, SALT_ROUNDS);
 
+    const emailEnabled = this.emailInvitationService.isEnabled;
+
     const user = await this.prisma.$transaction(async (tx) => {
       const newUser = await tx.user.create({
         data: {
           email: dto.email.toLowerCase(),
           name: dto.name,
-          emailVerified: false,
+          emailVerified: !emailEnabled,
         },
       });
 
@@ -79,10 +81,18 @@ export class AuthService {
       timestamp: new Date().toISOString(),
     });
 
-    // Send welcome email (fire & forget)
-    this.emailInvitationService.sendWelcomeEmail(user.email, user.name).catch((err) => {
-      this.logger.error(`Failed to send welcome email to ${user.email}`, err);
-    });
+    // Email verification flow: if Resend is configured, send verification email;
+    // otherwise user is already marked as verified and gets a welcome email (no-op without key)
+    if (emailEnabled) {
+      const verificationToken = randomBytes(32).toString('hex');
+      await this.prisma.account.updateMany({
+        where: { userId: user.id, providerId: 'credential' },
+        data: { idToken: verificationToken },
+      });
+      this.emailInvitationService.sendVerificationEmail(user.email, user.name, verificationToken).catch((err) => {
+        this.logger.error(`Failed to send verification email to ${user.email}`, err);
+      });
+    }
 
     this.logger.log(`User registered: ${user.email}`);
 

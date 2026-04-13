@@ -3,6 +3,7 @@ import { EmailService } from './email.service';
 import { AppConfigService } from '../../config/app.config';
 import {
   welcomeEmail,
+  verifyEmailTemplate,
   teamInviteEmail,
   clientUserEmail,
   clientSubUserEmail,
@@ -17,11 +18,23 @@ export class EmailInvitationService {
     private readonly config: AppConfigService,
   ) {}
 
+  /** Whether email sending is enabled (Resend API key configured) */
+  get isEnabled(): boolean {
+    return this.emailService.isEnabled;
+  }
+
   /** Send welcome email after user registration */
   async sendWelcomeEmail(email: string, name: string) {
     const loginUrl = `${this.config.webUrl}/login`;
     const html = welcomeEmail(name, loginUrl);
     await this.emailService.send(email, 'Bienvenido a Zentikk', html);
+  }
+
+  /** Send email verification with token link */
+  async sendVerificationEmail(email: string, name: string, token: string) {
+    const verifyUrl = `${this.config.webUrl}/verify-email?token=${token}`;
+    const html = verifyEmailTemplate(name, verifyUrl);
+    await this.emailService.send(email, 'Verifica tu correo — Zentikk', html);
   }
 
   /** Send team member invitation email with temporary credentials */

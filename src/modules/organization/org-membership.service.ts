@@ -247,12 +247,13 @@ export class OrgMembershipService {
     } else {
       isNewUser = true;
       const hashedPassword = await bcrypt.hash(tempPassword, 12);
+      const emailEnabled = this.emailInvitationService.isEnabled;
       user = await this.prisma.$transaction(async (tx) => {
         const newUser = await tx.user.create({
           data: {
             email,
             name: dto.name,
-            emailVerified: true,
+            emailVerified: !emailEnabled,
             onboardingCompleted: true,
             mustChangePassword: true,
           },

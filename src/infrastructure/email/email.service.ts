@@ -17,6 +17,11 @@ export class EmailService {
     }
   }
 
+  /** Whether Resend is configured and emails will actually be sent */
+  get isEnabled(): boolean {
+    return this.resend !== null;
+  }
+
   async send(to: string, subject: string, html: string): Promise<void> {
     if (!this.resend) {
       this.logger.warn(`Email not sent (no API key): "${subject}" → ${to}`);

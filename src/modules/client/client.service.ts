@@ -217,13 +217,14 @@ export class ClientService {
     const clienteRole = await this.ensureClienteRole(orgId);
 
     const hashedPassword = await bcrypt.hash(dto.password, 12);
+    const emailEnabled = this.emailInvitationService.isEnabled;
 
     const updatedClient = await this.prisma.$transaction(async (tx) => {
       const user = await tx.user.create({
         data: {
           email: dto.email.toLowerCase(),
           name: dto.name,
-          emailVerified: true,
+          emailVerified: !emailEnabled,
         },
       });
 
@@ -313,13 +314,14 @@ export class ClientService {
     const clienteRole = await this.ensureClienteRole(orgId);
 
     const hashedPassword = await bcrypt.hash(dto.password, 12);
+    const emailEnabled = this.emailInvitationService.isEnabled;
 
     const user = await this.prisma.$transaction(async (tx) => {
       const created = await tx.user.create({
         data: {
           email: dto.email.toLowerCase(),
           name: dto.name,
-          emailVerified: true,
+          emailVerified: !emailEnabled,
           mustChangePassword: true,
           clientId: client.id,
         },

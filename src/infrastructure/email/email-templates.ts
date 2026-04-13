@@ -48,6 +48,17 @@ ${button('Iniciar sesion', loginUrl)}
   `);
 }
 
+export function verifyEmailTemplate(name: string, verifyUrl: string): string {
+  return layout(`
+<h2 style="margin:0 0 16px;font-size:18px;color:#1e293b">Verifica tu correo, ${name}</h2>
+<p style="color:#475569;font-size:14px;line-height:1.6;margin:0 0 8px">
+  Gracias por registrarte en Zentikk. Para completar tu registro y activar tu cuenta, verifica tu correo electronico.
+</p>
+${button('Verificar correo', verifyUrl)}
+<p style="color:#94a3b8;font-size:12px;margin:16px 0 0">Si no creaste esta cuenta, puedes ignorar este correo. El enlace expira en 24 horas.</p>
+  `);
+}
+
 export function teamInviteEmail(params: {
   memberName: string;
   invitedByName: string;
