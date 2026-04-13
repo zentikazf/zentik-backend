@@ -393,6 +393,22 @@ export class BoardService {
       });
     }
 
+    // Emit task.reopened when task moves FROM DONE to another status (reverse hours)
+    if (previousStatus === 'DONE' && targetColumn.mappedStatus && targetColumn.mappedStatus !== 'DONE') {
+      this.eventEmitter.emit('task.reopened', {
+        ...domainEvent('task.reopened', 'task', dto.taskId, task!.project.organizationId, userId, { title: updatedTask.title, projectId: updatedTask.projectId }),
+        task: { ...updatedTask, type: (updatedTask as any).type, projectId: updatedTask.projectId },
+      });
+    }
+
+    // Emit task.completed when task moves TO DONE (for hours deduction)
+    if (targetColumn.mappedStatus === 'DONE' && previousStatus !== 'DONE') {
+      this.eventEmitter.emit('task.completed', {
+        ...domainEvent('task.completed', 'task', dto.taskId, task!.project.organizationId, userId, { title: updatedTask.title, projectId: updatedTask.projectId }),
+        task: { ...updatedTask, type: (updatedTask as any).type, projectId: updatedTask.projectId },
+      });
+    }
+
     return updatedTask;
   }
 }
