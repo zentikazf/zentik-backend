@@ -10,6 +10,7 @@ import {
 } from '../../common/filters/app-exception';
 import { domainEvent } from '../../common/events/domain-event.helper';
 import { OrganizationService } from './organization.service';
+import { EmailInvitationService } from '../../infrastructure/email/email-invitation.service';
 
 @Injectable()
 export class OrgMembershipService {
@@ -19,6 +20,7 @@ export class OrgMembershipService {
     private readonly prisma: PrismaService,
     private readonly eventEmitter: EventEmitter2,
     private readonly organizationService: OrganizationService,
+    private readonly emailInvitationService: EmailInvitationService,
   ) {}
 
   async listMembers(orgId: string) {
@@ -288,6 +290,20 @@ export class OrgMembershipService {
       }),
       organizationId: orgId,
       userId: user.id,
+    });
+
+    // Send team invitation email (fire & forget)
+    const inviter = await this.prisma.user.findUnique({ where: { id: createdById }, select: { name: true } });
+    const org = await this.prisma.organization.findUnique({ where: { id: orgId }, select: { name: true } });
+    this.emailInvitationService.sendTeamInviteEmail({
+      email: user.email,
+      memberName: dto.name,
+      invitedByName: inviter?.name || 'El equipo',
+      organizationName: org?.name || 'la organizacion',
+      roleName: role.name,
+      temporaryPassword: tempPassword,
+    }).catch((err) => {
+      this.logger.error(`Failed to send team invite email to ${user.email}`, err);
     });
 
     return {

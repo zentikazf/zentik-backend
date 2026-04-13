@@ -7,6 +7,7 @@ import { CreateClientUserDto } from './dto/create-client-user.dto';
 import { AppException, DuplicateResourceException } from '../../common/filters/app-exception';
 import { PaginatedResult } from '../../common/interfaces/request.interface';
 import { AuditService } from '../audit/audit.service';
+import { EmailInvitationService } from '../../infrastructure/email/email-invitation.service';
 
 @Injectable()
 export class ClientService {
@@ -15,6 +16,7 @@ export class ClientService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
+    private readonly emailInvitationService: EmailInvitationService,
   ) {}
 
   async create(orgId: string, dto: CreateClientDto) {
@@ -262,6 +264,18 @@ export class ClientService {
       resourceId: clientId,
       newData: { email: dto.email, name: dto.name, userId: updatedClient.userId },
     });
+
+    // Send client portal access email (fire & forget)
+    const org = await this.prisma.organization.findUnique({ where: { id: orgId }, select: { name: true } });
+    this.emailInvitationService.sendClientUserEmail({
+      email: dto.email.toLowerCase(),
+      clientName: dto.name,
+      organizationName: org?.name || 'la organizacion',
+      temporaryPassword: dto.password,
+    }).catch((err) => {
+      this.logger.error(`Failed to send client user email to ${dto.email}`, err);
+    });
+
     return updatedClient;
   }
 
@@ -339,6 +353,19 @@ export class ClientService {
       resourceId: clientId,
       newData: { email: dto.email, name: dto.name, userId: user.id },
     });
+
+    // Send client sub-user invitation email (fire & forget)
+    const org = await this.prisma.organization.findUnique({ where: { id: orgId }, select: { name: true } });
+    this.emailInvitationService.sendClientSubUserEmail({
+      email: dto.email.toLowerCase(),
+      userName: dto.name,
+      clientName: client.name,
+      organizationName: org?.name || 'la organizacion',
+      temporaryPassword: dto.password,
+    }).catch((err) => {
+      this.logger.error(`Failed to send client sub-user email to ${dto.email}`, err);
+    });
+
     return { id: user.id, name: user.name, email: user.email, createdAt: user.createdAt };
   }
 

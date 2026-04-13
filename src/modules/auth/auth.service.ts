@@ -14,6 +14,7 @@ import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
 import { OrganizationService } from '../organization/organization.service';
+import { EmailInvitationService } from '../../infrastructure/email/email-invitation.service';
 
 const SALT_ROUNDS = 12;
 const SESSION_EXPIRY_MINUTES = 30;
@@ -28,6 +29,7 @@ export class AuthService {
     private readonly prisma: PrismaService,
     private readonly eventEmitter: EventEmitter2,
     private readonly organizationService: OrganizationService,
+    private readonly emailInvitationService: EmailInvitationService,
   ) {}
 
   async register(dto: RegisterDto, ipAddress?: string, userAgent?: string) {
@@ -75,6 +77,11 @@ export class AuthService {
       email: user.email,
       name: user.name,
       timestamp: new Date().toISOString(),
+    });
+
+    // Send welcome email (fire & forget)
+    this.emailInvitationService.sendWelcomeEmail(user.email, user.name).catch((err) => {
+      this.logger.error(`Failed to send welcome email to ${user.email}`, err);
     });
 
     this.logger.log(`User registered: ${user.email}`);

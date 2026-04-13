@@ -24,9 +24,8 @@ export class AppConfigService {
   get githubClientId(): string | undefined { return this.configService.get<string>('GITHUB_CLIENT_ID'); }
   get githubClientSecret(): string | undefined { return this.configService.get<string>('GITHUB_CLIENT_SECRET'); }
 
-  get sendgridApiKey(): string | undefined { return this.configService.get<string>('SENDGRID_API_KEY'); }
-  get sendgridFromEmail(): string { return this.configService.getOrThrow<string>('SENDGRID_FROM_EMAIL'); }
-  get sendgridFromName(): string { return this.configService.getOrThrow<string>('SENDGRID_FROM_NAME'); }
+  get resendApiKey(): string | undefined { return this.configService.get<string>('RESEND_API_KEY'); }
+  get emailFrom(): string { return this.configService.get<string>('EMAIL_FROM') || 'Zentikk <noreply@zentikk.com>'; }
 
   get storageEndpoint(): string | undefined { return this.configService.get<string>('STORAGE_ENDPOINT'); }
   get storageAccessKey(): string | undefined { return this.configService.get<string>('STORAGE_ACCESS_KEY'); }

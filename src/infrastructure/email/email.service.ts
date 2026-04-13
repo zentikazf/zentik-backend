@@ -1,39 +1,44 @@
 import { Injectable, Logger } from '@nestjs/common';
-import sgMail from '@sendgrid/mail';
+import { Resend } from 'resend';
 import { AppConfigService } from '../../config/app.config';
-import { CircuitBreaker } from '../../common/utils/circuit-breaker';
 
 @Injectable()
 export class EmailService {
   private readonly logger = new Logger(EmailService.name);
-  private readonly circuit = new CircuitBreaker(5, 60_000);
+  private resend: Resend | null = null;
 
   constructor(private readonly config: AppConfigService) {
-    const apiKey = config.sendgridApiKey;
+    const apiKey = config.resendApiKey;
     if (apiKey) {
-      sgMail.setApiKey(apiKey);
+      this.resend = new Resend(apiKey);
+      this.logger.log('Resend email service initialized');
+    } else {
+      this.logger.warn('RESEND_API_KEY not configured — emails will be logged but not sent');
     }
   }
 
   async send(to: string, subject: string, html: string): Promise<void> {
-    if (!this.config.sendgridApiKey) {
-      this.logger.warn(`Email not sent (no API key): ${subject} → ${to}`);
+    if (!this.resend) {
+      this.logger.warn(`Email not sent (no API key): "${subject}" → ${to}`);
       return;
     }
 
-    await this.circuit.execute(
-      async () => {
-        await sgMail.send({
-          to,
-          from: { email: this.config.sendgridFromEmail, name: this.config.sendgridFromName },
-          subject,
-          html,
-        });
-        this.logger.log(`Email sent: ${subject} → ${to}`);
-      },
-      () => {
-        this.logger.warn(`Email circuit open, queuing: ${subject} → ${to}`);
-      },
-    );
+    try {
+      const { error } = await this.resend.emails.send({
+        from: this.config.emailFrom,
+        to,
+        subject,
+        html,
+      });
+
+      if (error) {
+        this.logger.error(`Resend error: ${error.message}`, error);
+        return;
+      }
+
+      this.logger.log(`Email sent: "${subject}" → ${to}`);
+    } catch (err) {
+      this.logger.error(`Failed to send email: "${subject}" → ${to}`, err);
+    }
   }
 }
