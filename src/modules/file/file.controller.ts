@@ -57,7 +57,7 @@ export class FileController {
         validators: [
           new MaxFileSizeValidator({ maxSize: 10 * 1024 * 1024 }), // 10MB
           new FileTypeValidator({
-            fileType: /^(image\/(jpeg|png|webp|gif)|application\/pdf|text\/(plain|csv)|application\/vnd\.openxmlformats)$/,
+            fileType: /^(image\/(jpeg|png|webp|gif|svg\+xml)|application\/pdf|text\/(plain|csv)|application\/vnd\.openxmlformats.*)$/,
           }),
         ],
       }),

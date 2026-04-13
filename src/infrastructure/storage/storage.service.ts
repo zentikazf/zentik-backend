@@ -27,7 +27,9 @@ export class StorageService implements OnModuleInit {
     const accessKey = this.config.storageAccessKey;
     const secretKey = this.config.storageSecretKey;
 
-    if (endpoint && accessKey && secretKey) {
+    const isRealEndpoint = endpoint && accessKey && secretKey
+      && endpoint.startsWith('http') && !endpoint.includes('your-');
+    if (isRealEndpoint) {
       this.s3 = new S3Client({
         region: this.config.storageRegion || 'us-east-1',
         endpoint,
