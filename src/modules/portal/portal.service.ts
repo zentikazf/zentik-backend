@@ -46,7 +46,7 @@ export class PortalService {
     const client = await this.getClientByUserId(userId);
 
     const projects = await this.prisma.project.findMany({
-      where: { clientId: client.id },
+      where: { clientId: client.id, lifecycleStatus: 'ACTIVE' },
       select: {
         id: true,
         name: true,
