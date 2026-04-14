@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { PrismaService } from '../../database/prisma.service';
+import { StorageService } from '../../infrastructure/storage/storage.service';
 import { CreateChannelDto, ChannelTypeDto } from './dto/create-channel.dto';
 import { SendMessageDto } from './dto/send-message.dto';
 import { UpdateMessageDto } from './dto/update-message.dto';
@@ -298,14 +299,24 @@ export class MessageService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly eventEmitter: EventEmitter2,
+    private readonly storage: StorageService,
   ) {}
 
-  /** Enrich message with senderType: 'client' | 'team' */
-  private enrichMessage(message: any) {
+  /** Enrich message with senderType + resolved file URLs */
+  private async enrichMessage(message: any) {
     const { clientId, ...userRest } = message.user;
+    const files = message.files?.length
+      ? await Promise.all(
+          message.files.map(async (f: any) => ({
+            ...f,
+            url: await this.storage.getSignedUrl(f.key),
+          })),
+        )
+      : [];
     return {
       ...message,
       user: userRest,
+      files,
       senderType: clientId ? ('client' as const) : ('team' as const),
     };
   }
@@ -336,7 +347,7 @@ export class MessageService {
         : null;
 
     return {
-      data: messages.map((m) => this.enrichMessage(m)),
+      data: await Promise.all(messages.map((m) => this.enrichMessage(m))),
       nextCursor,
     };
   }
@@ -355,13 +366,29 @@ export class MessageService {
       include: this.messageInclude,
     });
 
+    // Link uploaded files to this message
+    if (dto.fileIds?.length) {
+      await this.prisma.file.updateMany({
+        where: { id: { in: dto.fileIds }, uploadedById: userId, messageId: null },
+        data: { messageId: message.id },
+      });
+    }
+
+    // Re-fetch to include linked files
+    const final = dto.fileIds?.length
+      ? await this.prisma.message.findUnique({
+          where: { id: message.id },
+          include: this.messageInclude,
+        })
+      : message;
+
     // Update channel's updatedAt
     await this.prisma.channel.update({
       where: { id: channelId },
       data: { updatedAt: new Date() },
     });
 
-    const enriched = this.enrichMessage(message);
+    const enriched = await this.enrichMessage(final!);
 
     this.eventEmitter.emit('message.sent', {
       messageId: message.id,
@@ -400,7 +427,7 @@ export class MessageService {
       include: this.messageInclude,
     });
 
-    return this.enrichMessage(updated);
+    return this.enrichMessage(updated);  // async — returns Promise
   }
 
   async delete(messageId: string, userId: string) {

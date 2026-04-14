@@ -1,5 +1,5 @@
-import { IsString, MinLength, MaxLength } from 'class-validator';
-import { ApiProperty } from '@nestjs/swagger';
+import { IsString, MinLength, MaxLength, IsOptional, IsArray } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class SendMessageDto {
   @ApiProperty({
@@ -10,4 +10,13 @@ export class SendMessageDto {
   @MinLength(1, { message: 'El mensaje no puede estar vacio' })
   @MaxLength(5000, { message: 'El mensaje no puede exceder 5000 caracteres' })
   content: string;
+
+  @ApiPropertyOptional({
+    description: 'IDs de archivos previamente subidos para vincular a este mensaje',
+    type: [String],
+  })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  fileIds?: string[];
 }

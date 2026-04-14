@@ -80,8 +80,9 @@ export class StorageService implements OnModuleInit {
       );
     }
 
-    const apiUrl = this.config.apiUrl;
-    return `${apiUrl}/${this.config.apiPrefix}/files/serve/${encodeURIComponent(key)}`;
+    const apiUrl = this.config.apiUrl.replace(/\/+$/, '');
+    const prefix = this.config.apiPrefix.replace(/^\/+/, '');
+    return `${apiUrl}/${prefix}/files/serve/${key}`;
   }
 
   async delete(key: string): Promise<void> {
