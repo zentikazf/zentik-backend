@@ -428,6 +428,15 @@ export class PortalService {
         _max: { position: true },
       });
 
+      // Find the TODO column so the task appears in the kanban board
+      const todoColumn = await tx.boardColumn.findFirst({
+        where: {
+          mappedStatus: 'TODO',
+          board: { projectId },
+        },
+        orderBy: { position: 'asc' },
+      });
+
       const task = await tx.task.create({
         data: {
           projectId,
@@ -439,6 +448,7 @@ export class PortalService {
           position: (maxPosition._max.position ?? -1) + 1,
           createdById: project.createdById,
           clientVisible: true,
+          ...(todoColumn && { boardColumnId: todoColumn.id }),
         },
       });
 

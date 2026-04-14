@@ -244,6 +244,15 @@ export class TicketService {
         _max: { position: true },
       });
 
+      // Find the BACKLOG column so the task appears in the kanban board
+      const backlogColumn = await tx.boardColumn.findFirst({
+        where: {
+          mappedStatus: 'BACKLOG',
+          board: { projectId: dto.projectId },
+        },
+        orderBy: { position: 'asc' },
+      });
+
       const task = await tx.task.create({
         data: {
           projectId: dto.projectId,
@@ -255,6 +264,7 @@ export class TicketService {
           position: (maxPosition._max.position ?? -1) + 1,
           createdById: createdByUserId,
           clientVisible: true,
+          ...(backlogColumn && { boardColumnId: backlogColumn.id }),
         },
       });
 
