@@ -81,11 +81,22 @@ export class FileController {
     });
   }
 
-  @Get('files/:id')
-  @UseGuards(AuthGuard)
-  @ApiOperation({ summary: 'Obtener metadatos del archivo' })
-  async getById(@Param('id') id: string) {
-    return this.fileService.getById(id);
+  // PUBLIC — must be declared BEFORE files/:id to avoid route collision
+  @Get('files/:id/raw')
+  @ApiOperation({ summary: 'Servir archivo por ID (publico, sin auth)' })
+  async serveFileById(@Param('id') id: string, @Res() res: Response) {
+    const file = await this.fileService.getById(id);
+    const filePath = this.storage.getFilePath(file.key);
+
+    try {
+      await fs.access(filePath);
+    } catch {
+      throw new NotFoundException('Archivo no encontrado en disco');
+    }
+
+    res.setHeader('Content-Type', file.mimeType || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `inline; filename="${file.originalName || 'file'}"`);
+    res.sendFile(filePath);
   }
 
   @Get('files/:id/download')
@@ -94,6 +105,13 @@ export class FileController {
   async download(@Param('id') id: string) {
     const url = await this.fileService.getDownloadUrl(id);
     return { url };
+  }
+
+  @Get('files/:id')
+  @UseGuards(AuthGuard)
+  @ApiOperation({ summary: 'Obtener metadatos del archivo' })
+  async getById(@Param('id') id: string) {
+    return this.fileService.getById(id);
   }
 
   @Delete('files/:id')
@@ -136,21 +154,5 @@ export class FileController {
       page ? parseInt(page, 10) : 1,
       limit ? parseInt(limit, 10) : 20,
     );
-  }
-
-  @Get('files/serve/:key(*)')
-  @ApiOperation({ summary: 'Servir archivo desde disco local' })
-  async serveFile(@Param('key') key: string, @Res() res: Response) {
-    const filePath = this.storage.getFilePath(key);
-    try {
-      await fs.access(filePath);
-    } catch {
-      throw new NotFoundException('Archivo no encontrado');
-    }
-
-    const file = await this.fileService.getByKey(key);
-    res.setHeader('Content-Type', file?.mimeType || 'application/octet-stream');
-    res.setHeader('Content-Disposition', `inline; filename="${file?.originalName || 'file'}"`);
-    res.sendFile(filePath);
   }
 }

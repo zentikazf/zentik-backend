@@ -94,7 +94,7 @@ export class FileService {
 
   async getDownloadUrl(fileId: string): Promise<string> {
     const file = await this.getById(fileId);
-    return this.storage.getSignedUrl(file.key);
+    return this.storage.getSignedUrl(file.key, 3600, file.id);
   }
 
   async delete(fileId: string, userId: string) {

@@ -71,7 +71,7 @@ export class StorageService implements OnModuleInit {
     return key;
   }
 
-  async getSignedUrl(key: string, expiresIn = 3600): Promise<string> {
+  async getSignedUrl(key: string, expiresIn = 3600, fileId?: string): Promise<string> {
     if (this.useS3 && this.s3) {
       return getSignedUrl(
         this.s3,
@@ -82,7 +82,7 @@ export class StorageService implements OnModuleInit {
 
     const apiUrl = this.config.apiUrl.replace(/\/+$/, '');
     const prefix = this.config.apiPrefix.replace(/^\/+/, '');
-    return `${apiUrl}/${prefix}/files/serve/${key}`;
+    return `${apiUrl}/${prefix}/files/${fileId}/raw`;
   }
 
   async delete(key: string): Promise<void> {

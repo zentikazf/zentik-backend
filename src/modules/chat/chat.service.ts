@@ -309,7 +309,7 @@ export class MessageService {
       ? await Promise.all(
           message.files.map(async (f: any) => ({
             ...f,
-            url: await this.storage.getSignedUrl(f.key),
+            url: await this.storage.getSignedUrl(f.key, 3600, f.id),
           })),
         )
       : [];
