@@ -28,7 +28,6 @@ import { StorageService } from '../../infrastructure/storage/storage.service';
 
 @ApiTags('Files')
 @ApiBearerAuth()
-@UseGuards(AuthGuard)
 @Controller()
 export class FileController {
   constructor(
@@ -37,6 +36,7 @@ export class FileController {
   ) {}
 
   @Post('files/upload')
+  @UseGuards(AuthGuard)
   @ApiOperation({ summary: 'Subir un archivo' })
   @ApiConsumes('multipart/form-data')
   @ApiBody({
@@ -82,12 +82,14 @@ export class FileController {
   }
 
   @Get('files/:id')
+  @UseGuards(AuthGuard)
   @ApiOperation({ summary: 'Obtener metadatos del archivo' })
   async getById(@Param('id') id: string) {
     return this.fileService.getById(id);
   }
 
   @Get('files/:id/download')
+  @UseGuards(AuthGuard)
   @ApiOperation({ summary: 'Obtener URL de descarga firmada' })
   async download(@Param('id') id: string) {
     const url = await this.fileService.getDownloadUrl(id);
@@ -95,6 +97,7 @@ export class FileController {
   }
 
   @Delete('files/:id')
+  @UseGuards(AuthGuard)
   @ApiOperation({ summary: 'Eliminar un archivo' })
   @HttpCode(HttpStatus.NO_CONTENT)
   async delete(@Param('id') id: string, @CurrentUser() user: AuthenticatedUser) {
@@ -102,6 +105,7 @@ export class FileController {
   }
 
   @Get('projects/:projectId/files')
+  @UseGuards(AuthGuard)
   @ApiOperation({ summary: 'Listar archivos de un proyecto' })
   @ApiQuery({ name: 'page', required: false, type: Number })
   @ApiQuery({ name: 'limit', required: false, type: Number })
@@ -118,6 +122,7 @@ export class FileController {
   }
 
   @Get('tasks/:taskId/files')
+  @UseGuards(AuthGuard)
   @ApiOperation({ summary: 'Listar archivos adjuntos de una tarea' })
   @ApiQuery({ name: 'page', required: false, type: Number })
   @ApiQuery({ name: 'limit', required: false, type: Number })
