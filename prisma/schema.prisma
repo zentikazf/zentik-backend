@@ -222,6 +222,7 @@ model User {
   clientGroup         Client?              @relation("ClientUsers", fields: [clientId], references: [id], onDelete: SetNull)
   createdMeetings     Meeting[]            @relation("MeetingCreator")
   createdTickets      Ticket[]             @relation("TicketCreator")
+  deletedHoursTransactions HoursTransaction[] @relation("HoursDeletedBy")
 
   @@index([clientId])
   @@map("users")
@@ -1131,16 +1132,20 @@ model Holiday {
 // ============================================================================
 
 model HoursTransaction {
-  id        String   @id @default(cuid())
-  clientId  String   @map("client_id")
-  type      String   // USAGE | LOAN | PURCHASE | REFUND
-  hours     Float
-  taskId    String?  @map("task_id")
-  note      String?
-  createdAt DateTime @default(now()) @map("created_at")
+  id           String    @id @default(cuid())
+  clientId     String    @map("client_id")
+  type         String    // USAGE | LOAN | PURCHASE | REFUND
+  hours        Float
+  taskId       String?   @map("task_id")
+  note         String?
+  createdAt    DateTime  @default(now()) @map("created_at")
+  deletedAt    DateTime? @map("deleted_at")
+  deletedById  String?   @map("deleted_by_id")
+  deleteReason String?   @map("delete_reason")
 
-  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  task   Task?  @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  client    Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  task      Task?  @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  deletedBy User?  @relation("HoursDeletedBy", fields: [deletedById], references: [id], onDelete: SetNull)
 
   @@index([clientId])
   @@index([taskId])

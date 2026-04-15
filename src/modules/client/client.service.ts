@@ -413,7 +413,7 @@ export class ClientService {
     const available = Math.max(client.contractedHours - client.usedHours - client.loanedHours, 0);
 
     const transactions = await this.prisma.hoursTransaction.findMany({
-      where: { clientId },
+      where: { clientId, deletedAt: null },
       include: {
         task: { select: { id: true, title: true, project: { select: { id: true, name: true } } } },
       },
@@ -461,6 +461,64 @@ export class ClientService {
       newData: { hours, note, totalContracted: updated.contractedHours },
     });
     return updated;
+  }
+
+  async deleteHoursTransaction(orgId: string, clientId: string, transactionId: string, deletedById: string, reason: string) {
+    await this.findById(orgId, clientId);
+
+    const tx = await this.prisma.hoursTransaction.findFirst({
+      where: { id: transactionId, clientId, deletedAt: null },
+    });
+
+    if (!tx) {
+      throw new AppException('Transacción no encontrada', 'TRANSACTION_NOT_FOUND', 404);
+    }
+
+    await this.prisma.$transaction(async (prisma) => {
+      // Soft-delete the transaction
+      await prisma.hoursTransaction.update({
+        where: { id: transactionId },
+        data: { deletedAt: new Date(), deletedById, deleteReason: reason },
+      });
+
+      // Reverse the effect on client counters
+      if (tx.type === 'PURCHASE') {
+        await prisma.client.update({
+          where: { id: clientId },
+          data: { contractedHours: { decrement: tx.hours } },
+        });
+      } else if (tx.type === 'USAGE') {
+        await prisma.client.update({
+          where: { id: clientId },
+          data: { usedHours: { decrement: tx.hours } },
+        });
+      } else if (tx.type === 'LOAN') {
+        await prisma.client.update({
+          where: { id: clientId },
+          data: { loanedHours: { decrement: tx.hours } },
+        });
+      } else if (tx.type === 'REFUND') {
+        await prisma.client.update({
+          where: { id: clientId },
+          data: { contractedHours: { decrement: tx.hours } },
+        });
+      }
+    });
+
+    const deletedByUser = await this.prisma.user.findUnique({
+      where: { id: deletedById },
+      select: { name: true, email: true },
+    });
+
+    this.logger.log(`Hours transaction ${transactionId} deleted by ${deletedByUser?.email} — reason: ${reason}`);
+    await this.auditService.create({
+      organizationId: orgId,
+      action: 'client.hours.deleted',
+      resource: 'client',
+      resourceId: clientId,
+      oldData: { transactionId, type: tx.type, hours: tx.hours, note: tx.note },
+      newData: { deletedBy: deletedByUser?.name, reason },
+    });
   }
 
   async recordHoursUsage(taskId: string, durationMinutes: number) {

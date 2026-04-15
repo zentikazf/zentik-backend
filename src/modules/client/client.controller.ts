@@ -165,6 +165,18 @@ export class ClientController {
     return this.clientService.addHours(orgId, clientId, body.hours, body.note);
   }
 
+  @Post(':clientId/hours/:transactionId/delete')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Eliminar (soft-delete) una transacción de horas' })
+  deleteHoursTransaction(
+    @Param('orgId') orgId: string,
+    @Param('clientId') clientId: string,
+    @Param('transactionId') transactionId: string,
+    @Body() body: { reason: string; deletedById: string },
+  ) {
+    return this.clientService.deleteHoursTransaction(orgId, clientId, transactionId, body.deletedById, body.reason);
+  }
+
   @Post(':clientId/hours/sync')
   @ApiOperation({ summary: 'Sincronizar horas de tareas SUPPORT completadas no procesadas' })
   syncHours(
