@@ -181,24 +181,38 @@ export class AuthService {
     return { message: 'Sesion cerrada exitosamente' };
   }
 
-  async forgotPassword(dto: ForgotPasswordDto) {
+  async forgotPassword(dto: ForgotPasswordDto, ipAddress?: string) {
     const user = await this.prisma.user.findUnique({
       where: { email: dto.email.toLowerCase() },
     });
 
-    // Always return success to prevent email enumeration
+    // Always return success to prevent email enumeration (standard security pattern)
+    const genericResponse = {
+      message: 'Si el correo existe en nuestro sistema, recibiras instrucciones para restablecer tu contrasena',
+    };
+
     if (!user) {
       this.logger.warn(`Password reset requested for non-existent email: ${dto.email}`);
-      return {
-        message: 'Si el correo existe en nuestro sistema, recibiras instrucciones para restablecer tu contrasena',
-      };
+      return genericResponse;
+    }
+
+    // Check Resend availability BEFORE generating token to fail fast
+    if (!this.emailInvitationService.isEnabled) {
+      this.logger.error(
+        `[CRITICAL] Password reset requested for ${user.email} but RESEND_API_KEY is not configured. ` +
+        `Email service unavailable — user cannot receive reset link.`,
+      );
+      throw new AppException(
+        'El servicio de envio de correos no esta disponible en este momento. Estamos trabajando en habilitarlo. Por favor contacta al administrador.',
+        'EMAIL_SERVICE_UNAVAILABLE',
+        503,
+      );
     }
 
     const resetToken = randomBytes(32).toString('hex');
     const expiresAt = new Date();
     expiresAt.setHours(expiresAt.getHours() + RESET_TOKEN_EXPIRY_HOURS);
 
-    // Store the reset token in the account's accessToken field temporarily
     await this.prisma.account.updateMany({
       where: { userId: user.id, providerId: 'credential' },
       data: {
@@ -215,11 +229,30 @@ export class AuthService {
       timestamp: new Date().toISOString(),
     });
 
-    this.logger.log(`Password reset requested for: ${user.email}`);
+    try {
+      await this.emailInvitationService.sendPasswordResetEmail({
+        email: user.email,
+        name: user.name,
+        resetToken,
+        expiresInHours: RESET_TOKEN_EXPIRY_HOURS,
+        requestIp: ipAddress,
+      });
+    } catch (err) {
+      this.logger.error(`Failed to send password reset email to ${user.email}`, err);
+      // Rollback the token to prevent dangling tokens on failed sends
+      await this.prisma.account.updateMany({
+        where: { userId: user.id, providerId: 'credential' },
+        data: { accessToken: null, accessTokenExpiresAt: null },
+      });
+      throw new AppException(
+        'No pudimos enviar el correo de restablecimiento. Por favor intenta nuevamente en unos minutos.',
+        'EMAIL_DELIVERY_FAILED',
+        503,
+      );
+    }
 
-    return {
-      message: 'Si el correo existe en nuestro sistema, recibiras instrucciones para restablecer tu contrasena',
-    };
+    this.logger.log(`Password reset email sent to: ${user.email}`);
+    return genericResponse;
   }
 
   async resetPassword(dto: ResetPasswordDto) {
@@ -429,6 +462,110 @@ export class AuthService {
     ]);
 
     this.logger.log(`Password changed for user: ${userId}`);
+    return { message: 'Contraseña actualizada exitosamente' };
+  }
+
+  /**
+   * Voluntary password update by an authenticated user. Requires current password.
+   * Invalidates all OTHER sessions but preserves the caller's session via `currentSessionId`.
+   * Sends a notification email on success (best-effort; does not block on email failure).
+   */
+  async updatePassword(
+    userId: string,
+    currentPassword: string,
+    newPassword: string,
+    currentSessionId?: string,
+    ipAddress?: string,
+  ) {
+    if (!newPassword || newPassword.length < 8) {
+      throw new AppException(
+        'La nueva contraseña debe tener al menos 8 caracteres',
+        'INVALID_PASSWORD',
+        400,
+      );
+    }
+
+    if (currentPassword === newPassword) {
+      throw new AppException(
+        'La nueva contraseña debe ser distinta a la actual',
+        'PASSWORD_UNCHANGED',
+        400,
+      );
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, email: true, name: true },
+    });
+
+    if (!user) {
+      throw new AppException('Usuario no encontrado', 'USER_NOT_FOUND', 404);
+    }
+
+    const account = await this.prisma.account.findFirst({
+      where: { userId, providerId: 'credential' },
+      select: { id: true, password: true },
+    });
+
+    if (!account?.password) {
+      throw new AppException(
+        'Esta cuenta no tiene contraseña configurada. Usa el flujo de restablecimiento.',
+        'NO_PASSWORD_SET',
+        400,
+      );
+    }
+
+    const isCurrentValid = await bcrypt.compare(currentPassword, account.password);
+    if (!isCurrentValid) {
+      this.logger.warn(`Failed password update for ${user.email} — wrong current password`);
+      throw new AppException(
+        'La contraseña actual es incorrecta',
+        'INVALID_CURRENT_PASSWORD',
+        400,
+      );
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, SALT_ROUNDS);
+
+    await this.prisma.$transaction([
+      this.prisma.account.update({
+        where: { id: account.id },
+        data: { password: hashedPassword },
+      }),
+      this.prisma.user.update({
+        where: { id: userId },
+        data: { mustChangePassword: false },
+      }),
+      // Revoke all other sessions (keep current one for seamless UX)
+      this.prisma.session.deleteMany({
+        where: {
+          userId,
+          ...(currentSessionId ? { NOT: { id: currentSessionId } } : {}),
+        },
+      }),
+    ]);
+
+    this.logger.log(`Password updated voluntarily by user: ${user.email}`);
+
+    this.eventEmitter.emit('user.password_changed', {
+      userId,
+      email: user.email,
+      ipAddress,
+      timestamp: new Date().toISOString(),
+    });
+
+    // Non-blocking notification email — never fails the flow
+    this.emailInvitationService
+      .sendPasswordChangedEmail({
+        email: user.email,
+        name: user.name,
+        changedAt: new Date(),
+        ipAddress,
+      })
+      .catch((err) => {
+        this.logger.error(`Failed to send password-changed notification to ${user.email}`, err);
+      });
+
     return { message: 'Contraseña actualizada exitosamente' };
   }
 

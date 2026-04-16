@@ -28,6 +28,7 @@ import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
+import { UpdatePasswordDto } from './dto/update-password.dto';
 import { Throttle, SkipThrottle } from '@nestjs/throttler';
 import { CurrentUser } from '../../common/decorators';
 import { AuthenticatedUser, AuthenticatedRequest } from '../../common/interfaces/request.interface';
@@ -112,8 +113,9 @@ export class AuthController {
   })
   @ApiResponse({ status: 200, description: 'Solicitud procesada' })
   @ApiResponse({ status: 422, description: 'Datos de entrada invalidos' })
-  async forgotPassword(@Body() dto: ForgotPasswordDto) {
-    return this.authService.forgotPassword(dto);
+  async forgotPassword(@Body() dto: ForgotPasswordDto, @Req() req: Request) {
+    const ipAddress = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip;
+    return this.authService.forgotPassword(dto, ipAddress);
   }
 
   @Post('reset-password')
@@ -189,6 +191,34 @@ export class AuthController {
     @Body() dto: ChangePasswordDto,
   ) {
     return this.authService.changePassword(user.id, dto.newPassword);
+  }
+
+  @Post('update-password')
+  @UseGuards(AuthGuard)
+  @Throttle({ short: { ttl: 60000, limit: 5 } })
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Actualizar contraseña (usuario autenticado)',
+    description: 'Cambio voluntario de contraseña. Requiere contraseña actual y cierra otras sesiones.',
+  })
+  @ApiResponse({ status: 200, description: 'Contraseña actualizada' })
+  @ApiResponse({ status: 400, description: 'Contraseña actual incorrecta o nueva inválida' })
+  @ApiResponse({ status: 401, description: 'No autenticado' })
+  async updatePassword(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: UpdatePasswordDto,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    const sessionId = (req as any).sessionId as string | undefined;
+    const ipAddress = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip;
+    return this.authService.updatePassword(
+      user.id,
+      dto.currentPassword,
+      dto.newPassword,
+      sessionId,
+      ipAddress,
+    );
   }
 
   @Get('sessions')

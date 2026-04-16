@@ -7,6 +7,8 @@ import {
   teamInviteEmail,
   clientUserEmail,
   clientSubUserEmail,
+  passwordResetEmail,
+  passwordChangedEmail,
 } from './email-templates';
 
 @Injectable()
@@ -82,6 +84,53 @@ export class EmailInvitationService {
       `Acceso al Portal de ${params.organizationName}`,
       html,
     );
+  }
+
+  /** Send password reset email with time-limited token. Throws if Resend unavailable. */
+  async sendPasswordResetEmail(params: {
+    email: string;
+    name: string;
+    resetToken: string;
+    expiresInHours: number;
+    requestIp?: string;
+  }) {
+    if (!this.isEnabled) {
+      this.logger.error(
+        `[CRITICAL] Cannot send password reset email to ${params.email} — RESEND_API_KEY is not configured. Configure RESEND_API_KEY and RESEND_FROM_EMAIL env vars to enable email delivery.`,
+      );
+      throw new Error('EMAIL_SERVICE_UNAVAILABLE');
+    }
+    const resetUrl = `${this.config.webUrl}/reset-password?token=${params.resetToken}`;
+    const html = passwordResetEmail({
+      name: params.name,
+      resetUrl,
+      expiresInHours: params.expiresInHours,
+      requestIp: params.requestIp,
+    });
+    await this.emailService.send(params.email, 'Restablecer tu contrasena — Onnix', html);
+  }
+
+  /** Send informational email after a successful password change. Non-blocking — failures logged only. */
+  async sendPasswordChangedEmail(params: {
+    email: string;
+    name: string;
+    changedAt: Date;
+    ipAddress?: string;
+  }) {
+    if (!this.isEnabled) {
+      this.logger.warn(
+        `[INFO] Password-change notification skipped for ${params.email} — RESEND_API_KEY not configured. Not blocking user flow.`,
+      );
+      return;
+    }
+    const supportUrl = `${this.config.webUrl}/profile/security`;
+    const html = passwordChangedEmail({
+      name: params.name,
+      changedAt: params.changedAt,
+      ipAddress: params.ipAddress,
+      supportUrl,
+    });
+    await this.emailService.send(params.email, 'Tu contrasena fue actualizada — Onnix', html);
   }
 
   /** Send client sub-user invitation email */

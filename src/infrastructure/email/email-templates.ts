@@ -105,6 +105,64 @@ ${button('Acceder al Portal', params.portalUrl)}
   `);
 }
 
+export function passwordResetEmail(params: {
+  name: string;
+  resetUrl: string;
+  expiresInHours: number;
+  requestIp?: string;
+}): string {
+  return layout(`
+<h2 style="margin:0 0 16px;font-size:18px;color:#1e293b">Restablecer tu contrasena</h2>
+<p style="color:#475569;font-size:14px;line-height:1.6;margin:0 0 8px">
+  Hola ${params.name}, recibimos una solicitud para restablecer la contrasena de tu cuenta.
+  Si fuiste tu, haz clic en el boton de abajo para crear una nueva contrasena.
+</p>
+${button('Restablecer contrasena', params.resetUrl)}
+<p style="color:#94a3b8;font-size:12px;line-height:1.6;margin:16px 0 0">
+  El enlace expira en <strong>${params.expiresInHours} ${params.expiresInHours === 1 ? 'hora' : 'horas'}</strong> por seguridad.
+  ${params.requestIp ? `Solicitud originada desde IP <strong>${params.requestIp}</strong>.` : ''}
+</p>
+<p style="color:#94a3b8;font-size:12px;margin:16px 0 0">
+  Si no solicitaste este cambio, puedes ignorar este correo — tu contrasena seguira siendo la misma.
+  Por seguridad, te recomendamos revisar tus sesiones activas si no reconoces esta actividad.
+</p>
+  `);
+}
+
+export function passwordChangedEmail(params: {
+  name: string;
+  changedAt: Date;
+  ipAddress?: string;
+  supportUrl: string;
+}): string {
+  const formattedDate = params.changedAt.toLocaleString('es-PY', {
+    dateStyle: 'full',
+    timeStyle: 'short',
+    timeZone: 'America/Asuncion',
+  });
+  return layout(`
+<h2 style="margin:0 0 16px;font-size:18px;color:#1e293b">Tu contrasena fue actualizada</h2>
+<p style="color:#475569;font-size:14px;line-height:1.6;margin:0 0 16px">
+  Hola ${params.name}, la contrasena de tu cuenta fue cambiada exitosamente.
+</p>
+<div style="background:#f1f5f9;border-radius:8px;padding:16px;margin:0 0 16px">
+  <p style="margin:0;color:#475569;font-size:13px"><strong>Fecha:</strong> ${formattedDate}</p>
+  ${params.ipAddress ? `<p style="margin:8px 0 0;color:#475569;font-size:13px"><strong>Direccion IP:</strong> ${params.ipAddress}</p>` : ''}
+</div>
+<p style="color:#475569;font-size:14px;line-height:1.6;margin:0 0 16px">
+  Por seguridad, todas las otras sesiones activas fueron cerradas automaticamente.
+  Deberas iniciar sesion nuevamente en tus otros dispositivos.
+</p>
+<div style="background:#fef2f2;border-left:4px solid #ef4444;border-radius:4px;padding:12px 16px;margin:16px 0">
+  <p style="margin:0;color:#991b1b;font-size:13px;line-height:1.6">
+    <strong>Si no fuiste tu</strong>, tu cuenta puede estar comprometida.
+    Restablece tu contrasena inmediatamente y contacta a soporte.
+  </p>
+</div>
+${button('Contactar a soporte', params.supportUrl)}
+  `);
+}
+
 export function clientSubUserEmail(params: {
   userName: string;
   clientName: string;
