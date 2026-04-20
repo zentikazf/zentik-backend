@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
+import { randomBytes } from 'crypto';
 import { PrismaService } from '../../database/prisma.service';
 import { CreateClientDto, UpdateClientDto } from './dto';
 import { CreateClientUserDto } from './dto/create-client-user.dto';
@@ -216,7 +217,8 @@ export class ClientService {
     // Find or create "Cliente" role for the organization
     const clienteRole = await this.ensureClienteRole(orgId);
 
-    const hashedPassword = await bcrypt.hash(dto.password, 12);
+    const tempPassword = dto.password || randomBytes(6).toString('base64url');
+    const hashedPassword = await bcrypt.hash(tempPassword, 12);
     const emailEnabled = this.emailInvitationService.isEnabled;
 
     const updatedClient = await this.prisma.$transaction(async (tx) => {
@@ -272,12 +274,15 @@ export class ClientService {
       email: dto.email.toLowerCase(),
       clientName: dto.name,
       organizationName: org?.name || 'la organizacion',
-      temporaryPassword: dto.password,
+      temporaryPassword: tempPassword,
     }).catch((err) => {
       this.logger.error(`Failed to send client user email to ${dto.email}`, err);
     });
 
-    return updatedClient;
+    return {
+      ...updatedClient,
+      temporaryPassword: dto.password ? undefined : tempPassword,
+    };
   }
 
   // ── Portal toggle ──────────────────────────────────────
@@ -313,7 +318,8 @@ export class ClientService {
 
     const clienteRole = await this.ensureClienteRole(orgId);
 
-    const hashedPassword = await bcrypt.hash(dto.password, 12);
+    const tempPassword = dto.password || randomBytes(6).toString('base64url');
+    const hashedPassword = await bcrypt.hash(tempPassword, 12);
     const emailEnabled = this.emailInvitationService.isEnabled;
 
     const user = await this.prisma.$transaction(async (tx) => {
@@ -363,7 +369,7 @@ export class ClientService {
       userName: dto.name,
       clientName: client.name,
       organizationName: org?.name || 'la organizacion',
-      temporaryPassword: dto.password,
+      temporaryPassword: tempPassword,
     }).catch((err) => {
       this.logger.error(`Failed to send client sub-user email to ${dto.email}`, err);
     });

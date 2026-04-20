@@ -1,5 +1,5 @@
-import { IsString, IsEmail, MinLength, MaxLength } from 'class-validator';
-import { ApiProperty } from '@nestjs/swagger';
+import { IsString, IsEmail, IsOptional, MinLength, MaxLength } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class CreateClientUserDto {
   @ApiProperty({ example: 'Juan Pérez', description: 'Nombre del usuario cliente' })
@@ -12,9 +12,10 @@ export class CreateClientUserDto {
   @IsEmail({}, { message: 'El email no es válido' })
   email: string;
 
-  @ApiProperty({ example: 'SecurePass123', description: 'Contraseña del usuario cliente' })
+  @ApiPropertyOptional({ description: 'Contraseña manual (opcional — se genera automaticamente si no se envia)' })
+  @IsOptional()
   @IsString()
   @MinLength(8, { message: 'La contraseña debe tener al menos 8 caracteres' })
   @MaxLength(100)
-  password: string;
+  password?: string;
 }

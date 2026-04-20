@@ -307,6 +307,7 @@ export class TaskService {
     }
 
     const oldData = { status: task.status, priority: task.priority, title: task.title };
+    const transitionRef: { ticket: { id: string; title: string; projectId: string; clientId: string } | null } = { ticket: null };
 
     const updated = await this.prisma.$transaction(async (tx) => {
       // Build update payload
@@ -390,6 +391,28 @@ export class TaskService {
             data: dto.assigneeIds.map((uid) => ({ taskId, userId: uid })),
             skipDuplicates: true,
           });
+
+          // Auto-transition: Ticket OPEN → IN_PROGRESS when task gets assignees
+          const linkedTicket = await tx.ticket.findUnique({
+            where: { taskId },
+            select: { id: true, status: true, firstResponseAt: true, title: true, projectId: true, clientId: true },
+          });
+
+          if (linkedTicket && linkedTicket.status === 'OPEN') {
+            await tx.ticket.update({
+              where: { id: linkedTicket.id },
+              data: {
+                status: 'IN_PROGRESS',
+                ...(!linkedTicket.firstResponseAt && { firstResponseAt: new Date() }),
+              },
+            });
+            transitionRef.ticket = {
+              id: linkedTicket.id,
+              title: linkedTicket.title,
+              projectId: linkedTicket.projectId,
+              clientId: linkedTicket.clientId,
+            };
+          }
         }
       }
 
@@ -416,6 +439,17 @@ export class TaskService {
         },
       });
     });
+
+    // Emit ticket transition event (outside transaction — fire & forget)
+    if (transitionRef.ticket) {
+      this.eventEmitter.emit('ticket.updated', {
+        ticketId: transitionRef.ticket.id,
+        title: transitionRef.ticket.title,
+        status: 'IN_PROGRESS',
+        projectId: transitionRef.ticket.projectId,
+        clientId: transitionRef.ticket.clientId,
+      });
+    }
 
     // Emit specific status change event for activity log
     if (dto.status && dto.status !== task.status) {

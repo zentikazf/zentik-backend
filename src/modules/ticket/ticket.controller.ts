@@ -11,7 +11,7 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery, ApiResponse } from '@nestjs/swagger';
 import { AuthGuard } from '../auth/guards';
 import { CurrentUser } from '../../common/decorators';
 import { AuthenticatedUser } from '../../common/interfaces/request.interface';
@@ -30,6 +30,13 @@ export class TicketController {
   constructor(private readonly ticketService: TicketService) {}
 
   // ── Tickets ──────────────────────────────────────────────
+
+  @Get('organizations/:orgId/tickets/open-count')
+  @ApiOperation({ summary: 'Contar tickets abiertos de la organizacion' })
+  @ApiResponse({ status: 200, description: '{ count: number }' })
+  getOpenTicketsCount(@Param('orgId') orgId: string) {
+    return this.ticketService.getOpenTicketsCount(orgId);
+  }
 
   @Get('organizations/:orgId/tickets')
   @ApiOperation({ summary: 'Listar todos los tickets de la organizacion' })

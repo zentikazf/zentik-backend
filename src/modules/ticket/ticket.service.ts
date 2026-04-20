@@ -44,6 +44,13 @@ export class TicketService {
 
   // ── Ticket CRUD ──────────────────────────────────────────
 
+  async getOpenTicketsCount(orgId: string) {
+    const count = await this.prisma.ticket.count({
+      where: { organizationId: orgId, status: 'OPEN' },
+    });
+    return { count };
+  }
+
   async getOrgTickets(orgId: string, status?: string, clientId?: string, search?: string, createdByUserId?: string, categoryConfigId?: string) {
     return this.prisma.ticket.findMany({
       where: {
