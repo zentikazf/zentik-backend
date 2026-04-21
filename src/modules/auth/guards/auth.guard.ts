@@ -4,16 +4,24 @@ import {
   Injectable,
   Logger,
 } from '@nestjs/common';
-import { Request } from 'express';
+import { Request, Response } from 'express';
 import { PrismaService } from '../../../database/prisma.service';
+import { AppConfigService } from '../../../config/app.config';
 import { UnauthorizedException } from '../../../common/filters/app-exception';
 import { AuthenticatedUser } from '../../../common/interfaces/request.interface';
+
+const SESSION_TTL_HOURS = 5;
+const SESSION_TTL_MS = SESSION_TTL_HOURS * 60 * 60 * 1000;
+const SESSION_COOKIE = 'zentik.session_token';
 
 @Injectable()
 export class AuthGuard implements CanActivate {
   private readonly logger = new Logger(AuthGuard.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly configService: AppConfigService,
+  ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<Request>();
@@ -105,6 +113,24 @@ export class AuthGuard implements CanActivate {
 
       (request as any).user = authenticatedUser;
       (request as any).sessionId = session.id;
+
+      // Sliding session: renew expiration on every authenticated request
+      const newExpiresAt = new Date(Date.now() + SESSION_TTL_MS);
+      const response = context.switchToHttp().getResponse<Response>();
+
+      this.prisma.session.update({
+        where: { id: session.id },
+        data: { expiresAt: newExpiresAt },
+      }).catch((err) => this.logger.warn('Failed to extend session', err));
+
+      const isProduction = this.configService.isProduction;
+      response.cookie(SESSION_COOKIE, session.token, {
+        httpOnly: true,
+        secure: isProduction,
+        sameSite: isProduction ? 'none' : 'lax',
+        maxAge: SESSION_TTL_MS,
+        path: '/',
+      });
 
       return true;
     } catch (error) {

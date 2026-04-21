@@ -35,7 +35,7 @@ import { AuthenticatedUser, AuthenticatedRequest } from '../../common/interfaces
 import { AppConfigService } from '../../config/app.config';
 
 const SESSION_COOKIE = 'zentik.session_token';
-const SESSION_MAX_AGE = 30 * 60 * 1000; // 30 minutes
+const SESSION_MAX_AGE = 5 * 60 * 60 * 1000; // 5 hours
 
 @ApiTags('Auth')
 @Controller('auth')

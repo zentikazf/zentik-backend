@@ -17,7 +17,8 @@ import { OrganizationService } from '../organization/organization.service';
 import { EmailInvitationService } from '../../infrastructure/email/email-invitation.service';
 
 const SALT_ROUNDS = 12;
-const SESSION_EXPIRY_MINUTES = 30;
+const SESSION_EXPIRY_HOURS = 5;
+const SESSION_EXPIRY_MINUTES = SESSION_EXPIRY_HOURS * 60; // 300 minutes
 const RESET_TOKEN_EXPIRY_HOURS = 1;
 const VERIFICATION_TOKEN_EXPIRY_HOURS = 24;
 
