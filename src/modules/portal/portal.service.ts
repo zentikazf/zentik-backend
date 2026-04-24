@@ -428,10 +428,10 @@ export class PortalService {
         _max: { position: true },
       });
 
-      // Find the TODO column so the task appears in the kanban board
-      const todoColumn = await tx.boardColumn.findFirst({
+      // Find the BACKLOG column ("Nuevo") so the task appears en la columna inicial
+      const backlogColumn = await tx.boardColumn.findFirst({
         where: {
-          mappedStatus: 'TODO',
+          mappedStatus: 'BACKLOG',
           board: { projectId },
         },
         orderBy: { position: 'asc' },
@@ -443,12 +443,12 @@ export class PortalService {
           title: taskTitle,
           description: dto.description,
           priority: (dto.priority as any) ?? 'MEDIUM',
-          status: 'TODO',
+          status: 'BACKLOG',
           type: 'SUPPORT',
           position: (maxPosition._max.position ?? -1) + 1,
           createdById: project.createdById,
           clientVisible: true,
-          ...(todoColumn && { boardColumnId: todoColumn.id }),
+          ...(backlogColumn && { boardColumnId: backlogColumn.id }),
         },
       });
 
@@ -569,15 +569,25 @@ export class PortalService {
         select: { organizationId: true, createdById: true },
       });
 
+      // Find the BACKLOG column so la task cae en "Nuevo" consistente con tickets
+      const backlogColumn = await tx.boardColumn.findFirst({
+        where: {
+          mappedStatus: 'BACKLOG',
+          board: { projectId },
+        },
+        orderBy: { position: 'asc' },
+      });
+
       const task = await tx.task.create({
         data: {
           projectId,
           title: suggestion.title,
           description: suggestion.description,
           priority: suggestion.priority === 'HIGH' ? 'HIGH' : suggestion.priority === 'LOW' ? 'LOW' : 'MEDIUM',
-          status: 'TODO',
+          status: 'BACKLOG',
           createdById: project!.createdById,
           clientVisible: true,
+          ...(backlogColumn && { boardColumnId: backlogColumn.id }),
         },
       });
 
