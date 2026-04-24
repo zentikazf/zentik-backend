@@ -585,12 +585,12 @@ export class ProjectService {
     ] = await Promise.all([
       this.prisma.task.groupBy({
         by: ['status'],
-        where: { projectId },
+        where: { projectId, status: { not: 'CANCELLED' } },
         _count: { status: true },
       }),
       this.prisma.task.groupBy({
         by: ['priority'],
-        where: { projectId },
+        where: { projectId, status: { not: 'CANCELLED' } },
         _count: { priority: true },
       }),
       this.prisma.timeEntry.aggregate({

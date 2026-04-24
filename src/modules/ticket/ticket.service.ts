@@ -137,15 +137,46 @@ export class TicketService {
       data.resolvedAt = new Date();
     }
 
-    const updated = await this.prisma.ticket.update({
-      where: { id: ticketId },
-      data,
-      include: {
-        client: { select: { id: true, name: true, email: true } },
-        project: { select: { id: true, name: true } },
-        task: { select: { id: true, title: true, status: true } },
-        channel: { select: { id: true, name: true } },
-      },
+    // Sync Ticket->Task: cerrar un ticket sin haberlo resuelto = cancelacion
+    const shouldCancelTask =
+      dto.status === 'CLOSED' &&
+      ticket.taskId !== null &&
+      ticket.resolvedAt === null;
+
+    const cancelledTaskRef: { id: string; projectId: string } | null = shouldCancelTask
+      ? { id: '', projectId: '' }
+      : null;
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.ticket.update({
+        where: { id: ticketId },
+        data,
+        include: {
+          client: { select: { id: true, name: true, email: true } },
+          project: { select: { id: true, name: true } },
+          task: { select: { id: true, title: true, status: true } },
+          channel: { select: { id: true, name: true } },
+        },
+      });
+
+      if (shouldCancelTask && ticket.taskId) {
+        const task = await tx.task.findUnique({
+          where: { id: ticket.taskId },
+          select: { id: true, projectId: true, status: true },
+        });
+        if (task && task.status !== 'CANCELLED') {
+          await tx.task.update({
+            where: { id: task.id },
+            data: { status: 'CANCELLED' },
+          });
+          if (cancelledTaskRef) {
+            cancelledTaskRef.id = task.id;
+            cancelledTaskRef.projectId = task.projectId;
+          }
+        }
+      }
+
+      return result;
     });
 
     this.logger.log(`Ticket ${ticketId} updated: status=${dto.status}`);
@@ -158,6 +189,18 @@ export class TicketService {
         projectId: updated.project?.id,
         clientId: updated.client?.id,
       });
+    }
+
+    if (cancelledTaskRef && cancelledTaskRef.id) {
+      this.eventEmitter.emit('task.updated', {
+        taskId: cancelledTaskRef.id,
+        status: 'CANCELLED',
+        projectId: cancelledTaskRef.projectId,
+        reason: 'ticket_closed_unresolved',
+      });
+      this.logger.log(
+        `Task ${cancelledTaskRef.id} auto-cancelled (ticket ${ticketId} closed without resolution)`,
+      );
     }
 
     return updated;

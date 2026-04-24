@@ -60,7 +60,7 @@ export class PortalService {
           },
         },
         tasks: {
-          where: { clientVisible: true },
+          where: { clientVisible: true, status: { not: 'CANCELLED' } },
           select: { status: true },
         },
       },
@@ -129,7 +129,7 @@ export class PortalService {
     }
 
     const tasks = await this.prisma.task.findMany({
-      where: { projectId, clientVisible: true },
+      where: { projectId, clientVisible: true, status: { not: 'CANCELLED' } },
       select: {
         id: true,
         title: true,
