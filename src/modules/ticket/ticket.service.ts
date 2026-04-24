@@ -15,7 +15,12 @@ import { calculateBusinessDeadline, parseBusinessDays } from './sla.util';
  * Uses the Prisma transaction client to ensure atomicity.
  */
 export async function generateTicketNumber(
-  tx: { ticket: { count: (args: any) => Promise<number> } },
+  tx: {
+    ticket: {
+      count: (args: any) => Promise<number>;
+      findFirst: (args: any) => Promise<any>;
+    };
+  },
   organizationId: string,
 ): Promise<string> {
   const now = new Date();
@@ -30,7 +35,20 @@ export async function generateTicketNumber(
     },
   });
 
-  return `${dateStr}-${String(countToday + 1).padStart(3, '0')}`;
+  // Retry defensivo contra race conditions intra-org: si el candidato ya existe,
+  // probar el siguiente. En el 99% de los casos entra al primer intento.
+  for (let offset = 0; offset < 10; offset++) {
+    const candidate = `${dateStr}-${String(countToday + 1 + offset).padStart(3, '0')}`;
+    const exists = await tx.ticket.findFirst({
+      where: { organizationId, ticketNumber: candidate },
+      select: { id: true },
+    });
+    if (!exists) return candidate;
+  }
+
+  throw new Error(
+    `No se pudo generar un numero de ticket unico para la organizacion ${organizationId}`,
+  );
 }
 
 @Injectable()
