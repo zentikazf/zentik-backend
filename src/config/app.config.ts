@@ -35,4 +35,10 @@ export class AppConfigService {
 
   get sentryDsn(): string | undefined { return this.configService.get<string>('SENTRY_DSN'); }
   get logLevel(): string { return this.configService.getOrThrow<string>('LOG_LEVEL'); }
+
+  // Web Push (VAPID) — optional: si no estan configuradas, el push se desactiva silenciosamente
+  get vapidPublicKey(): string | undefined { return this.configService.get<string>('VAPID_PUBLIC_KEY'); }
+  get vapidPrivateKey(): string | undefined { return this.configService.get<string>('VAPID_PRIVATE_KEY'); }
+  get vapidSubject(): string { return this.configService.get<string>('VAPID_SUBJECT') || 'mailto:admin@zentikk.com'; }
+  get pushEnabled(): boolean { return !!(this.vapidPublicKey && this.vapidPrivateKey); }
 }

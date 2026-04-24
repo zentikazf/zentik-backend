@@ -3,9 +3,10 @@ import { ChatModule } from '../chat/chat.module';
 import { NotificationController } from './notification.controller';
 import { NotificationService } from './notification.service';
 import { NotificationListener } from './notification.listener';
+import { NotificationPushModule } from '../notification-push/notification-push.module';
 
 @Module({
-  imports: [ChatModule],
+  imports: [ChatModule, NotificationPushModule],
   controllers: [NotificationController],
   providers: [NotificationService, NotificationListener],
   exports: [NotificationService],

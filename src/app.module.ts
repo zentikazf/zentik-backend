@@ -25,6 +25,7 @@ import { SprintModule } from './modules/sprint/sprint.module';
 import { TimeTrackingModule } from './modules/time-tracking/time-tracking.module';
 import { ChatModule } from './modules/chat/chat.module';
 import { NotificationModule } from './modules/notification/notification.module';
+import { NotificationPushModule } from './modules/notification-push/notification-push.module';
 import { FileModule } from './modules/file/file.module';
 import { BillingModule } from './modules/billing/billing.module';
 import { ReportModule } from './modules/report/report.module';
@@ -75,6 +76,7 @@ import { DashboardModule } from './modules/dashboard/dashboard.module';
     TimeTrackingModule,
     ChatModule,
     NotificationModule,
+    NotificationPushModule,
     FileModule,
     BillingModule,
     ReportModule,

@@ -223,6 +223,8 @@ model User {
   createdMeetings     Meeting[]            @relation("MeetingCreator")
   createdTickets      Ticket[]             @relation("TicketCreator")
   deletedHoursTransactions HoursTransaction[] @relation("HoursDeletedBy")
+  pushSubscriptions        PushSubscription[]
+  notificationPreferences  UserNotificationPreference[]
 
   @@index([clientId])
   @@map("users")
@@ -1153,4 +1155,40 @@ model HoursTransaction {
   @@index([type])
   @@index([createdAt])
   @@map("hours_transactions")
+}
+
+// ============================================================================
+// PUSH NOTIFICATIONS (Web Push API)
+// ============================================================================
+
+model PushSubscription {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  userAgent String?  @map("user_agent")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("push_subscriptions")
+}
+
+model UserNotificationPreference {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  eventType String   @map("event_type")
+  channel   String   @default("PUSH")
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, eventType, channel])
+  @@index([userId])
+  @@map("user_notification_preferences")
 }

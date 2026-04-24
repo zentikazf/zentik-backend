@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../database/prisma.service';
 import { AppException } from '../../common/filters/app-exception';
 import { ChatGateway } from '../chat/chat.gateway';
+import { NotificationPushService } from '../notification-push/notification-push.service';
 
 @Injectable()
 export class NotificationService {
@@ -10,6 +11,7 @@ export class NotificationService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly chatGateway: ChatGateway,
+    private readonly pushService: NotificationPushService,
   ) {}
 
   async create(data: {
@@ -41,6 +43,19 @@ export class NotificationService {
     } catch (err) {
       this.logger.warn(`No se pudo emitir notificacion via WebSocket: ${err}`);
     }
+
+    // Push al navegador (best-effort, no bloquea)
+    this.pushService
+      .sendFromNotification({
+        userId: data.userId,
+        type: data.type,
+        title: data.title,
+        message: data.body,
+        data: data.metadata,
+      })
+      .catch((err) =>
+        this.logger.warn(`Error enviando push (no critico): ${err?.message ?? err}`),
+      );
 
     return notification;
   }
