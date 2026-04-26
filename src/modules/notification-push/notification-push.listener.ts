@@ -20,6 +20,55 @@ export class NotificationPushListener {
     private readonly pushService: NotificationPushService,
   ) {}
 
+  @OnEvent('document.shared')
+  async onDocumentShared(payload: {
+    fileId: string;
+    fileName: string;
+    projectId: string;
+    projectName: string;
+    clientId: string;
+    organizationId: string;
+    sharedById: string;
+  }) {
+    try {
+      // Resolver users del cliente: el "owner" (Client.userId) + sub-users (User.clientId)
+      const client = await this.prisma.client.findUnique({
+        where: { id: payload.clientId },
+        select: {
+          userId: true,
+          users: { select: { id: true } },
+        },
+      });
+      if (!client) return;
+
+      const targetUserIds = new Set<string>();
+      if (client.userId) targetUserIds.add(client.userId);
+      for (const u of client.users) targetUserIds.add(u.id);
+
+      if (targetUserIds.size === 0) {
+        this.logger.warn(`Cliente ${payload.clientId} sin usuarios asociados, no se envia push`);
+        return;
+      }
+
+      await Promise.all(
+        Array.from(targetUserIds).map((userId) =>
+          this.pushService.sendToUser(userId, PUSH_EVENT_TYPES.CLIENT_DOCUMENT_SHARED, {
+            title: 'Nuevo documento compartido',
+            body: `${payload.projectName} · ${payload.fileName}`,
+            url: `/portal/projects/${payload.projectId}/documents`,
+            tag: `document:${payload.fileId}`,
+            data: {
+              fileId: payload.fileId,
+              projectId: payload.projectId,
+            },
+          }),
+        ),
+      );
+    } catch (err: any) {
+      this.logger.error(`Error procesando push de document.shared: ${err?.message ?? err}`);
+    }
+  }
+
   @OnEvent('message.sent')
   async onMessageSent(payload: {
     messageId: string;

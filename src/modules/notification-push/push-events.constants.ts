@@ -12,6 +12,7 @@ export const PUSH_EVENT_TYPES = {
   TICKET_CREATED: 'ticket.created',
   COMMENT_CREATED: 'comment.created',
   APPROVAL_REQUESTED: 'approval.requested',
+  CLIENT_DOCUMENT_SHARED: 'client.document.shared',
 } as const;
 
 export type PushEventType = (typeof PUSH_EVENT_TYPES)[keyof typeof PUSH_EVENT_TYPES];
@@ -71,5 +72,11 @@ export const PUSH_EVENT_CATALOG: PushEventMeta[] = [
     label: 'Aprobaciones pendientes',
     description: 'Cuando se solicita tu aprobacion.',
     defaultEnabled: true,
+  },
+  {
+    eventType: PUSH_EVENT_TYPES.CLIENT_DOCUMENT_SHARED,
+    label: 'Documentos compartidos',
+    description: 'Cuando el equipo te comparte un documento nuevo en algún proyecto.',
+    defaultEnabled: false,
   },
 ];

@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import { Request, Response } from 'express';
 import { PrismaService } from '../../database/prisma.service';
 import { AppException } from '../../common/filters/app-exception';
 import { CreateSuggestionDto } from './dto/create-suggestion.dto';
@@ -9,6 +10,8 @@ import { CreateTicketDto } from '../ticket/dto/create-ticket.dto';
 import { AuditService } from '../audit/audit.service';
 import { calculateBusinessDeadline, parseBusinessDays } from '../ticket/sla.util';
 import { generateTicketNumber } from '../ticket/ticket.service';
+import { FileService } from '../file/file.service';
+import { StorageService } from '../../infrastructure/storage/storage.service';
 
 @Injectable()
 export class PortalService {
@@ -18,6 +21,8 @@ export class PortalService {
     private readonly prisma: PrismaService,
     private readonly eventEmitter: EventEmitter2,
     private readonly auditService: AuditService,
+    private readonly fileService: FileService,
+    private readonly storage: StorageService,
   ) {}
 
   private async getClientByUserId(userId: string) {
@@ -640,5 +645,97 @@ export class PortalService {
       days,
       timezone: config.timezone,
     };
+  }
+
+  // ============================================================================
+  // PROJECT DOCUMENTS — vista del cliente
+  // ============================================================================
+
+  async getProjectDocuments(userId: string, projectId: string) {
+    const client = await this.getClientByUserId(userId);
+
+    // Verificar que el proyecto pertenezca al cliente
+    const project = await this.prisma.project.findFirst({
+      where: { id: projectId, clientId: client.id },
+      select: { id: true, name: true },
+    });
+    if (!project) {
+      throw new AppException('Proyecto no encontrado', 'PROJECT_NOT_FOUND', 404);
+    }
+
+    // Documentos del proyecto: visibles, head version (sin descendientes mas nuevos),
+    // incluyendo eliminados (se muestran como "Eliminado")
+    const all = await this.prisma.file.findMany({
+      where: {
+        projectId,
+        clientVisible: true,
+      },
+      select: {
+        id: true,
+        originalName: true,
+        mimeType: true,
+        size: true,
+        documentCategory: true,
+        version: true,
+        parentFileId: true,
+        deletedAt: true,
+        createdAt: true,
+        uploadedBy: { select: { name: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    // Filtrar para devolver solo el "head" de cada cadena de versiones
+    // (el archivo que NO tiene otro archivo apuntandolo como parent)
+    const parentIds = new Set(all.filter((f) => f.parentFileId).map((f) => f.parentFileId));
+    const heads = all.filter((f) => !parentIds.has(f.id));
+
+    return heads.map((f) => ({
+      id: f.id,
+      name: f.originalName,
+      mimeType: f.mimeType,
+      size: f.size,
+      category: f.documentCategory,
+      version: f.version,
+      uploadedAt: f.createdAt,
+      uploadedByName: f.uploadedBy?.name ?? null,
+      deleted: f.deletedAt !== null,
+    }));
+  }
+
+  async downloadDocument(userId: string, fileId: string, req: Request, res: Response) {
+    const client = await this.getClientByUserId(userId);
+
+    const file = await this.prisma.file.findUnique({
+      where: { id: fileId },
+      select: {
+        id: true,
+        key: true,
+        clientVisible: true,
+        deletedAt: true,
+        projectId: true,
+        project: { select: { clientId: true } },
+      },
+    });
+
+    if (!file || !file.projectId) {
+      throw new AppException('Documento no encontrado', 'DOCUMENT_NOT_FOUND', 404);
+    }
+    if (file.project?.clientId !== client.id) {
+      throw new AppException('Sin acceso a este documento', 'FORBIDDEN', 403);
+    }
+    if (!file.clientVisible) {
+      throw new AppException('Documento no disponible', 'NOT_VISIBLE', 403);
+    }
+    if (file.deletedAt) {
+      throw new AppException('Este documento fue eliminado', 'DOCUMENT_DELETED', 410);
+    }
+
+    const ipAddress = (req.ip || (req.headers['x-forwarded-for'] as string) || '').toString();
+    const userAgent = (req.headers['user-agent'] as string) || undefined;
+
+    await this.fileService.recordDownload(fileId, userId, ipAddress, userAgent);
+    const url = await this.storage.getSignedUrl(file.key, 3600, file.id);
+    return res.redirect(url);
   }
 }

@@ -6,11 +6,14 @@ import {
   Body,
   Param,
   Query,
+  Req,
+  Res,
   UseGuards,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
+import { Request, Response } from 'express';
 import { AuthGuard } from '../auth/guards';
 import { CurrentUser } from '../../common/decorators';
 import { AuthenticatedUser } from '../../common/interfaces/request.interface';
@@ -157,5 +160,25 @@ export class PortalController {
   @ApiOperation({ summary: 'Horario de atención de la organización del cliente' })
   getBusinessHours(@CurrentUser() user: AuthenticatedUser) {
     return this.portalService.getBusinessHours(user.id);
+  }
+
+  @Get('portal/projects/:projectId/documents')
+  @ApiOperation({ summary: 'Listar documentos del proyecto compartidos con el cliente' })
+  getProjectDocuments(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('projectId') projectId: string,
+  ) {
+    return this.portalService.getProjectDocuments(user.id, projectId);
+  }
+
+  @Get('portal/documents/:fileId/download')
+  @ApiOperation({ summary: 'Descargar un documento compartido (registra evento)' })
+  downloadDocument(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('fileId') fileId: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    return this.portalService.downloadDocument(user.id, fileId, req, res);
   }
 }

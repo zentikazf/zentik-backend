@@ -180,6 +180,14 @@ enum ClientStatus {
   ARCHIVED
 }
 
+enum DocumentCategory {
+  SCOPE
+  BUDGET
+  MOCKUP
+  DOCUMENTATION
+  OTHER
+}
+
 // ============================================================================
 // AUTH MODELS (Better Auth managed)
 // ============================================================================
@@ -225,6 +233,8 @@ model User {
   deletedHoursTransactions HoursTransaction[] @relation("HoursDeletedBy")
   pushSubscriptions        PushSubscription[]
   notificationPreferences  UserNotificationPreference[]
+  deletedFiles             File[]                       @relation("FileDeletedBy")
+  fileDownloadEvents       FileDownloadEvent[]
 
   @@index([clientId])
   @@map("users")
@@ -455,6 +465,7 @@ model Project {
   suggestions  Suggestion[]
   tickets      Ticket[]
   meetings     Meeting[]
+  documents    File[]          @relation("ProjectDocuments")
 
   @@unique([organizationId, slug])
   @@index([organizationId])
@@ -799,6 +810,7 @@ model File {
   taskId         String?      @map("task_id")
   commentId      String?      @map("comment_id")
   messageId      String?      @map("message_id")
+  projectId      String?      @map("project_id")
   uploadedById   String       @map("uploaded_by_id")
   name           String
   originalName   String       @map("original_name")
@@ -807,6 +819,15 @@ model File {
   url            String
   key            String // S3 object key
   category       FileCategory @default(ATTACHMENT)
+  // Compartir con cliente
+  clientVisible    Boolean           @default(false) @map("client_visible")
+  documentCategory DocumentCategory? @map("document_category")
+  // Versionado
+  parentFileId   String? @map("parent_file_id")
+  version        Int     @default(1)
+  // Soft delete
+  deletedAt      DateTime? @map("deleted_at")
+  deletedById    String?   @map("deleted_by_id")
   createdAt      DateTime     @default(now()) @map("created_at")
   updatedAt      DateTime     @updatedAt @map("updated_at")
 
@@ -814,8 +835,13 @@ model File {
   task         Task?        @relation(fields: [taskId], references: [id], onDelete: SetNull)
   comment      Comment?     @relation(fields: [commentId], references: [id], onDelete: SetNull)
   message      Message?     @relation(fields: [messageId], references: [id], onDelete: SetNull)
-  uploadedBy     User         @relation(fields: [uploadedById], references: [id])
-  alcanceProject Project?     @relation("ProjectAlcanceFile")
+  project      Project?     @relation("ProjectDocuments", fields: [projectId], references: [id], onDelete: Cascade)
+  uploadedBy   User         @relation(fields: [uploadedById], references: [id])
+  alcanceProject Project?   @relation("ProjectAlcanceFile")
+  parentFile     File?      @relation("FileVersions", fields: [parentFileId], references: [id], onDelete: SetNull)
+  versions       File[]     @relation("FileVersions")
+  deletedBy      User?      @relation("FileDeletedBy", fields: [deletedById], references: [id], onDelete: SetNull)
+  downloadEvents FileDownloadEvent[]
 
   @@index([organizationId])
   @@index([taskId])
@@ -823,7 +849,29 @@ model File {
   @@index([messageId])
   @@index([uploadedById])
   @@index([category])
+  @@index([projectId])
+  @@index([clientVisible])
+  @@index([documentCategory])
+  @@index([deletedAt])
+  @@index([parentFileId])
   @@map("files")
+}
+
+model FileDownloadEvent {
+  id           String   @id @default(cuid())
+  fileId       String   @map("file_id")
+  userId       String   @map("user_id")
+  downloadedAt DateTime @default(now()) @map("downloaded_at")
+  ipAddress    String?  @map("ip_address")
+  userAgent    String?  @map("user_agent")
+
+  file File @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([fileId])
+  @@index([userId])
+  @@index([downloadedAt])
+  @@map("file_download_events")
 }
 
 // ============================================================================
