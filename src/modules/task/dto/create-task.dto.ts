@@ -30,6 +30,11 @@ export enum TaskPriorityDto {
   LOW = 'LOW',
 }
 
+export enum TaskTypeDto {
+  PROJECT = 'PROJECT',
+  SUPPORT = 'SUPPORT',
+}
+
 export class CreateTaskDto {
   @ApiProperty({ example: 'Implementar autenticacion', description: 'Titulo de la tarea' })
   @IsString({ message: 'El titulo es requerido' })
@@ -52,6 +57,11 @@ export class CreateTaskDto {
   @IsOptional()
   @IsEnum(TaskPriorityDto, { message: 'La prioridad no es valida' })
   priority?: TaskPriorityDto;
+
+  @ApiPropertyOptional({ enum: TaskTypeDto, default: TaskTypeDto.PROJECT, description: 'Tipo de tarea: PROJECT (Interno) o SUPPORT (Soporte)' })
+  @IsOptional()
+  @IsEnum(TaskTypeDto, { message: 'El tipo de tarea no es valido' })
+  type?: TaskTypeDto;
 
   @ApiPropertyOptional({ example: 5, description: 'Puntos de historia (story points)' })
   @IsOptional()
