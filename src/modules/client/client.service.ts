@@ -374,7 +374,13 @@ export class ClientService {
       this.logger.error(`Failed to send client sub-user email to ${dto.email}`, err);
     });
 
-    return { id: user.id, name: user.name, email: user.email, createdAt: user.createdAt };
+    return {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      createdAt: user.createdAt,
+      temporaryPassword: dto.password ? undefined : tempPassword,
+    };
   }
 
   async listSubUsers(clientId: string) {
