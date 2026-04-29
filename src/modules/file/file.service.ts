@@ -21,11 +21,15 @@ export interface UploadFileParams {
   taskId?: string;
   messageId?: string;
   projectId?: string;
+  clientId?: string;
   originalName: string;
+  customName?: string;
+  description?: string;
   mimeType: string;
   size: number;
   buffer: Buffer;
   category?: 'ATTACHMENT' | 'AVATAR' | 'LOGO' | 'DOCUMENT' | 'IMAGE' | 'OTHER';
+  /** @deprecated categories no longer used in UI, kept for backward compat */
   documentCategory?: 'SCOPE' | 'BUDGET' | 'MOCKUP' | 'DOCUMENTATION' | 'OTHER';
 }
 
@@ -40,7 +44,7 @@ export class FileService {
   ) {}
 
   async upload(params: UploadFileParams) {
-    const { organizationId, uploadedById, taskId, messageId, projectId, originalName, mimeType, size, buffer, category, documentCategory } = params;
+    const { organizationId, uploadedById, taskId, messageId, projectId, clientId, originalName, customName, description, mimeType, size, buffer, category, documentCategory } = params;
 
     const ext = extname(originalName);
     const uniqueKey = `${organizationId}/${uuidv4()}${ext}`;
@@ -54,8 +58,10 @@ export class FileService {
         taskId: taskId || null,
         messageId: messageId || null,
         projectId: projectId || null,
-        name: originalName,
+        clientId: clientId || null,
+        name: customName?.trim() || originalName,
         originalName,
+        description: description?.trim() || null,
         mimeType,
         size,
         url: uniqueKey,
@@ -401,6 +407,180 @@ export class FileService {
       },
     });
 
+    return file;
+  }
+
+  // ============================================================================
+  // EDIT DOCUMENT — sobreescribe el archivo y/o metadata (reemplaza versionado)
+  // ============================================================================
+
+  async editDocument(
+    fileId: string,
+    userId: string,
+    params: {
+      newFile?: { buffer: Buffer; originalName: string; mimeType: string; size: number };
+      name?: string;
+      description?: string;
+    },
+  ) {
+    const file = await this.prisma.file.findUnique({
+      where: { id: fileId },
+      select: { id: true, key: true, organizationId: true, projectId: true, clientId: true, deletedAt: true },
+    });
+    if (!file) throw new AppException('Archivo no encontrado', 'FILE_NOT_FOUND', 404);
+    if (file.deletedAt) {
+      throw new AppException('No se puede editar un archivo eliminado', 'FILE_DELETED', 400);
+    }
+
+    const data: Record<string, unknown> = {};
+
+    // 1) Si hay archivo nuevo: subir a S3, borrar el viejo, actualizar key/originalName/mimeType/size
+    if (params.newFile) {
+      const ext = extname(params.newFile.originalName);
+      const newKey = `${file.organizationId}/${uuidv4()}${ext}`;
+      await this.storage.upload(newKey, params.newFile.buffer, params.newFile.mimeType);
+
+      // Borrar el archivo viejo de S3 para no acumular blobs huerfanos
+      try {
+        await this.storage.delete(file.key);
+      } catch (err) {
+        this.logger.warn(`No se pudo borrar el archivo viejo ${file.key}: ${(err as Error).message}`);
+      }
+
+      data.key = newKey;
+      data.url = newKey;
+      data.originalName = params.newFile.originalName;
+      data.mimeType = params.newFile.mimeType;
+      data.size = params.newFile.size;
+    }
+
+    // 2) Metadata
+    if (params.name !== undefined) {
+      const trimmed = params.name.trim();
+      data.name = trimmed.length > 0 ? trimmed : (params.newFile?.originalName ?? undefined);
+    }
+    if (params.description !== undefined) {
+      data.description = params.description.trim() || null;
+    }
+
+    if (Object.keys(data).length === 0) {
+      throw new AppException('Sin cambios para aplicar', 'NO_CHANGES', 400);
+    }
+
+    const updated = await this.prisma.file.update({
+      where: { id: fileId },
+      data,
+      include: {
+        uploadedBy: { select: { id: true, name: true, email: true } },
+      },
+    });
+
+    this.logger.log(`File ${fileId} edited by user ${userId}`);
+    return updated;
+  }
+
+  // ============================================================================
+  // CLIENT DOCUMENTS — documentos a nivel cliente (no por proyecto)
+  // ============================================================================
+
+  async listByClient(clientId: string, page = 1, limit = 20) {
+    const skip = (page - 1) * limit;
+
+    const where = { clientId, deletedAt: null, parentFileId: null };
+
+    const [data, total] = await Promise.all([
+      this.prisma.file.findMany({
+        where,
+        include: {
+          uploadedBy: { select: { id: true, name: true, email: true } },
+          downloadEvents: {
+            select: {
+              id: true,
+              downloadedAt: true,
+              user: { select: { id: true, name: true } },
+            },
+            orderBy: { downloadedAt: 'desc' },
+            take: 5,
+          },
+          _count: { select: { downloadEvents: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.file.count({ where }),
+    ]);
+
+    return { data, total, page, limit };
+  }
+
+  async toggleClientVisibility(fileId: string, userId: string, clientVisible: boolean) {
+    const file = await this.prisma.file.findUnique({
+      where: { id: fileId },
+      select: {
+        id: true,
+        clientId: true,
+        clientVisible: true,
+        organizationId: true,
+        originalName: true,
+        client: { select: { id: true, name: true } },
+      },
+    });
+    if (!file) throw new AppException('Archivo no encontrado', 'FILE_NOT_FOUND', 404);
+    if (!file.clientId) {
+      throw new AppException('Este archivo no es un documento del cliente', 'INVALID_FILE_TYPE', 400);
+    }
+
+    const updated = await this.prisma.file.update({
+      where: { id: fileId },
+      data: { clientVisible },
+    });
+
+    this.logger.log(`Client document ${fileId} visibility set to ${clientVisible} by user ${userId}`);
+    return updated;
+  }
+
+  async softDeleteClientDocument(fileId: string, userId: string) {
+    const file = await this.prisma.file.findUnique({
+      where: { id: fileId },
+      select: { id: true, clientId: true, organizationId: true, originalName: true },
+    });
+    if (!file) throw new AppException('Archivo no encontrado', 'FILE_NOT_FOUND', 404);
+    if (!file.clientId) {
+      throw new AppException('Solo documentos del cliente soportan soft delete por este endpoint', 'INVALID_FILE_TYPE', 400);
+    }
+
+    await this.prisma.file.update({
+      where: { id: fileId },
+      data: { deletedAt: new Date(), deletedById: userId },
+    });
+
+    this.logger.log(`Client document ${fileId} soft-deleted by user ${userId}`);
+    this.eventEmitter.emit('file.deleted', {
+      ...domainEvent('file.deleted', 'file', fileId, file.organizationId, userId),
+      fileId,
+      fileName: file.originalName,
+      userId,
+    });
+    return { deleted: true };
+  }
+
+  /**
+   * Helper for controllers/services to validate ownership before operating
+   * on a client document. Returns the file or throws.
+   */
+  async getClientDocumentForOrg(fileId: string, organizationId: string) {
+    const file = await this.prisma.file.findUnique({
+      where: { id: fileId },
+      select: { id: true, clientId: true, organizationId: true },
+    });
+    if (!file) throw new AppException('Archivo no encontrado', 'FILE_NOT_FOUND', 404);
+    if (!file.clientId) {
+      throw new AppException('No es un documento del cliente', 'INVALID_FILE_TYPE', 400);
+    }
+    if (file.organizationId !== organizationId) {
+      throw new AppException('Sin acceso a este documento', 'FORBIDDEN', 403);
+    }
     return file;
   }
 }

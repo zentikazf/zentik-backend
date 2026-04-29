@@ -672,14 +672,15 @@ export class PortalService {
       },
       select: {
         id: true,
+        name: true,
+        description: true,
         originalName: true,
         mimeType: true,
         size: true,
-        documentCategory: true,
-        version: true,
         parentFileId: true,
         deletedAt: true,
         createdAt: true,
+        updatedAt: true,
         uploadedBy: { select: { name: true } },
       },
       orderBy: { createdAt: 'desc' },
@@ -692,12 +693,12 @@ export class PortalService {
 
     return heads.map((f) => ({
       id: f.id,
-      name: f.originalName,
+      name: f.name,
+      description: f.description,
       mimeType: f.mimeType,
       size: f.size,
-      category: f.documentCategory,
-      version: f.version,
       uploadedAt: f.createdAt,
+      updatedAt: f.updatedAt,
       uploadedByName: f.uploadedBy?.name ?? null,
       deleted: f.deletedAt !== null,
     }));
@@ -722,6 +723,87 @@ export class PortalService {
       throw new AppException('Documento no encontrado', 'DOCUMENT_NOT_FOUND', 404);
     }
     if (file.project?.clientId !== client.id) {
+      throw new AppException('Sin acceso a este documento', 'FORBIDDEN', 403);
+    }
+    if (!file.clientVisible) {
+      throw new AppException('Documento no disponible', 'NOT_VISIBLE', 403);
+    }
+    if (file.deletedAt) {
+      throw new AppException('Este documento fue eliminado', 'DOCUMENT_DELETED', 410);
+    }
+
+    const ipAddress = (req.ip || (req.headers['x-forwarded-for'] as string) || '').toString();
+    const userAgent = (req.headers['user-agent'] as string) || undefined;
+
+    await this.fileService.recordDownload(fileId, userId, ipAddress, userAgent);
+    const url = await this.storage.getSignedUrl(file.key, 3600, file.id);
+    return res.redirect(url);
+  }
+
+  // ============================================================================
+  // CLIENT DOCUMENTS — vista del cliente desde portal (general, no por proyecto)
+  // ============================================================================
+
+  async getClientDocuments(userId: string) {
+    const client = await this.getClientByUserId(userId);
+
+    const all = await this.prisma.file.findMany({
+      where: {
+        clientId: client.id,
+        clientVisible: true,
+      },
+      select: {
+        id: true,
+        name: true,
+        description: true,
+        originalName: true,
+        mimeType: true,
+        size: true,
+        parentFileId: true,
+        deletedAt: true,
+        createdAt: true,
+        updatedAt: true,
+        uploadedBy: { select: { name: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    // Filtrar heads (sin descendientes), aunque para client docs no usamos
+    // versionado incremental — esto es defensivo por si algun dato legacy aparece
+    const parentIds = new Set(all.filter((f) => f.parentFileId).map((f) => f.parentFileId));
+    const heads = all.filter((f) => !parentIds.has(f.id));
+
+    return heads.map((f) => ({
+      id: f.id,
+      name: f.name,
+      description: f.description,
+      mimeType: f.mimeType,
+      size: f.size,
+      uploadedAt: f.createdAt,
+      updatedAt: f.updatedAt,
+      uploadedByName: f.uploadedBy?.name ?? null,
+      deleted: f.deletedAt !== null,
+    }));
+  }
+
+  async downloadClientDocument(userId: string, fileId: string, req: Request, res: Response) {
+    const client = await this.getClientByUserId(userId);
+
+    const file = await this.prisma.file.findUnique({
+      where: { id: fileId },
+      select: {
+        id: true,
+        key: true,
+        clientId: true,
+        clientVisible: true,
+        deletedAt: true,
+      },
+    });
+
+    if (!file || !file.clientId) {
+      throw new AppException('Documento no encontrado', 'DOCUMENT_NOT_FOUND', 404);
+    }
+    if (file.clientId !== client.id) {
       throw new AppException('Sin acceso a este documento', 'FORBIDDEN', 403);
     }
     if (!file.clientVisible) {

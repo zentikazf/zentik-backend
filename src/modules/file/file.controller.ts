@@ -30,11 +30,14 @@ import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { FileService } from './file.service';
 import { FilePermissionsService } from './file.permissions';
 import { StorageService } from '../../infrastructure/storage/storage.service';
-import {
-  UpdateDocumentVisibilityDto,
-  UpdateDocumentCategoryDto,
-} from './dto/update-document.dto';
+import { PrismaService } from '../../database/prisma.service';
+import { AppException } from '../../common/filters/app-exception';
+import { UpdateDocumentVisibilityDto } from './dto/update-document.dto';
+import { EditDocumentDto } from './dto/edit-document.dto';
 import { Request } from 'express';
+
+const DOCUMENT_FILE_TYPES =
+  /^(image\/(jpeg|png|webp|gif|svg\+xml)|application\/pdf|text\/(plain|csv)|application\/vnd\.openxmlformats.*|application\/zip|application\/msword|application\/vnd\.ms-excel)$/;
 
 @ApiTags('Files')
 @ApiBearerAuth()
@@ -44,6 +47,7 @@ export class FileController {
     private readonly fileService: FileService,
     private readonly storage: StorageService,
     private readonly filePermissions: FilePermissionsService,
+    private readonly prisma: PrismaService,
   ) {}
 
   @Post('files/upload')
@@ -66,7 +70,7 @@ export class FileController {
     @UploadedFile(
       new ParseFilePipe({
         validators: [
-          new MaxFileSizeValidator({ maxSize: 10 * 1024 * 1024 }), // 10MB
+          new MaxFileSizeValidator({ maxSize: 10 * 1024 * 1024 }),
           new FileTypeValidator({
             fileType: /^(image\/(jpeg|png|webp|gif|svg\+xml)|application\/pdf|text\/(plain|csv)|application\/vnd\.openxmlformats.*)$/,
           }),
@@ -79,7 +83,6 @@ export class FileController {
     @Query('messageId') messageId?: string,
     @Query('projectId') projectId?: string,
     @Query('category') category?: 'ATTACHMENT' | 'AVATAR' | 'LOGO' | 'DOCUMENT' | 'IMAGE' | 'OTHER',
-    @Query('documentCategory') documentCategory?: 'SCOPE' | 'BUDGET' | 'MOCKUP' | 'DOCUMENTATION' | 'OTHER',
   ) {
     return this.fileService.upload({
       organizationId: user.organizationId!,
@@ -92,7 +95,6 @@ export class FileController {
       size: file.size,
       buffer: file.buffer,
       category,
-      documentCategory,
     });
   }
 
@@ -186,15 +188,14 @@ export class FileController {
       new ParseFilePipe({
         validators: [
           new MaxFileSizeValidator({ maxSize: 10 * 1024 * 1024 }),
-          new FileTypeValidator({
-            fileType: /^(image\/(jpeg|png|webp|gif|svg\+xml)|application\/pdf|text\/(plain|csv)|application\/vnd\.openxmlformats.*|application\/zip|application\/msword|application\/vnd\.ms-excel)$/,
-          }),
+          new FileTypeValidator({ fileType: DOCUMENT_FILE_TYPES }),
         ],
       }),
     )
     file: Express.Multer.File,
     @CurrentUser() user: AuthenticatedUser,
-    @Query('documentCategory') documentCategory?: 'SCOPE' | 'BUDGET' | 'MOCKUP' | 'DOCUMENTATION' | 'OTHER',
+    @Query('title') title?: string,
+    @Query('description') description?: string,
   ) {
     const allowed = await this.filePermissions.canManageProjectDocument(user.id, projectId);
     if (!allowed) {
@@ -205,113 +206,119 @@ export class FileController {
       uploadedById: user.id,
       projectId,
       originalName: file.originalname,
+      customName: title,
+      description,
       mimeType: file.mimetype,
       size: file.size,
       buffer: file.buffer,
       category: 'DOCUMENT',
-      documentCategory,
     });
   }
 
   @Patch('documents/:fileId/visibility')
   @UseGuards(AuthGuard)
-  @ApiOperation({ summary: 'Cambiar visibilidad para el cliente (ojito)' })
+  @ApiOperation({ summary: 'Cambiar visibilidad para el cliente (ojito) — project o client document' })
   async toggleDocumentVisibility(
     @Param('fileId') fileId: string,
     @Body() dto: UpdateDocumentVisibilityDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
     const file = await this.fileService.getById(fileId);
-    if (!file.projectId) {
-      throw new ForbiddenException('Este archivo no es un documento del proyecto');
+
+    // Project document: requiere permiso de project doc manager
+    if (file.projectId) {
+      const allowed = await this.filePermissions.canManageProjectDocument(user.id, file.projectId);
+      if (!allowed) {
+        throw new ForbiddenException('Solo el responsable, Owners y Project Managers pueden cambiar la visibilidad');
+      }
+      return this.fileService.toggleVisibility(fileId, user.id, dto.clientVisible);
     }
-    const allowed = await this.filePermissions.canManageProjectDocument(user.id, file.projectId);
-    if (!allowed) {
-      throw new ForbiddenException('Solo el responsable, Owners y Project Managers pueden cambiar la visibilidad');
+
+    // Client document: cualquier user de la org
+    if (file.clientId) {
+      if (file.organizationId !== user.organizationId) {
+        throw new ForbiddenException('Sin acceso a este documento');
+      }
+      return this.fileService.toggleClientVisibility(fileId, user.id, dto.clientVisible);
     }
-    return this.fileService.toggleVisibility(fileId, user.id, dto.clientVisible);
+
+    throw new ForbiddenException('Este archivo no es un documento gestionable');
   }
 
-  @Patch('documents/:fileId/category')
+  @Patch('documents/:fileId/edit')
   @UseGuards(AuthGuard)
-  @ApiOperation({ summary: 'Cambiar categoría de documento' })
-  async updateDocumentCategory(
-    @Param('fileId') fileId: string,
-    @Body() dto: UpdateDocumentCategoryDto,
-    @CurrentUser() user: AuthenticatedUser,
-  ) {
-    const file = await this.fileService.getById(fileId);
-    if (!file.projectId) {
-      throw new ForbiddenException('Este archivo no es un documento del proyecto');
-    }
-    const allowed = await this.filePermissions.canManageProjectDocument(user.id, file.projectId);
-    if (!allowed) {
-      throw new ForbiddenException('Sin permiso para cambiar la categoría');
-    }
-    return this.fileService.updateCategory(fileId, user.id, dto.documentCategory);
-  }
-
-  @Post('documents/:fileId/versions')
-  @UseGuards(AuthGuard)
-  @ApiOperation({ summary: 'Subir nueva versión de un documento' })
+  @ApiOperation({ summary: 'Editar documento (sobreescribe archivo y/o metadata)' })
   @ApiConsumes('multipart/form-data')
   @UseInterceptors(FileInterceptor('file'))
-  async uploadDocumentVersion(
-    @Param('fileId') parentFileId: string,
-    @UploadedFile(
-      new ParseFilePipe({
-        validators: [
-          new MaxFileSizeValidator({ maxSize: 10 * 1024 * 1024 }),
-          new FileTypeValidator({
-            fileType: /^(image\/(jpeg|png|webp|gif|svg\+xml)|application\/pdf|text\/(plain|csv)|application\/vnd\.openxmlformats.*|application\/zip|application\/msword|application\/vnd\.ms-excel)$/,
-          }),
-        ],
-      }),
-    )
-    file: Express.Multer.File,
+  async editDocument(
+    @Param('fileId') fileId: string,
+    @UploadedFile() file: Express.Multer.File | undefined,
+    @Body() dto: EditDocumentDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    const original = await this.fileService.getById(parentFileId);
-    if (!original.projectId) {
-      throw new ForbiddenException('Solo se pueden versionar documentos del proyecto');
-    }
-    const allowed = await this.filePermissions.canManageProjectDocument(user.id, original.projectId);
-    if (!allowed) {
-      throw new ForbiddenException('Sin permiso para subir versiones');
-    }
-    return this.fileService.createVersion(parentFileId, {
-      organizationId: user.organizationId!,
-      uploadedById: user.id,
-      originalName: file.originalname,
-      mimeType: file.mimetype,
-      size: file.size,
-      buffer: file.buffer,
-    });
-  }
+    const existing = await this.fileService.getById(fileId);
 
-  @Get('documents/:fileId/versions')
-  @UseGuards(AuthGuard)
-  @ApiOperation({ summary: 'Listar historial de versiones de un documento' })
-  async listDocumentVersions(@Param('fileId') fileId: string) {
-    return this.fileService.listVersions(fileId);
+    // Validar permisos segun el tipo de documento
+    if (existing.projectId) {
+      const allowed = await this.filePermissions.canManageProjectDocument(user.id, existing.projectId);
+      if (!allowed) {
+        throw new ForbiddenException('Sin permiso para editar este documento');
+      }
+    } else if (existing.clientId) {
+      if (existing.organizationId !== user.organizationId) {
+        throw new ForbiddenException('Sin acceso a este documento');
+      }
+    } else {
+      throw new ForbiddenException('Este archivo no se puede editar por este endpoint');
+    }
+
+    // Validar tipo MIME del nuevo archivo si viene
+    if (file && !DOCUMENT_FILE_TYPES.test(file.mimetype)) {
+      throw new AppException('Tipo de archivo no permitido', 'INVALID_FILE_TYPE', 400, { mimeType: file.mimetype });
+    }
+    if (file && file.size > 10 * 1024 * 1024) {
+      throw new AppException('El archivo excede 10MB', 'FILE_TOO_LARGE', 400);
+    }
+
+    return this.fileService.editDocument(fileId, user.id, {
+      newFile: file
+        ? {
+            buffer: file.buffer,
+            originalName: file.originalname,
+            mimeType: file.mimetype,
+            size: file.size,
+          }
+        : undefined,
+      name: dto.name,
+      description: dto.description,
+    });
   }
 
   @Delete('documents/:fileId')
   @UseGuards(AuthGuard)
-  @ApiOperation({ summary: 'Eliminar documento (soft delete, visible para el cliente como "Eliminado")' })
+  @ApiOperation({ summary: 'Eliminar documento (soft delete) — project o client document' })
   async softDeleteDocument(
     @Param('fileId') fileId: string,
     @CurrentUser() user: AuthenticatedUser,
   ) {
     const file = await this.fileService.getById(fileId);
-    if (!file.projectId) {
-      throw new ForbiddenException('Este archivo no es un documento del proyecto');
+
+    if (file.projectId) {
+      const allowed = await this.filePermissions.canManageProjectDocument(user.id, file.projectId);
+      if (!allowed) {
+        throw new ForbiddenException('Sin permiso para eliminar documentos del proyecto');
+      }
+      return this.fileService.softDeleteDocument(fileId, user.id);
     }
-    const allowed = await this.filePermissions.canManageProjectDocument(user.id, file.projectId);
-    if (!allowed) {
-      throw new ForbiddenException('Sin permiso para eliminar documentos');
+
+    if (file.clientId) {
+      if (file.organizationId !== user.organizationId) {
+        throw new ForbiddenException('Sin acceso a este documento');
+      }
+      return this.fileService.softDeleteClientDocument(fileId, user.id);
     }
-    return this.fileService.softDeleteDocument(fileId, user.id);
+
+    throw new ForbiddenException('Este archivo no es un documento gestionable');
   }
 
   @Get('documents/:fileId/download')
@@ -328,5 +335,82 @@ export class FileController {
     const file = await this.fileService.recordDownload(fileId, user.id, ipAddress, userAgent);
     const url = await this.storage.getSignedUrl(file.key, 3600, file.id);
     return res.redirect(url);
+  }
+
+  // ============================================================================
+  // CLIENT DOCUMENTS — documentos a nivel cliente
+  // Cualquier user autenticado de la organizacion puede gestionarlos.
+  // Multi-tenancy: validar que el cliente pertenezca a la org del JWT.
+  // ============================================================================
+
+  private async assertClientBelongsToOrg(clientId: string, organizationId: string) {
+    const client = await this.prisma.client.findFirst({
+      where: { id: clientId, organizationId },
+      select: { id: true },
+    });
+    if (!client) {
+      throw new AppException('Cliente no encontrado en esta organizacion', 'CLIENT_NOT_FOUND', 404, { clientId });
+    }
+  }
+
+  @Post('clients/:clientId/documents')
+  @UseGuards(AuthGuard)
+  @ApiOperation({ summary: 'Subir documento a nivel cliente' })
+  @ApiConsumes('multipart/form-data')
+  @UseInterceptors(FileInterceptor('file'))
+  async uploadClientDocument(
+    @Param('clientId') clientId: string,
+    @UploadedFile(
+      new ParseFilePipe({
+        validators: [
+          new MaxFileSizeValidator({ maxSize: 10 * 1024 * 1024 }),
+          new FileTypeValidator({ fileType: DOCUMENT_FILE_TYPES }),
+        ],
+      }),
+    )
+    file: Express.Multer.File,
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('title') title?: string,
+    @Query('description') description?: string,
+    @Query('clientVisible') clientVisible?: string,
+  ) {
+    await this.assertClientBelongsToOrg(clientId, user.organizationId!);
+
+    const created = await this.fileService.upload({
+      organizationId: user.organizationId!,
+      uploadedById: user.id,
+      clientId,
+      originalName: file.originalname,
+      customName: title,
+      description,
+      mimeType: file.mimetype,
+      size: file.size,
+      buffer: file.buffer,
+      category: 'DOCUMENT',
+    });
+
+    if (clientVisible === 'true') {
+      return this.fileService.toggleClientVisibility(created.id, user.id, true);
+    }
+    return created;
+  }
+
+  @Get('clients/:clientId/documents')
+  @UseGuards(AuthGuard)
+  @ApiOperation({ summary: 'Listar documentos de un cliente' })
+  @ApiQuery({ name: 'page', required: false, type: Number })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  async listClientDocuments(
+    @Param('clientId') clientId: string,
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    await this.assertClientBelongsToOrg(clientId, user.organizationId!);
+    return this.fileService.listByClient(
+      clientId,
+      page ? parseInt(page, 10) : 1,
+      limit ? parseInt(limit, 10) : 20,
+    );
   }
 }

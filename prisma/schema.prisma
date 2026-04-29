@@ -838,9 +838,11 @@ model File {
   commentId      String?      @map("comment_id")
   messageId      String?      @map("message_id")
   projectId      String?      @map("project_id")
+  clientId       String?      @map("client_id")
   uploadedById   String       @map("uploaded_by_id")
   name           String
   originalName   String       @map("original_name")
+  description    String?
   mimeType       String       @map("mime_type")
   size           Int // Size in bytes
   url            String
@@ -848,8 +850,8 @@ model File {
   category       FileCategory @default(ATTACHMENT)
   // Compartir con cliente
   clientVisible    Boolean           @default(false) @map("client_visible")
-  documentCategory DocumentCategory? @map("document_category")
-  // Versionado
+  documentCategory DocumentCategory? @map("document_category") // DEPRECATED — categories no longer used in UI, kept for legacy data
+  // Versionado (DEPRECATED — replaced by edit-overwrite, kept for legacy data)
   parentFileId   String? @map("parent_file_id")
   version        Int     @default(1)
   // Soft delete
@@ -863,6 +865,7 @@ model File {
   comment      Comment?     @relation(fields: [commentId], references: [id], onDelete: SetNull)
   message      Message?     @relation(fields: [messageId], references: [id], onDelete: SetNull)
   project      Project?     @relation("ProjectDocuments", fields: [projectId], references: [id], onDelete: Cascade)
+  client       Client?      @relation("ClientFiles", fields: [clientId], references: [id], onDelete: Cascade)
   uploadedBy   User         @relation(fields: [uploadedById], references: [id])
   alcanceProject Project?   @relation("ProjectAlcanceFile")
   parentFile     File?      @relation("FileVersions", fields: [parentFileId], references: [id], onDelete: SetNull)
@@ -881,6 +884,8 @@ model File {
   @@index([documentCategory])
   @@index([deletedAt])
   @@index([parentFileId])
+  @@index([clientId])
+  @@index([clientId, deletedAt])
   @@map("files")
 }
 
@@ -1016,6 +1021,7 @@ model Client {
   suggestions       Suggestion[]
   tickets           Ticket[]
   hoursTransactions HoursTransaction[]
+  files             File[]             @relation("ClientFiles")
 
   @@index([organizationId])
   @@index([organizationId, status])

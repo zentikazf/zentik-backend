@@ -181,4 +181,23 @@ export class PortalController {
   ) {
     return this.portalService.downloadDocument(user.id, fileId, req, res);
   }
+
+  // ── Client Documents (general, no por proyecto) ──────────
+
+  @Get('portal/client-documents')
+  @ApiOperation({ summary: 'Documentos compartidos al cliente (no por proyecto)' })
+  getClientDocuments(@CurrentUser() user: AuthenticatedUser) {
+    return this.portalService.getClientDocuments(user.id);
+  }
+
+  @Get('portal/client-documents/:fileId/download')
+  @ApiOperation({ summary: 'Descargar un documento del cliente (registra evento)' })
+  downloadClientDocument(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('fileId') fileId: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    return this.portalService.downloadClientDocument(user.id, fileId, req, res);
+  }
 }
