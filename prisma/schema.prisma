@@ -161,8 +161,33 @@ enum TicketCriticality {
 enum TicketStatus {
   OPEN
   IN_PROGRESS
+  IN_REVIEW
   RESOLVED
   CLOSED
+}
+
+enum TicketEventType {
+  STATUS_CHANGE
+  ASSIGNED
+  UNASSIGNED
+  KANBAN_MOVE
+  CLOSED
+  REOPENED
+  COMMENT_ADDED
+}
+
+enum TicketEventSource {
+  TICKET
+  KANBAN
+  SYSTEM
+}
+
+enum TicketCloseReason {
+  RESOLVED_BY_SUPPORT
+  RESOLVED_BY_CLIENT
+  DUPLICATE
+  SPAM
+  OTHER
 }
 
 enum FileCategory {
@@ -230,6 +255,8 @@ model User {
   clientGroup         Client?              @relation("ClientUsers", fields: [clientId], references: [id], onDelete: SetNull)
   createdMeetings     Meeting[]            @relation("MeetingCreator")
   createdTickets      Ticket[]             @relation("TicketCreator")
+  closedTickets       Ticket[]             @relation("TicketCloser")
+  ticketEvents        TicketEvent[]        @relation("TicketEventActor")
   deletedHoursTransactions HoursTransaction[] @relation("HoursDeletedBy")
   pushSubscriptions        PushSubscription[]
   notificationPreferences  UserNotificationPreference[]
@@ -1094,6 +1121,12 @@ model Ticket {
   createdByUserId       String?            @map("created_by_user_id")
   ticketNumber          String?            @map("ticket_number")
 
+  // Cierre del ticket
+  closeReason    TicketCloseReason? @map("close_reason")
+  closeNote      String?            @map("close_note")
+  closedAt       DateTime?          @map("closed_at")
+  closedByUserId String?            @map("closed_by_user_id")
+
   createdAt      DateTime           @default(now()) @map("created_at")
   updatedAt      DateTime           @updatedAt @map("updated_at")
 
@@ -1104,6 +1137,8 @@ model Ticket {
   channel        Channel?              @relation(fields: [channelId], references: [id], onDelete: SetNull)
   categoryConfig TicketCategoryConfig? @relation(fields: [categoryConfigId], references: [id], onDelete: SetNull)
   createdByUser  User?                 @relation("TicketCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  closedByUser   User?                 @relation("TicketCloser", fields: [closedByUserId], references: [id], onDelete: SetNull)
+  events         TicketEvent[]
 
   @@index([organizationId])
   @@index([projectId])
@@ -1112,8 +1147,30 @@ model Ticket {
   @@index([categoryConfigId])
   @@index([slaResponseBreached])
   @@index([slaResolutionBreached])
+  @@index([organizationId, status, createdAt(sort: Desc)])
+  @@index([closedAt])
   @@unique([organizationId, ticketNumber])
   @@map("tickets")
+}
+
+model TicketEvent {
+  id          String              @id @default(cuid())
+  ticketId    String              @map("ticket_id")
+  type        TicketEventType
+  fromValue   String?             @map("from_value")
+  toValue     String?             @map("to_value")
+  source      TicketEventSource   @default(TICKET)
+  metadata    Json?
+  userId      String?             @map("user_id")
+  createdAt   DateTime            @default(now()) @map("created_at")
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  user   User?  @relation("TicketEventActor", fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([ticketId, createdAt(sort: Desc)])
+  @@index([userId])
+  @@index([type])
+  @@map("ticket_events")
 }
 
 // ============================================================================

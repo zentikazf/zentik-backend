@@ -11,13 +11,15 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery, ApiResponse } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { AuthGuard } from '../auth/guards';
 import { CurrentUser } from '../../common/decorators';
 import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { TicketService } from './ticket.service';
 import { UpdateTicketDto } from './dto/update-ticket.dto';
 import { CreateAdminTicketDto } from './dto/create-admin-ticket.dto';
+import { CloseTicketDto } from './dto/close-ticket.dto';
+import { ListTicketsQueryDto } from './dto/list-tickets-query.dto';
 import { CreateCategoryConfigDto, UpdateCategoryConfigDto } from './dto/create-category-config.dto';
 import { UpsertSlaConfigDto } from './dto/upsert-sla-config.dto';
 import { UpsertBusinessHoursDto } from './dto/upsert-business-hours.dto';
@@ -33,27 +35,23 @@ export class TicketController {
 
   @Get('organizations/:orgId/tickets/open-count')
   @ApiOperation({ summary: 'Contar tickets abiertos de la organizacion' })
-  @ApiResponse({ status: 200, description: '{ count: number }' })
   getOpenTicketsCount(@Param('orgId') orgId: string) {
     return this.ticketService.getOpenTicketsCount(orgId);
   }
 
+  @Get('organizations/:orgId/tickets/stats')
+  @ApiOperation({ summary: 'Contadores de tickets por estado' })
+  getTicketStats(@Param('orgId') orgId: string) {
+    return this.ticketService.getTicketStats(orgId);
+  }
+
   @Get('organizations/:orgId/tickets')
-  @ApiOperation({ summary: 'Listar todos los tickets de la organizacion' })
-  @ApiQuery({ name: 'status', required: false, enum: ['OPEN', 'IN_PROGRESS', 'RESOLVED', 'CLOSED'] })
-  @ApiQuery({ name: 'clientId', required: false })
-  @ApiQuery({ name: 'search', required: false })
-  @ApiQuery({ name: 'createdByUserId', required: false })
-  @ApiQuery({ name: 'categoryConfigId', required: false })
+  @ApiOperation({ summary: 'Listar tickets de la organizacion (cursor pagination)' })
   getOrgTickets(
     @Param('orgId') orgId: string,
-    @Query('status') status?: string,
-    @Query('clientId') clientId?: string,
-    @Query('search') search?: string,
-    @Query('createdByUserId') createdByUserId?: string,
-    @Query('categoryConfigId') categoryConfigId?: string,
+    @Query() query: ListTicketsQueryDto,
   ) {
-    return this.ticketService.getOrgTickets(orgId, status, clientId, search, createdByUserId, categoryConfigId);
+    return this.ticketService.getOrgTickets(orgId, query);
   }
 
   @Post('organizations/:orgId/tickets')
@@ -79,25 +77,43 @@ export class TicketController {
     return this.ticketService.getTicketDetail(ticketId);
   }
 
+  @Get('tickets/:ticketId/events')
+  @ApiOperation({ summary: 'Timeline de eventos del ticket (audit log unificado)' })
+  getTicketEvents(@Param('ticketId') ticketId: string) {
+    return this.ticketService.getTicketEvents(ticketId);
+  }
+
   @Patch('tickets/:ticketId')
-  @ApiOperation({ summary: 'Actualizar estado y notas de un ticket' })
+  @ApiOperation({ summary: 'Actualizar estado, asignado y notas del ticket' })
   updateTicket(
     @Param('ticketId') ticketId: string,
     @Body() dto: UpdateTicketDto,
+    @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.ticketService.updateTicket(ticketId, dto);
+    return this.ticketService.updateTicket(ticketId, dto, user.id);
+  }
+
+  @Post('tickets/:ticketId/close')
+  @ApiOperation({ summary: 'Cerrar ticket con motivo' })
+  @HttpCode(HttpStatus.OK)
+  closeTicket(
+    @Param('ticketId') ticketId: string,
+    @Body() dto: CloseTicketDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.ticketService.closeTicket(ticketId, dto, user.id);
   }
 
   // ── Ticket Category Configs ──────────────────────────────
 
   @Get('organizations/:orgId/ticket-categories')
-  @ApiOperation({ summary: 'Listar categorías de ticket configurables' })
+  @ApiOperation({ summary: 'Listar categorias de ticket configurables' })
   getCategories(@Param('orgId') orgId: string) {
     return this.ticketService.getCategories(orgId);
   }
 
   @Post('organizations/:orgId/ticket-categories')
-  @ApiOperation({ summary: 'Crear categoría de ticket' })
+  @ApiOperation({ summary: 'Crear categoria de ticket' })
   @HttpCode(HttpStatus.CREATED)
   createCategory(
     @Param('orgId') orgId: string,
@@ -107,7 +123,7 @@ export class TicketController {
   }
 
   @Patch('organizations/:orgId/ticket-categories/:categoryId')
-  @ApiOperation({ summary: 'Actualizar categoría de ticket' })
+  @ApiOperation({ summary: 'Actualizar categoria de ticket' })
   updateCategory(
     @Param('orgId') orgId: string,
     @Param('categoryId') categoryId: string,
@@ -117,7 +133,7 @@ export class TicketController {
   }
 
   @Delete('organizations/:orgId/ticket-categories/:categoryId')
-  @ApiOperation({ summary: 'Desactivar categoría de ticket' })
+  @ApiOperation({ summary: 'Desactivar categoria de ticket' })
   deleteCategory(
     @Param('orgId') orgId: string,
     @Param('categoryId') categoryId: string,
@@ -128,13 +144,13 @@ export class TicketController {
   // ── SLA Config ───────────────────────────────────────────
 
   @Get('organizations/:orgId/sla-config')
-  @ApiOperation({ summary: 'Obtener configuración de SLA por organización' })
+  @ApiOperation({ summary: 'Obtener configuracion de SLA por organizacion' })
   getSlaConfigs(@Param('orgId') orgId: string) {
     return this.ticketService.getSlaConfigs(orgId);
   }
 
   @Patch('organizations/:orgId/sla-config')
-  @ApiOperation({ summary: 'Crear o actualizar configuración de SLA' })
+  @ApiOperation({ summary: 'Crear o actualizar configuracion de SLA' })
   upsertSlaConfig(
     @Param('orgId') orgId: string,
     @Body() dto: UpsertSlaConfigDto,
@@ -145,13 +161,13 @@ export class TicketController {
   // ── Business Hours ───────────────────────────────────────
 
   @Get('organizations/:orgId/business-hours')
-  @ApiOperation({ summary: 'Obtener horario hábil de la organización' })
+  @ApiOperation({ summary: 'Obtener horario habil' })
   getBusinessHours(@Param('orgId') orgId: string) {
     return this.ticketService.getBusinessHours(orgId);
   }
 
   @Patch('organizations/:orgId/business-hours')
-  @ApiOperation({ summary: 'Crear o actualizar horario hábil' })
+  @ApiOperation({ summary: 'Crear o actualizar horario habil' })
   upsertBusinessHours(
     @Param('orgId') orgId: string,
     @Body() dto: UpsertBusinessHoursDto,
@@ -162,13 +178,13 @@ export class TicketController {
   // ── Holidays ─────────────────────────────────
 
   @Get('organizations/:orgId/holidays')
-  @ApiOperation({ summary: 'Listar feriados de la organización' })
+  @ApiOperation({ summary: 'Listar feriados' })
   getHolidays(@Param('orgId') orgId: string) {
     return this.ticketService.getHolidays(orgId);
   }
 
   @Post('organizations/:orgId/holidays')
-  @ApiOperation({ summary: 'Crear un feriado' })
+  @ApiOperation({ summary: 'Crear feriado' })
   @HttpCode(HttpStatus.CREATED)
   createHoliday(
     @Param('orgId') orgId: string,
@@ -178,7 +194,7 @@ export class TicketController {
   }
 
   @Delete('organizations/:orgId/holidays/:holidayId')
-  @ApiOperation({ summary: 'Eliminar un feriado' })
+  @ApiOperation({ summary: 'Eliminar feriado' })
   @HttpCode(HttpStatus.NO_CONTENT)
   deleteHoliday(
     @Param('orgId') orgId: string,

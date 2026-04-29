@@ -112,6 +112,9 @@ export class BoardService {
                 subTasks: {
                   select: { status: true },
                 },
+                ticket: {
+                  select: { id: true, ticketNumber: true, status: true },
+                },
                 _count: {
                   select: { subTasks: true },
                 },
