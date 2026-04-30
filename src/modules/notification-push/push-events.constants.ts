@@ -59,7 +59,7 @@ export const PUSH_EVENT_CATALOG: PushEventMeta[] = [
     eventType: PUSH_EVENT_TYPES.TICKET_STATUS_CHANGED,
     label: 'Cambio de estado de ticket',
     description: 'Cuando un ticket que te involucra cambia de estado.',
-    defaultEnabled: false,
+    defaultEnabled: true,
   },
   {
     eventType: PUSH_EVENT_TYPES.COMMENT_CREATED,

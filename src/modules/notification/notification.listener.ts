@@ -501,37 +501,112 @@ export class NotificationListener {
   @OnEvent('ticket.updated')
   async handleTicketUpdated(event: {
     ticketId: string;
-    title: string;
-    status: string;
-    projectId: string;
-    clientId: string;
+    title?: string;
+    previousStatus?: string;
+    status?: string;
+    projectId?: string;
+    clientId?: string;
+    organizationId?: string;
+    userId?: string; // actor (viene del domainEvent helper)
+    metadata?: Record<string, unknown>;
   }) {
+    // Solo notificar si hubo cambio de estado real
+    if (!event.status || event.status === event.previousStatus) return;
+
     this.logger.log(`Ticket actualizado: ${event.ticketId} status=${event.status}`);
 
+    const STATUS_LABELS: Record<string, string> = {
+      OPEN: 'Abierto',
+      IN_PROGRESS: 'En progreso',
+      IN_REVIEW: 'En revision',
+      RESOLVED: 'Resuelto',
+      CLOSED: 'Cerrado',
+    };
+
     try {
-      const client = await this.prisma.client.findUnique({
-        where: { id: event.clientId },
-        select: { userId: true },
+      const ticket = await this.prisma.ticket.findUnique({
+        where: { id: event.ticketId },
+        select: {
+          title: true,
+          createdByUserId: true,
+          client: { select: { userId: true } },
+          task: { select: { assignments: { select: { userId: true } } } },
+        },
       });
+      if (!ticket) return;
 
-      const statusLabels: Record<string, string> = {
-        OPEN: 'Abierto',
-        IN_PROGRESS: 'En progreso',
-        RESOLVED: 'Resuelto',
-        CLOSED: 'Cerrado',
-      };
+      const title = ticket.title ?? event.title ?? 'Ticket';
+      const statusLabel = STATUS_LABELS[event.status] || event.status;
+      const targets = new Set<string>();
 
-      if (client?.userId) {
-        await this.notificationService.create({
-          userId: client.userId,
-          type: 'TICKET_UPDATED',
-          title: 'Ticket actualizado',
-          body: `Tu ticket "${event.title}" cambio a estado: ${statusLabels[event.status] || event.status}`,
-          metadata: { ticketId: event.ticketId, status: event.status },
-        });
-      }
+      // 1) Cliente owner del ticket
+      if (ticket.client?.userId) targets.add(ticket.client.userId);
+      // 2) Creador del ticket (si fue user de equipo)
+      if (ticket.createdByUserId) targets.add(ticket.createdByUserId);
+      // 3) Asignado actual a la task
+      for (const a of ticket.task?.assignments ?? []) targets.add(a.userId);
+
+      // No notificar al actor que disparo el cambio
+      if (event.userId) targets.delete(event.userId);
+
+      await Promise.all(
+        Array.from(targets).map((userId) =>
+          this.notificationService.create({
+            userId,
+            type: 'TICKET_UPDATED',
+            title: 'Ticket actualizado',
+            body: `"${title}" cambio a estado: ${statusLabel}`,
+            metadata: {
+              ticketId: event.ticketId,
+              status: event.status,
+              previousStatus: event.previousStatus,
+            },
+          }),
+        ),
+      );
     } catch (err: any) {
       this.logger.error(`Error notifying about ticket update: ${err?.message}`);
+    }
+  }
+
+  @OnEvent('ticket.assigned')
+  async handleTicketAssigned(event: {
+    ticketId: string;
+    taskId?: string;
+    previousAssigneeId?: string | null;
+    newAssigneeId?: string | null;
+    organizationId?: string;
+    userId?: string; // actor (viene del domainEvent helper)
+  }) {
+    // Solo notificar si hay nuevo assignee y es distinto al anterior
+    if (!event.newAssigneeId || event.newAssigneeId === event.previousAssigneeId) return;
+    // No notificar al usuario si se asigno a si mismo
+    if (event.newAssigneeId === event.userId) return;
+
+    this.logger.log(`Ticket asignado: ${event.ticketId} -> ${event.newAssigneeId}`);
+
+    try {
+      const ticket = await this.prisma.ticket.findUnique({
+        where: { id: event.ticketId },
+        select: { title: true, ticketNumber: true, projectId: true },
+      });
+      if (!ticket) return;
+
+      const tag = ticket.ticketNumber ? `#${ticket.ticketNumber} ` : '';
+
+      await this.notificationService.create({
+        userId: event.newAssigneeId,
+        type: 'TASK_ASSIGNED',
+        title: 'Te asignaron un ticket',
+        body: `${tag}${ticket.title}`,
+        metadata: {
+          ticketId: event.ticketId,
+          taskId: event.taskId,
+          projectId: ticket.projectId,
+        },
+      });
+    } catch (err: any) {
+      this.logger.error(`Error notifying ticket assignment: ${err?.message}`);
     }
   }
 }
