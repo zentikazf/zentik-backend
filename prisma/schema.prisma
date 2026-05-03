@@ -213,6 +213,11 @@ enum DocumentCategory {
   OTHER
 }
 
+enum TimeEntryStatus {
+  DRAFT
+  CONFIRMED
+}
+
 // ============================================================================
 // AUTH MODELS (Better Auth managed)
 // ============================================================================
@@ -603,8 +608,9 @@ model Task {
   dueDate        DateTime?    @map("due_date")
   startDate      DateTime?    @map("start_date")
   endDate        DateTime?    @map("end_date")
-  estimatedHours Float?       @map("estimated_hours")
-  hourlyRate     Decimal?     @map("hourly_rate") @db.Decimal(12, 2)
+  estimatedHours   Float?       @map("estimated_hours")
+  originalEstimate Float?       @map("original_estimate")
+  hourlyRate       Decimal?     @map("hourly_rate") @db.Decimal(12, 2)
   roleId         String?      @map("role_id")
   clientVisible  Boolean      @default(false) @map("client_visible")
   reviewAttempts Int          @default(0) @map("review_attempts")
@@ -695,16 +701,18 @@ model TaskLabel {
 // ============================================================================
 
 model TimeEntry {
-  id          String    @id @default(cuid())
-  taskId      String    @map("task_id")
-  userId      String    @map("user_id")
-  description String?
-  startTime   DateTime  @map("start_time")
-  endTime     DateTime? @map("end_time")
-  duration    Int? // Duration in minutes
-  billable    Boolean   @default(true)
-  createdAt   DateTime  @default(now()) @map("created_at")
-  updatedAt   DateTime  @updatedAt @map("updated_at")
+  id              String          @id @default(cuid())
+  taskId          String          @map("task_id")
+  userId          String          @map("user_id")
+  description     String?
+  startTime       DateTime        @map("start_time")
+  endTime         DateTime?       @map("end_time")
+  duration        Int? // Duration in SECONDS (estandarizado)
+  billable        Boolean         @default(true)
+  status          TimeEntryStatus @default(DRAFT)
+  legacyMigration Boolean         @default(false) @map("legacy_migration")
+  createdAt       DateTime        @default(now()) @map("created_at")
+  updatedAt       DateTime        @updatedAt @map("updated_at")
 
   task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -713,6 +721,7 @@ model TimeEntry {
   @@index([userId])
   @@index([startTime])
   @@index([billable])
+  @@index([status])
   @@map("time_entries")
 }
 
