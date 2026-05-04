@@ -460,7 +460,7 @@ export class ProjectService {
     return updated;
   }
 
-  async listMembers(projectId: string) {
+  async listMembers(projectId: string, excludeRole?: string) {
     const project = await this.findById(projectId);
 
     const members = await this.prisma.projectMember.findMany({
@@ -485,8 +485,17 @@ export class ProjectService {
       orderBy: { createdAt: 'asc' },
     });
 
+    // Filtrar en memoria porque el rol viene anidado en organizationMembers
+    const excluded = excludeRole?.split(',').map((r) => r.trim()).filter(Boolean) ?? [];
+    const filtered = excluded.length > 0
+      ? members.filter((m) => {
+          const roleName = m.user.organizationMembers[0]?.role?.name;
+          return !roleName || !excluded.includes(roleName);
+        })
+      : members;
+
     // Flatten: move role to top level of user for easier frontend consumption
-    return members.map((m) => ({
+    return filtered.map((m) => ({
       ...m,
       user: {
         id: m.user.id,

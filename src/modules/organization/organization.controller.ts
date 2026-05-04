@@ -6,6 +6,7 @@ import {
   Delete,
   Body,
   Param,
+  Query,
   UseGuards,
   HttpCode,
   HttpStatus,
@@ -83,8 +84,11 @@ export class OrganizationController {
 
   @Get(':orgId/members')
   @ApiOperation({ summary: 'Listar miembros de la organizacion' })
-  listMembers(@Param('orgId') orgId: string) {
-    return this.membershipService.listMembers(orgId);
+  listMembers(
+    @Param('orgId') orgId: string,
+    @Query('excludeRole') excludeRole?: string,
+  ) {
+    return this.membershipService.listMembers(orgId, excludeRole);
   }
 
   @Patch(':orgId/members/:id')

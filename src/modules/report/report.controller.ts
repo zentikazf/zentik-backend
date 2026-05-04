@@ -103,4 +103,15 @@ export class ReportController {
   ) {
     return this.reportService.getPersonalSummary(user.id, startDate, endDate);
   }
+
+  @Get('organizations/:orgId/reports/team-monthly')
+  @Permissions('manage:projects')
+  @ApiOperation({ summary: 'Reporte mensual del equipo (solo Cupo 1: Owner/PM/PO/TechLead)' })
+  @ApiQuery({ name: 'month', required: false, type: String, description: 'YYYY-MM (default: mes actual)' })
+  async getTeamMonthly(
+    @Param('orgId') orgId: string,
+    @Query('month') month?: string,
+  ) {
+    return this.reportService.getTeamMonthly(orgId, month);
+  }
 }

@@ -128,8 +128,11 @@ export class ProjectController {
 
   @Get('projects/:projectId/members')
   @ApiOperation({ summary: 'Listar miembros del proyecto' })
-  listMembers(@Param('projectId') projectId: string) {
-    return this.projectService.listMembers(projectId);
+  listMembers(
+    @Param('projectId') projectId: string,
+    @Query('excludeRole') excludeRole?: string,
+  ) {
+    return this.projectService.listMembers(projectId, excludeRole);
   }
 
   @Post('projects/:projectId/members')

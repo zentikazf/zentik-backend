@@ -90,6 +90,18 @@ export class TaskService {
         _max: { position: true },
       });
 
+      // Auto-resolver boardColumn si no viene en dto: buscar la columna que mapee al status (BACKLOG → "Nuevo")
+      let autoColumnId: string | undefined = dto.boardColumnId;
+      if (!autoColumnId) {
+        const targetStatus = dto.status ?? 'BACKLOG';
+        const matchingColumn = await tx.boardColumn.findFirst({
+          where: { board: { projectId }, mappedStatus: targetStatus },
+          select: { id: true },
+          orderBy: { position: 'asc' },
+        });
+        autoColumnId = matchingColumn?.id;
+      }
+
       const created = await tx.task.create({
         data: {
           projectId,
@@ -106,7 +118,7 @@ export class TaskService {
           originalEstimate: dto.estimatedHours,
           hourlyRate: dto.hourlyRate,
           roleId: dto.roleId,
-          boardColumnId: dto.boardColumnId,
+          boardColumnId: autoColumnId,
           sprintId: dto.sprintId,
           position: (maxPosition._max.position ?? -1) + 1,
           createdById: userId,

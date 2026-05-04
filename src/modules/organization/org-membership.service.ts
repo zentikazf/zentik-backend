@@ -23,11 +23,17 @@ export class OrgMembershipService {
     private readonly emailInvitationService: EmailInvitationService,
   ) {}
 
-  async listMembers(orgId: string) {
+  async listMembers(orgId: string, excludeRole?: string) {
     await this.organizationService.findById(orgId);
 
+    // excludeRole soporta CSV: ?excludeRole=Cliente,Externo
+    const excluded = excludeRole?.split(',').map((r) => r.trim()).filter(Boolean) ?? [];
+
     return this.prisma.organizationMember.findMany({
-      where: { organizationId: orgId },
+      where: {
+        organizationId: orgId,
+        ...(excluded.length > 0 && { role: { name: { notIn: excluded } } }),
+      },
       include: {
         user: {
           select: {

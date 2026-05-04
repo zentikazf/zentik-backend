@@ -370,4 +370,141 @@ export class ReportService {
       endDate: endDate ? new Date(endDate) : now,
     };
   }
+
+  /**
+   * Reporte mensual del equipo — Cupo 1 (gerencial).
+   * Por cada miembro (excluyendo Cliente) calcula:
+   * - completedTasks: tareas DONE con endDate en el mes.
+   * - totalSeconds: SUM de TimeEntry.duration (en SEGUNDOS) en el mes.
+   * - hours: totalSeconds / 3600 (conversion server-side, no falsear unidades).
+   * - avgDaysPerTask: promedio de (endDate - startDate) en dias para DONE del mes.
+   * - onTimeTasks: tareas DONE con endDate <= dueDate (entregadas a tiempo).
+   * - performancePct: (onTimeTasks / completedTasks) * 100 (1 decimal). null si completedTasks=0.
+   */
+  async getTeamMonthly(orgId: string, month?: string) {
+    // Parsear mes en formato YYYY-MM (default: mes actual)
+    const now = new Date();
+    let year: number;
+    let monthIndex: number;
+    if (month && /^\d{4}-\d{2}$/.test(month)) {
+      const [y, m] = month.split('-').map(Number);
+      year = y;
+      monthIndex = m - 1;
+    } else {
+      year = now.getFullYear();
+      monthIndex = now.getMonth();
+    }
+    const monthStart = new Date(year, monthIndex, 1, 0, 0, 0, 0);
+    const monthEnd = new Date(year, monthIndex + 1, 0, 23, 59, 59, 999);
+    const monthLabel = `${year}-${String(monthIndex + 1).padStart(2, '0')}`;
+
+    // Miembros del equipo (excluir rol Cliente)
+    const members = await this.prisma.organizationMember.findMany({
+      where: {
+        organizationId: orgId,
+        role: { name: { not: 'Cliente' } },
+      },
+      select: {
+        user: { select: { id: true, name: true, image: true } },
+        role: { select: { name: true } },
+      },
+    });
+
+    const memberIds = members.map((m) => m.user.id);
+    if (memberIds.length === 0) {
+      return { month: monthLabel, items: [] };
+    }
+
+    // 1. Tareas DONE del mes por miembro (con endDate en el mes)
+    const completedRaw = await this.prisma.taskAssignment.findMany({
+      where: {
+        userId: { in: memberIds },
+        task: {
+          status: 'DONE',
+          endDate: { gte: monthStart, lte: monthEnd },
+          project: { organizationId: orgId },
+        },
+      },
+      select: {
+        userId: true,
+        task: {
+          select: {
+            startDate: true,
+            endDate: true,
+            dueDate: true,
+          },
+        },
+      },
+    });
+
+    // 2. Suma de TimeEntry.duration por usuario (CONFIRMED en el mes)
+    const timeAgg = await this.prisma.timeEntry.groupBy({
+      by: ['userId'],
+      where: {
+        userId: { in: memberIds },
+        status: 'CONFIRMED',
+        startTime: { gte: monthStart, lte: monthEnd },
+        task: { project: { organizationId: orgId } },
+      },
+      _sum: { duration: true },
+    });
+    const secondsByUser = new Map<string, number>(
+      timeAgg.map((r) => [r.userId, r._sum.duration || 0]),
+    );
+
+    // 3. Agregar por miembro
+    const items = members.map((m) => {
+      const userId = m.user.id;
+      const userTasks = completedRaw.filter((r) => r.userId === userId);
+      const completedTasks = userTasks.length;
+
+      // avgDaysPerTask: solo tareas con startDate y endDate
+      const validForAvg = userTasks.filter(
+        (r) => r.task.startDate && r.task.endDate,
+      );
+      const avgDaysPerTask = validForAvg.length > 0
+        ? validForAvg.reduce((sum, r) => {
+            const days = (r.task.endDate!.getTime() - r.task.startDate!.getTime()) / (1000 * 60 * 60 * 24);
+            return sum + days;
+          }, 0) / validForAvg.length
+        : 0;
+
+      // onTimeTasks: endDate <= dueDate (sólo si dueDate existe)
+      const onTimeTasks = userTasks.filter(
+        (r) => r.task.dueDate && r.task.endDate && r.task.endDate.getTime() <= r.task.dueDate.getTime(),
+      ).length;
+
+      const performancePct = completedTasks > 0
+        ? Math.round((onTimeTasks / completedTasks) * 1000) / 10 // 1 decimal
+        : null;
+
+      const totalSeconds = secondsByUser.get(userId) || 0;
+      const hours = Math.round((totalSeconds / 3600) * 100) / 100;
+
+      return {
+        userId,
+        name: m.user.name,
+        image: m.user.image,
+        role: m.role?.name || null,
+        completedTasks,
+        totalSeconds,
+        hours,
+        avgDaysPerTask: Math.round(avgDaysPerTask * 10) / 10,
+        onTimeTasks,
+        performancePct,
+      };
+    });
+
+    // Ordenar: rendimiento desc (null al final), luego por horas desc
+    items.sort((a, b) => {
+      if (a.performancePct === null && b.performancePct === null) return b.hours - a.hours;
+      if (a.performancePct === null) return 1;
+      if (b.performancePct === null) return -1;
+      const diff = b.performancePct - a.performancePct;
+      if (diff !== 0) return diff;
+      return b.hours - a.hours;
+    });
+
+    return { month: monthLabel, items };
+  }
 }
