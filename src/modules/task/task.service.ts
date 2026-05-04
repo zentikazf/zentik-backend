@@ -270,7 +270,7 @@ export class TaskService {
           take: 50,
         },
         timeEntries: {
-          select: { id: true, startTime: true, endTime: true, duration: true, description: true, user: { select: { id: true, name: true, image: true } } },
+          select: { id: true, startTime: true, endTime: true, duration: true, description: true, status: true, billable: true, legacyMigration: true, user: { select: { id: true, name: true, image: true } } },
           orderBy: { startTime: 'desc' },
           take: 50,
         },
