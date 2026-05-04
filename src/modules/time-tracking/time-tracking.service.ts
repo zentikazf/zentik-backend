@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import { TimeEntryStatus } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
 import { RedisService } from '../../infrastructure/redis/redis.service';
 import { CreateTimeEntryDto } from './dto/create-time-entry.dto';
@@ -140,6 +141,128 @@ export class TimeEntryService {
 
     return this.prisma.timeEntry.delete({ where: { id } });
   }
+
+  // ============================================
+  // Sincronizacion con estimaciones de tarea (Fase B — TimeEntry como motor invisible)
+  // ============================================
+
+  /**
+   * Upsert de TimeEntry DRAFT a partir de la estimacion de la tarea.
+   * Idempotente: si ya existe DRAFT para (taskId, userId), actualiza la duracion.
+   * Si no existe, crea uno nuevo. Llamado desde el listener task.estimated.
+   */
+  async upsertDraftFromTask(taskId: string, estimatedHours: number, userId: string) {
+    const durationSeconds = Math.round(estimatedHours * 3600);
+
+    const existing = await this.prisma.timeEntry.findFirst({
+      where: { taskId, userId, status: TimeEntryStatus.DRAFT },
+    });
+
+    if (existing) {
+      return this.prisma.timeEntry.update({
+        where: { id: existing.id },
+        data: { duration: durationSeconds },
+      });
+    }
+
+    return this.prisma.timeEntry.create({
+      data: {
+        taskId,
+        userId,
+        duration: durationSeconds,
+        startTime: new Date(),
+        status: TimeEntryStatus.DRAFT,
+        billable: true,
+      },
+    });
+  }
+
+  /**
+   * Confirma el TimeEntry DRAFT al aprobar la tarea (modal OTP).
+   * Marca status=CONFIRMED, setea endTime y dispara time_entry.confirmed
+   * (que el HoursListener escucha para descontar al cliente).
+   */
+  async confirmFromApproval(taskId: string, finalDurationSeconds: number, userId: string) {
+    const draft = await this.prisma.timeEntry.findFirst({
+      where: { taskId, status: TimeEntryStatus.DRAFT },
+      include: { task: { include: { project: { select: { organizationId: true, clientId: true } } } } },
+    });
+
+    let confirmed;
+    if (draft) {
+      confirmed = await this.prisma.timeEntry.update({
+        where: { id: draft.id },
+        data: {
+          duration: finalDurationSeconds,
+          status: TimeEntryStatus.CONFIRMED,
+          endTime: new Date(),
+        },
+        include: { task: { include: { project: { select: { organizationId: true, clientId: true } } } } },
+      });
+    } else {
+      // Caso raro: aprobacion sin DRAFT previo (tarea sin estimacion). Crear CONFIRMED directo.
+      const task = await this.prisma.task.findUnique({
+        where: { id: taskId },
+        include: { assignments: { select: { userId: true } }, project: { select: { organizationId: true, clientId: true } } },
+      });
+      if (!task) {
+        throw new AppException('La tarea no existe', 'TASK_NOT_FOUND', 404);
+      }
+      const assigneeId = task.assignments[0]?.userId ?? userId;
+      confirmed = await this.prisma.timeEntry.create({
+        data: {
+          taskId,
+          userId: assigneeId,
+          duration: finalDurationSeconds,
+          startTime: new Date(),
+          endTime: new Date(),
+          status: TimeEntryStatus.CONFIRMED,
+          billable: true,
+        },
+        include: { task: { include: { project: { select: { organizationId: true, clientId: true } } } } },
+      });
+    }
+
+    this.eventEmitter.emit('time_entry.confirmed', {
+      ...domainEvent('time_entry.confirmed', 'time_entry', confirmed.id, confirmed.task.project.organizationId, userId),
+      timeEntryId: confirmed.id,
+      taskId,
+      duration: finalDurationSeconds,
+      legacyMigration: false,
+    });
+
+    this.logger.log(`TimeEntry ${confirmed.id} CONFIRMED para task ${taskId} con ${finalDurationSeconds}s`);
+    return confirmed;
+  }
+
+  /**
+   * Reverte un TimeEntry CONFIRMED (no legacy) a DRAFT al rechazar/reabrir la tarea.
+   * Dispara time_entry.reverted para que HoursListener devuelva las horas al cliente.
+   */
+  async revertConfirmation(taskId: string, userId: string) {
+    const confirmed = await this.prisma.timeEntry.findFirst({
+      where: { taskId, status: TimeEntryStatus.CONFIRMED, legacyMigration: false },
+      include: { task: { include: { project: { select: { organizationId: true } } } } },
+    });
+
+    if (!confirmed) return null;
+
+    const reverted = await this.prisma.timeEntry.update({
+      where: { id: confirmed.id },
+      data: { status: TimeEntryStatus.DRAFT, endTime: null },
+      include: { task: { include: { project: { select: { organizationId: true } } } } },
+    });
+
+    this.eventEmitter.emit('time_entry.reverted', {
+      ...domainEvent('time_entry.reverted', 'time_entry', reverted.id, reverted.task.project.organizationId, userId),
+      timeEntryId: reverted.id,
+      taskId,
+      duration: reverted.duration,
+    });
+
+    this.logger.log(`TimeEntry ${reverted.id} revertido a DRAFT para task ${taskId}`);
+    return reverted;
+  }
 }
 
 // ============================================
@@ -210,21 +333,39 @@ export class TimerService {
 
     const { taskId, startTime } = JSON.parse(timerData);
     const endTime = new Date();
-    const duration = Math.floor(
+    const elapsedSeconds = Math.floor(
       (endTime.getTime() - new Date(startTime).getTime()) / 1000,
     );
 
-    const timeEntry = await this.prisma.timeEntry.create({
-      data: {
-        userId,
-        taskId,
-        startTime: new Date(startTime),
-        endTime,
-        duration,
-        billable: false,
-      },
-      include: { task: { include: { project: { select: { organizationId: true } } } } },
+    // Si ya existe un DRAFT para (taskId, userId) → sumar duracion. Si no → crear nuevo DRAFT.
+    const draft = await this.prisma.timeEntry.findFirst({
+      where: { taskId, userId, status: TimeEntryStatus.DRAFT },
     });
+
+    let timeEntry;
+    if (draft) {
+      timeEntry = await this.prisma.timeEntry.update({
+        where: { id: draft.id },
+        data: {
+          duration: (draft.duration ?? 0) + elapsedSeconds,
+          endTime,
+        },
+        include: { task: { include: { project: { select: { organizationId: true } } } } },
+      });
+    } else {
+      timeEntry = await this.prisma.timeEntry.create({
+        data: {
+          userId,
+          taskId,
+          startTime: new Date(startTime),
+          endTime,
+          duration: elapsedSeconds,
+          status: TimeEntryStatus.DRAFT,
+          billable: true,
+        },
+        include: { task: { include: { project: { select: { organizationId: true } } } } },
+      });
+    }
 
     await this.redis.del(this.timerKey(userId));
 
@@ -233,11 +374,11 @@ export class TimerService {
       userId,
       taskId,
       timeEntryId: timeEntry.id,
-      duration,
+      duration: elapsedSeconds,
     });
 
     this.logger.log(
-      `Temporizador detenido para usuario ${userId}. Duracion: ${duration}s`,
+      `Temporizador detenido para usuario ${userId}. Sumado ${elapsedSeconds}s al DRAFT (total: ${timeEntry.duration}s)`,
     );
 
     return timeEntry;

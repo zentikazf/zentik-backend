@@ -3,6 +3,21 @@ import { OnEvent } from '@nestjs/event-emitter';
 import { PrismaService } from '../../database/prisma.service';
 import { ClientService } from './client.service';
 
+/**
+ * Listener de horas del cliente (Fase B — TimeEntry como motor invisible).
+ *
+ * Cambio respecto a la version vieja:
+ * - YA NO escucha task.completed ni task.reopened.
+ * - Ahora escucha time_entry.confirmed → descuenta del cupo del cliente
+ *   usando TimeEntry.duration (en segundos).
+ * - Ahora escucha time_entry.reverted → revierte el descuento via REFUND.
+ * - Aplica a tareas SUPPORT y PROJECT (ambos descuentan ahora).
+ *
+ * Salvaguardas:
+ * 1. legacyMigration=true → SKIP (descuento ya estaba hecho con la logica vieja).
+ * 2. duration <= 0 → SKIP.
+ * 3. Sin cliente vinculado al proyecto → SKIP (con log).
+ */
 @Injectable()
 export class HoursListener {
   private readonly logger = new Logger(HoursListener.name);
@@ -12,118 +27,87 @@ export class HoursListener {
     private readonly prisma: PrismaService,
   ) {}
 
-  /**
-   * Time entries y timers manuales NO descuentan del cupo de soporte.
-   * El cupo de horas del cliente (contractedHours) representa unicamente
-   * horas de SOPORTE/CONFIGURACION.
-   *
-   * Regla de negocio: solo las `estimatedHours` definidas por el PM descuentan
-   * del cupo del cliente. Si la tarea SUPPORT se marca DONE sin estimatedHours,
-   * no se descuenta nada (requiere que el PM estime las horas explicitamente).
-   */
-  @OnEvent('task.completed')
-  async onTaskCompleted(event: { task: any }) {
+  @OnEvent('time_entry.confirmed')
+  async onTimeEntryConfirmed(event: {
+    timeEntryId: string;
+    taskId: string;
+    duration: number; // segundos
+    legacyMigration: boolean;
+  }) {
     try {
-      const task = event.task;
-      this.logger.log(`task.completed received — task: ${task?.id}, type: ${task?.type}, estimatedHours: ${task?.estimatedHours}`);
+      const { timeEntryId, taskId, duration, legacyMigration } = event;
 
-      if (!task) {
-        this.logger.warn('task.completed event has no task object');
+      // Salvaguarda 1: legacy migration → no descontar (descuento ya hecho con logica vieja)
+      if (legacyMigration) {
+        this.logger.log(`TimeEntry ${timeEntryId} es legacy — skip descuento`);
         return;
       }
 
-      if (task.type !== 'SUPPORT') {
-        this.logger.log(`Skipping non-SUPPORT task ${task.id} (type: ${task.type})`);
+      // Salvaguarda 2: duration debe ser > 0
+      if (!duration || duration <= 0) {
+        this.logger.log(`TimeEntry ${timeEntryId} con duration=${duration} — skip descuento`);
         return;
       }
 
-      // Regla de negocio: solo estimatedHours explicitamente definidas descuentan.
-      // Sin estimatedHours no se toca el saldo del cliente.
-      if (!task.estimatedHours || task.estimatedHours <= 0) {
-        this.logger.log(
-          `Task ${task.id} sin estimatedHours — no se descuenta nada del cliente`,
-        );
-        return;
-      }
+      // Convertir segundos → minutos para el clientService.recordHoursUsage
+      const minutes = Math.round(duration / 60);
+      this.logger.log(
+        `time_entry.confirmed → descontando ${minutes} min (${(minutes / 60).toFixed(2)}h) para task ${taskId}`,
+      );
 
-      const project = await this.prisma.project.findUnique({
-        where: { id: task.projectId },
-        select: { clientId: true, name: true },
-      });
-
-      if (!project?.clientId) {
-        this.logger.warn(`Project ${task.projectId} (${project?.name}) has no clientId — cannot deduct hours`);
-        return;
-      }
-
-      const minutes = task.estimatedHours * 60;
-      this.logger.log(`Deducting ${task.estimatedHours}h for task ${task.id} (clientId via project: ${project.clientId})`);
-
-      await this.clientService.recordHoursUsage(task.id, minutes);
-      this.logger.log(`Successfully consumed ${task.estimatedHours}h for SUPPORT task ${task.id}`);
+      await this.clientService.recordHoursUsage(taskId, minutes);
     } catch (err) {
-      this.logger.error(`Error auto-consuming hours for support task`, err);
+      this.logger.error('Error descontando horas tras time_entry.confirmed', err);
     }
   }
 
-  /**
-   * When a SUPPORT task moves FROM DONE back to another status,
-   * reverse the hours that were consumed.
-   */
-  @OnEvent('task.reopened')
-  async onTaskReopened(event: { task: any }) {
+  @OnEvent('time_entry.reverted')
+  async onTimeEntryReverted(event: {
+    timeEntryId: string;
+    taskId: string;
+    duration: number;
+  }) {
     try {
-      const task = event.task;
-      this.logger.log(`task.reopened received — task: ${task?.id}, type: ${task?.type}`);
+      const { timeEntryId, taskId } = event;
 
-      if (!task || task.type !== 'SUPPORT') return;
-
-      const project = await this.prisma.project.findUnique({
-        where: { id: task.projectId },
-        select: { clientId: true },
-      });
-      if (!project?.clientId) return;
-
-      // Find the USAGE or LOAN transaction for this task and reverse it
+      // Buscar la transaccion USAGE/LOAN mas reciente para esta tarea y revertirla con REFUND
       const txn = await this.prisma.hoursTransaction.findFirst({
-        where: { taskId: task.id, clientId: project.clientId, type: { in: ['USAGE', 'LOAN'] } },
+        where: { taskId, type: { in: ['USAGE', 'LOAN'] } },
         orderBy: { createdAt: 'desc' },
       });
 
       if (!txn) {
-        this.logger.log(`No hours transaction found for task ${task.id} — nothing to reverse`);
+        this.logger.log(`TimeEntry ${timeEntryId}: no se encontro transaccion previa para task ${taskId} — nada que revertir`);
         return;
       }
 
       await this.prisma.$transaction(async (tx) => {
-        // Create a REFUND transaction
         await tx.hoursTransaction.create({
           data: {
-            clientId: project.clientId!,
+            clientId: txn.clientId,
             type: 'REFUND',
             hours: txn.hours,
-            taskId: task.id,
-            note: `Reversión: tarea reabierta — ${task.title || task.id}`,
+            taskId,
+            note: `Reversion: TimeEntry vuelto a DRAFT (rechazo/reapertura)`,
           },
         });
 
-        // Reverse the client counters
         if (txn.type === 'LOAN') {
           await tx.client.update({
-            where: { id: project.clientId! },
+            where: { id: txn.clientId },
             data: { loanedHours: { decrement: txn.hours } },
           });
         } else {
           await tx.client.update({
-            where: { id: project.clientId! },
+            where: { id: txn.clientId },
             data: { usedHours: { decrement: txn.hours } },
           });
         }
       });
 
-      this.logger.log(`Reversed ${txn.hours}h (${txn.type}) for reopened task ${task.id}`);
+      this.logger.log(`Revertidas ${txn.hours}h (${txn.type} → REFUND) para task ${taskId}`);
     } catch (err) {
-      this.logger.error(`Error reversing hours for reopened task`, err);
+      this.logger.error('Error revirtiendo horas tras time_entry.reverted', err);
     }
   }
 }

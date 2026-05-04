@@ -551,11 +551,8 @@ export class ClientService {
       return;
     }
 
-    if (task.type !== 'SUPPORT') {
-      this.logger.log(`recordHoursUsage: Task ${taskId} is type ${task.type}, skipping (only SUPPORT deducts)`);
-      return;
-    }
-
+    // Fase B: ambos tipos (SUPPORT y PROJECT) descuentan del cupo del cliente.
+    // El descuento se dispara desde HoursListener al recibir time_entry.confirmed.
     const clientId = task.project.clientId;
     const hours = parseFloat((durationMinutes / 60).toFixed(4));
 

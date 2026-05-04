@@ -99,13 +99,12 @@ export class DashboardService {
 
   private async getPendingTasks(
     orgId: string,
-    dateRange: { start: Date; end: Date },
+    _dateRange: { start: Date; end: Date },
     clientId?: string,
     memberId?: string,
   ) {
-    // Filtramos por updatedAt: tareas que siguen pendientes y que tuvieron
-    // movimiento dentro del rango (más útil que createdAt, que ocultaba las
-    // tareas antiguas que siguen activas).
+    // Fase B: "pendiente" es snapshot del estado actual, no foto del rango.
+    // Una tarea TODO desde hace meses sigue pendiente aunque no se haya tocado.
     const where: Prisma.TaskWhereInput = {
       project: {
         organizationId: orgId,
@@ -113,7 +112,6 @@ export class DashboardService {
         ...(clientId && { clientId }),
       },
       status: { in: ['TODO', 'IN_PROGRESS', 'IN_REVIEW'] },
-      updatedAt: { gte: dateRange.start, lte: dateRange.end },
     };
     if (memberId) where.assignments = { some: { userId: memberId } };
 
@@ -244,15 +242,17 @@ export class DashboardService {
       }),
     ]);
 
+    // Fase B: TimeEntry.duration esta en SEGUNDOS (estandarizado).
     const activeMap = new Map(activeTaskCounts.map((r) => [r.userId, r._count]));
     const completedMap = new Map(completedTaskCounts.map((r) => [r.userId, r._count]));
-    const minutesMap = new Map(
+    const secondsMap = new Map(
       monthlyMinutes.map((r) => [r.userId, r._sum.duration || 0]),
     );
 
     const memberStats = members.map((m) => {
-      const minutes = minutesMap.get(m.user.id) || 0;
-      const hours = Math.round((minutes / 60) * 100) / 100;
+      const seconds = secondsMap.get(m.user.id) || 0;
+      const hours = Math.round((seconds / 3600) * 100) / 100;
+      const minutes = Math.round(seconds / 60);
       return {
         ...m.user,
         role: m.role?.name || null,
@@ -358,14 +358,15 @@ export class DashboardService {
       },
     });
 
-    let totalMinutes = 0;
-    let billableMinutes = 0;
-    const byClient = new Map<string, { clientId: string; clientName: string; totalMinutes: number; projectCount: Set<string> }>();
+    // Fase B: TimeEntry.duration esta en SEGUNDOS (estandarizado).
+    let totalSeconds = 0;
+    let billableSeconds = 0;
+    const byClient = new Map<string, { clientId: string; clientName: string; totalSeconds: number; projectCount: Set<string> }>();
 
     for (const entry of timeEntries) {
-      const mins = entry.duration || 0;
-      totalMinutes += mins;
-      if (entry.billable) billableMinutes += mins;
+      const secs = entry.duration || 0;
+      totalSeconds += secs;
+      if (entry.billable) billableSeconds += secs;
 
       const clientKey = entry.task.project.client?.id || '__no_client__';
       const clientName = entry.task.project.client?.name || 'Sin cliente';
@@ -374,25 +375,25 @@ export class DashboardService {
         byClient.set(clientKey, {
           clientId: clientKey,
           clientName,
-          totalMinutes: 0,
+          totalSeconds: 0,
           projectCount: new Set(),
         });
       }
       const c = byClient.get(clientKey)!;
-      c.totalMinutes += mins;
+      c.totalSeconds += secs;
       c.projectCount.add(entry.task.project.id);
     }
 
     return {
-      totalMinutes,
-      totalHours: Math.round((totalMinutes / 60) * 100) / 100,
-      billableMinutes,
-      billableHours: Math.round((billableMinutes / 60) * 100) / 100,
+      totalMinutes: Math.round(totalSeconds / 60),
+      totalHours: Math.round((totalSeconds / 3600) * 100) / 100,
+      billableMinutes: Math.round(billableSeconds / 60),
+      billableHours: Math.round((billableSeconds / 3600) * 100) / 100,
       byClient: Array.from(byClient.values()).map((c) => ({
         clientId: c.clientId,
         clientName: c.clientName,
-        totalMinutes: c.totalMinutes,
-        totalHours: Math.round((c.totalMinutes / 60) * 100) / 100,
+        totalMinutes: Math.round(c.totalSeconds / 60),
+        totalHours: Math.round((c.totalSeconds / 3600) * 100) / 100,
         projectCount: c.projectCount.size,
       })),
     };

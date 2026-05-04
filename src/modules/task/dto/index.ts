@@ -4,3 +4,4 @@ export * from './task-filter.dto';
 export * from './bulk-update-task.dto';
 export * from './assign-task.dto';
 export * from './reject-task.dto';
+export * from './approve-task.dto';

@@ -101,6 +101,50 @@ export class UserService {
     };
   }
 
+  /**
+   * Counts reales para los cards del dashboard de Dev/QA/Designer (Cupo 2).
+   * Reemplaza los conteos calculados localmente sobre myTasks (que tenia limit=10
+   * hardcoded y mostraba numeros incorrectos).
+   */
+  async getDashboardCards(userId: string) {
+    const now = new Date();
+    const threeDaysFromNow = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000);
+
+    const [assigned, urgent, dueSoon] = await Promise.all([
+      this.prisma.taskAssignment.count({
+        where: {
+          userId,
+          task: {
+            status: { in: ['TODO', 'IN_PROGRESS', 'IN_REVIEW'] },
+            project: { lifecycleStatus: 'ACTIVE' },
+          },
+        },
+      }),
+      this.prisma.taskAssignment.count({
+        where: {
+          userId,
+          task: {
+            status: { in: ['TODO', 'IN_PROGRESS', 'IN_REVIEW'] },
+            priority: { in: ['HIGH', 'URGENT'] },
+            project: { lifecycleStatus: 'ACTIVE' },
+          },
+        },
+      }),
+      this.prisma.taskAssignment.count({
+        where: {
+          userId,
+          task: {
+            status: { in: ['TODO', 'IN_PROGRESS', 'IN_REVIEW'] },
+            dueDate: { gte: now, lte: threeDaysFromNow },
+            project: { lifecycleStatus: 'ACTIVE' },
+          },
+        },
+      }),
+    ]);
+
+    return { assigned, urgent, dueSoon };
+  }
+
   async updateProfile(userId: string, dto: UpdateProfileDto) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },

@@ -5,10 +5,11 @@ import {
   TimerService,
   TimeReportService,
 } from './time-tracking.service';
+import { TimeEntryListener } from './time-tracking.listener';
 
 @Module({
   controllers: [TimeTrackingController],
-  providers: [TimeEntryService, TimerService, TimeReportService],
+  providers: [TimeEntryService, TimerService, TimeReportService, TimeEntryListener],
   exports: [TimeEntryService, TimerService, TimeReportService],
 })
 export class TimeTrackingModule {}

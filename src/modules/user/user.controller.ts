@@ -105,6 +105,17 @@ export class UserController {
     );
   }
 
+  @Get('me/dashboard/cards')
+  @ApiOperation({
+    summary: 'Cards del dashboard del usuario (Cupo 2 — Dev/QA/Designer)',
+    description: 'Devuelve counts reales: tareas asignadas, alta prioridad y vencen pronto.',
+  })
+  @ApiResponse({ status: 200, description: 'Counts obtenidos exitosamente' })
+  @ApiResponse({ status: 401, description: 'No autenticado' })
+  async getMyDashboardCards(@CurrentUser() user: AuthenticatedUser) {
+    return this.userService.getDashboardCards(user.id);
+  }
+
   @Get('me/preferences')
   @ApiOperation({
     summary: 'Obtener preferencias del usuario actual',

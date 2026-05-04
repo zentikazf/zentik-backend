@@ -27,6 +27,7 @@ import {
   BulkUpdateTaskDto,
   AssignTaskDto,
   RejectTaskDto,
+  ApproveTaskDto,
 } from './dto';
 
 @ApiTags('Tasks')
@@ -217,14 +218,22 @@ export class TaskController {
   // APPROVALS
   // ============================================
 
+  @Get('tasks/:taskId/approval-preview')
+  @ApiOperation({ summary: 'Datos para el modal OTP de aprobacion (estimado vs registrado)' })
+  @ApiResponse({ status: 200, description: 'Preview con originalEstimate y currentDraftHours' })
+  async getApprovalPreview(@Param('taskId') taskId: string) {
+    return this.taskApprovalService.getApprovalPreview(taskId);
+  }
+
   @Post('tasks/:taskId/approve')
   @ApiOperation({ summary: 'Aprobar una tarea en revisión (moverla a Deploy)' })
-  @ApiResponse({ status: 200, description: 'Tarea aprobada y movida a Deploy' })
+  @ApiResponse({ status: 200, description: 'Tarea aprobada y TimeEntry confirmado' })
   async approveTask(
     @Param('taskId') taskId: string,
+    @Body() dto: ApproveTaskDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.taskApprovalService.approveTask(taskId, user.id);
+    return this.taskApprovalService.approveTask(taskId, user.id, dto?.confirmedHours);
   }
 
   @Post('tasks/:taskId/reject')

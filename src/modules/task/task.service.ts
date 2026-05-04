@@ -102,6 +102,8 @@ export class TaskService {
           dueDate: dto.dueDate ? new Date(dto.dueDate) : undefined,
           startDate: dto.startDate ? new Date(dto.startDate) : undefined,
           estimatedHours: dto.estimatedHours,
+          // originalEstimate inmutable: se siembra al crear con la primera estimacion
+          originalEstimate: dto.estimatedHours,
           hourlyRate: dto.hourlyRate,
           roleId: dto.roleId,
           boardColumnId: dto.boardColumnId,
@@ -157,6 +159,16 @@ export class TaskService {
       ...domainEvent('task.created', 'task', task!.id, project.organizationId, userId, { title: task!.title, projectId }),
       task,
     });
+
+    // Si la tarea se crea con estimatedHours → emitir task.estimated para que el TimeEntryListener cree el DRAFT
+    if (dto.estimatedHours && dto.estimatedHours > 0) {
+      this.eventEmitter.emit('task.estimated', {
+        ...domainEvent('task.estimated', 'task', task!.id, project.organizationId, userId, { title: task!.title, projectId }),
+        taskId: task!.id,
+        estimatedHours: dto.estimatedHours,
+      });
+    }
+
     this.logger.log(`Task created: ${task!.id} in project ${projectId}`);
 
     return task;
@@ -307,6 +319,13 @@ export class TaskService {
       await this.assertSupportHoursAvailable(task.projectId, dto.estimatedHours, taskId);
     }
 
+    // Backfill originalEstimate la primera vez que se setean horas (es inmutable, solo para varianza)
+    const shouldBackfillOriginal =
+      dto.estimatedHours !== undefined &&
+      dto.estimatedHours !== null &&
+      dto.estimatedHours > 0 &&
+      !(task as any).originalEstimate;
+
     const oldData = { status: task.status, priority: task.priority, title: task.title };
     const transitionRef: { ticket: { id: string; title: string; projectId: string; clientId: string } | null } = { ticket: null };
 
@@ -327,6 +346,7 @@ export class TaskService {
         boardColumnId: dto.boardColumnId,
         sprintId: dto.sprintId,
         clientVisible: dto.clientVisible,
+        ...(shouldBackfillOriginal && { originalEstimate: dto.estimatedHours }),
       };
 
       // Validate status transitions — DONE requires approval (must go through IN_REVIEW first)
@@ -490,14 +510,21 @@ export class TaskService {
       });
     }
 
-    // Emit task.completed when status changes to DONE (include type for hours listener)
-    if (dto.status === 'DONE' && task.status !== 'DONE') {
-      this.eventEmitter.emit('task.completed', {
-        ...domainEvent('task.completed', 'task', taskId, task.project.organizationId, userId, { title: updated!.title, projectId: task.projectId }),
-        task: { ...updated, type: (updated as any).type },
+    // Emit task.estimated cuando cambia estimatedHours (TimeEntryListener crea/actualiza DRAFT)
+    if (
+      dto.estimatedHours !== undefined &&
+      dto.estimatedHours !== (task as any).estimatedHours
+    ) {
+      this.eventEmitter.emit('task.estimated', {
+        ...domainEvent('task.estimated', 'task', taskId, task.project.organizationId, userId, { title: updated!.title, projectId: task.projectId }),
+        taskId,
+        estimatedHours: dto.estimatedHours,
       });
+    }
 
-      // Cross-role comment: log when user completes a task assigned to a different role
+    // Cross-role comment al completar (mantenido — el emit task.completed se elimino en Fase B,
+    // el descuento al cliente ahora sale de time_entry.confirmed via HoursListener)
+    if (dto.status === 'DONE' && task.status !== 'DONE') {
       const taskWithRole = await this.prisma.task.findUnique({
         where: { id: taskId },
         select: { roleId: true, role: { select: { name: true } } },

@@ -1,8 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import { TimeEntryStatus } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
 import { AppException, TaskNotFoundException } from '../../common/filters/app-exception';
 import { domainEvent } from '../../common/events/domain-event.helper';
+import { TimeEntryService } from '../time-tracking/time-tracking.service';
 
 @Injectable()
 export class TaskApprovalService {
@@ -11,9 +13,49 @@ export class TaskApprovalService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly eventEmitter: EventEmitter2,
+    private readonly timeEntryService: TimeEntryService,
   ) {}
 
-  async approveTask(taskId: string, userId: string) {
+  /**
+   * Devuelve los datos para el modal OTP antes de aprobar:
+   * - originalEstimate (lo que se estimo, inmutable)
+   * - currentDraftHours (lo que esta cargado actualmente, en horas con 1 decimal)
+   * - hasDraft (true si hay TimeEntry DRAFT preexistente)
+   */
+  async getApprovalPreview(taskId: string) {
+    const task = await this.prisma.task.findUnique({
+      where: { id: taskId },
+      select: {
+        id: true,
+        title: true,
+        estimatedHours: true,
+        originalEstimate: true,
+      },
+    });
+    if (!task) {
+      throw new TaskNotFoundException(taskId);
+    }
+
+    const draft = await this.prisma.timeEntry.findFirst({
+      where: { taskId, status: TimeEntryStatus.DRAFT },
+      select: { id: true, duration: true },
+    });
+
+    const draftSeconds = draft?.duration ?? 0;
+    return {
+      task: { id: task.id, title: task.title },
+      originalEstimate: task.originalEstimate ?? task.estimatedHours ?? 0,
+      currentDraftHours: Math.round((draftSeconds / 3600) * 10) / 10, // 1 decimal
+      hasDraft: !!draft,
+    };
+  }
+
+  /**
+   * Aprueba la tarea moviendola a DONE y confirma el TimeEntry DRAFT con las horas
+   * confirmadas en el modal OTP. Si no se pasa confirmedHours, se usa la duracion
+   * actual del DRAFT (o estimatedHours como fallback).
+   */
+  async approveTask(taskId: string, userId: string, confirmedHours?: number) {
     const task = await this.prisma.task.findUnique({
       where: { id: taskId },
       include: {
@@ -42,14 +84,35 @@ export class TaskApprovalService {
       orderBy: { position: 'asc' },
     });
 
-    const updated = await this.prisma.task.update({
-      where: { id: taskId },
-      data: {
-        status: 'DONE',
-        endDate: task.endDate ?? new Date(),
-        ...(deployColumn && { boardColumnId: deployColumn.id }),
-      },
+    // Resolver duracion final a confirmar:
+    // 1. Si el cliente paso confirmedHours en el modal OTP → usar eso.
+    // 2. Si no, usar la duracion del DRAFT actual.
+    // 3. Si no hay DRAFT, usar estimatedHours como fallback.
+    let finalDurationSeconds: number;
+    if (confirmedHours !== undefined && confirmedHours !== null) {
+      finalDurationSeconds = Math.round(confirmedHours * 3600);
+    } else {
+      const draft = await this.prisma.timeEntry.findFirst({
+        where: { taskId, status: TimeEntryStatus.DRAFT },
+        select: { duration: true },
+      });
+      finalDurationSeconds = draft?.duration ?? Math.round((task.estimatedHours ?? 0) * 3600);
+    }
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.task.update({
+        where: { id: taskId },
+        data: {
+          status: 'DONE',
+          endDate: task.endDate ?? new Date(),
+          ...(deployColumn && { boardColumnId: deployColumn.id }),
+        },
+      });
+      return result;
     });
+
+    // Confirmar el TimeEntry DRAFT (dispara time_entry.confirmed → HoursListener descuenta cliente)
+    await this.timeEntryService.confirmFromApproval(taskId, finalDurationSeconds, userId);
 
     this.eventEmitter.emit('task.approval.approved', {
       ...domainEvent('task.approval.approved', 'task', task.id, task.project.organizationId, userId, { taskTitle: task.title, projectId: task.projectId, projectName: task.project.name }),
@@ -59,13 +122,12 @@ export class TaskApprovalService {
       projectName: task.project.name,
       approvedById: userId,
       assigneeIds: task.assignments.map((a: { userId: string }) => a.userId),
+      confirmedDurationSeconds: finalDurationSeconds,
     });
 
-    // Emit task.completed so HoursListener deducts SUPPORT hours
-    this.eventEmitter.emit('task.completed', {
-      ...domainEvent('task.completed', 'task', task.id, task.project.organizationId, userId, { title: task.title, projectId: task.projectId }),
-      task: { ...updated, type: (task as any).type, projectId: task.projectId, createdAt: task.createdAt, estimatedHours: (task as any).estimatedHours },
-    });
+    this.logger.log(
+      `Task ${taskId} aprobada con ${finalDurationSeconds}s confirmados (${(finalDurationSeconds / 3600).toFixed(2)}h)`,
+    );
 
     return updated;
   }
@@ -107,6 +169,9 @@ export class TaskApprovalService {
         ...(desarrolloColumn && { boardColumnId: desarrolloColumn.id }),
       },
     });
+
+    // Si la tarea tenia TimeEntry CONFIRMED (puede pasar si rechazo viene tras una aprobacion previa) → revertir
+    await this.timeEntryService.revertConfirmation(taskId, userId);
 
     // Create system comment with rejection reason
     await this.prisma.comment.create({
