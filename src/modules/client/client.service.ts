@@ -421,25 +421,36 @@ export class ClientService {
 
   // ── Horas contratadas ─────────────────────────────────
 
-  async getHoursSummary(orgId: string, clientId: string) {
+  async getHoursSummary(orgId: string, clientId: string, page = 1, limit = 20) {
     const client = await this.findById(orgId, clientId);
     const available = Math.max(client.contractedHours - client.usedHours - client.loanedHours, 0);
 
-    const transactions = await this.prisma.hoursTransaction.findMany({
-      where: { clientId, deletedAt: null },
-      include: {
-        task: { select: { id: true, title: true, type: true, project: { select: { id: true, name: true } } } },
-      },
-      orderBy: { createdAt: 'desc' },
-      take: 100,
-    });
+    const safePage = Math.max(1, page);
+    const safeLimit = Math.min(Math.max(1, limit), 100);
+    const skip = (safePage - 1) * safeLimit;
 
-    const totalAmount = transactions.reduce((sum, t) => {
-      if (!t.priceAmount) return sum;
-      const amount = parseFloat(t.priceAmount.toString());
-      if (Number.isNaN(amount)) return sum;
-      return t.type === 'USAGE' || t.type === 'LOAN' ? sum + amount : sum;
-    }, 0);
+    const where: Prisma.HoursTransactionWhereInput = { clientId, deletedAt: null };
+
+    const [transactions, total, billableAggregate] = await this.prisma.$transaction([
+      this.prisma.hoursTransaction.findMany({
+        where,
+        include: {
+          task: { select: { id: true, title: true, type: true, project: { select: { id: true, name: true } } } },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: safeLimit,
+      }),
+      this.prisma.hoursTransaction.count({ where }),
+      this.prisma.hoursTransaction.aggregate({
+        where: { ...where, type: { in: ['USAGE', 'LOAN'] }, priceAmount: { not: null } },
+        _sum: { priceAmount: true },
+      }),
+    ]);
+
+    const totalAmount = billableAggregate._sum.priceAmount
+      ? parseFloat(billableAggregate._sum.priceAmount.toString())
+      : 0;
 
     return {
       contractedHours: client.contractedHours,
@@ -451,6 +462,9 @@ export class ClientService {
       currency: client.currency,
       totalAmount,
       transactions,
+      transactionsTotal: total,
+      page: safePage,
+      limit: safeLimit,
     };
   }
 

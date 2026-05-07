@@ -146,12 +146,19 @@ export class ClientController {
   // ── Horas contratadas ─────────────────────────────────
 
   @Get(':clientId/hours')
-  @ApiOperation({ summary: 'Resumen de horas contratadas del cliente' })
+  @ApiOperation({ summary: 'Resumen de horas contratadas del cliente (transacciones paginadas)' })
   getHoursSummary(
     @Param('orgId') orgId: string,
     @Param('clientId') clientId: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
   ) {
-    return this.clientService.getHoursSummary(orgId, clientId);
+    return this.clientService.getHoursSummary(
+      orgId,
+      clientId,
+      page ? parseInt(page, 10) : undefined,
+      limit ? parseInt(limit, 10) : undefined,
+    );
   }
 
   @Post(':clientId/hours')
