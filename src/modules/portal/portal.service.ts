@@ -528,20 +528,33 @@ export class PortalService {
     const client = await this.getClientByUserId(userId);
     const available = Math.max(client.contractedHours - client.usedHours - client.loanedHours, 0);
 
+    // Solo descuentos consumidos (USAGE/LOAN), nunca borrados, nunca PURCHASE/REFUND.
+    // El cliente solo ve lo que se le descontó, no movimientos administrativos.
     const recentTransactions = await this.prisma.hoursTransaction.findMany({
-      where: { clientId: client.id },
+      where: {
+        clientId: client.id,
+        type: { in: ['USAGE', 'LOAN'] },
+        deletedAt: null,
+      },
       include: {
         task: {
           select: {
             id: true,
             title: true,
+            type: true,
             project: { select: { id: true, name: true } },
           },
         },
       },
       orderBy: { createdAt: 'desc' },
-      take: 20,
+      take: 100,
     });
+
+    // Suma solo de transacciones que tienen precio asociado (snapshot).
+    // Las transacciones legacy o sin tarifa configurada no suman al total.
+    const totalAmount = recentTransactions
+      .filter((t) => t.priceAmount !== null)
+      .reduce((sum, t) => sum + parseFloat(t.priceAmount!.toString()), 0);
 
     return {
       contractedHours: client.contractedHours,
@@ -551,6 +564,10 @@ export class PortalService {
       percentUsed: client.contractedHours > 0
         ? parseFloat(((client.usedHours / client.contractedHours) * 100).toFixed(1))
         : 0,
+      currency: client.currency,
+      developmentHourlyRate: client.developmentHourlyRate,
+      supportHourlyRate: client.supportHourlyRate,
+      totalAmount,
       transactions: recentTransactions,
     };
   }

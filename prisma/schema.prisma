@@ -1261,6 +1261,12 @@ model HoursTransaction {
   hours        Float
   taskId       String?   @map("task_id")
   note         String?
+
+  // Snapshot de precio al momento del descuento (Fase Precio Hora)
+  priceAmount   Decimal? @map("price_amount")   @db.Decimal(15, 2)
+  priceRate     Decimal? @map("price_rate")     @db.Decimal(12, 2)
+  priceCurrency String?  @map("price_currency")
+
   createdAt    DateTime  @default(now()) @map("created_at")
   deletedAt    DateTime? @map("deleted_at")
   deletedById  String?   @map("deleted_by_id")
