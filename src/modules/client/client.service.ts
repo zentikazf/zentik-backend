@@ -428,11 +428,18 @@ export class ClientService {
     const transactions = await this.prisma.hoursTransaction.findMany({
       where: { clientId, deletedAt: null },
       include: {
-        task: { select: { id: true, title: true, project: { select: { id: true, name: true } } } },
+        task: { select: { id: true, title: true, type: true, project: { select: { id: true, name: true } } } },
       },
       orderBy: { createdAt: 'desc' },
-      take: 50,
+      take: 100,
     });
+
+    const totalAmount = transactions.reduce((sum, t) => {
+      if (!t.priceAmount) return sum;
+      const amount = parseFloat(t.priceAmount.toString());
+      if (Number.isNaN(amount)) return sum;
+      return t.type === 'USAGE' || t.type === 'LOAN' ? sum + amount : sum;
+    }, 0);
 
     return {
       contractedHours: client.contractedHours,
@@ -442,6 +449,7 @@ export class ClientService {
       developmentHourlyRate: client.developmentHourlyRate,
       supportHourlyRate: client.supportHourlyRate,
       currency: client.currency,
+      totalAmount,
       transactions,
     };
   }
