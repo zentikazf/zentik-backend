@@ -89,6 +89,7 @@ export class ClientService {
       include: {
         _count: { select: { projects: true, users: true } },
         projects: {
+          where: { lifecycleStatus: 'ACTIVE' },
           select: { id: true, name: true, status: true },
           orderBy: { createdAt: 'desc' },
           take: 10,
@@ -420,18 +421,36 @@ export class ClientService {
 
   // ── Horas contratadas ─────────────────────────────────
 
-  async getHoursSummary(orgId: string, clientId: string) {
+  async getHoursSummary(orgId: string, clientId: string, page = 1, limit = 20) {
     const client = await this.findById(orgId, clientId);
     const available = Math.max(client.contractedHours - client.usedHours - client.loanedHours, 0);
 
-    const transactions = await this.prisma.hoursTransaction.findMany({
-      where: { clientId, deletedAt: null },
-      include: {
-        task: { select: { id: true, title: true, project: { select: { id: true, name: true } } } },
-      },
-      orderBy: { createdAt: 'desc' },
-      take: 50,
-    });
+    const safePage = Math.max(1, page);
+    const safeLimit = Math.min(Math.max(1, limit), 100);
+    const skip = (safePage - 1) * safeLimit;
+
+    const where: Prisma.HoursTransactionWhereInput = { clientId, deletedAt: null };
+
+    const [transactions, total, billableAggregate] = await this.prisma.$transaction([
+      this.prisma.hoursTransaction.findMany({
+        where,
+        include: {
+          task: { select: { id: true, title: true, type: true, project: { select: { id: true, name: true } } } },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: safeLimit,
+      }),
+      this.prisma.hoursTransaction.count({ where }),
+      this.prisma.hoursTransaction.aggregate({
+        where: { ...where, type: { in: ['USAGE', 'LOAN'] }, priceAmount: { not: null } },
+        _sum: { priceAmount: true },
+      }),
+    ]);
+
+    const totalAmount = billableAggregate._sum.priceAmount
+      ? parseFloat(billableAggregate._sum.priceAmount.toString())
+      : 0;
 
     return {
       contractedHours: client.contractedHours,
@@ -441,7 +460,11 @@ export class ClientService {
       developmentHourlyRate: client.developmentHourlyRate,
       supportHourlyRate: client.supportHourlyRate,
       currency: client.currency,
+      totalAmount,
       transactions,
+      transactionsTotal: total,
+      page: safePage,
+      limit: safeLimit,
     };
   }
 
@@ -540,6 +563,7 @@ export class ClientService {
         id: true,
         title: true,
         type: true,
+        hourlyRate: true, // Override por tarea (Fase Precio Hora)
         project: {
           select: { id: true, name: true, clientId: true, organizationId: true },
         },
@@ -559,6 +583,24 @@ export class ClientService {
     const client = await this.prisma.client.findUnique({ where: { id: clientId } });
     if (!client) return;
 
+    // Resolver tarifa snapshot (Fase Precio Hora):
+    // Prioridad: task.hourlyRate (override) → client.{type}HourlyRate
+    // Si no hay tarifa configurada, priceAmount queda null (transacción sin precio).
+    const resolvedRate = (() => {
+      if (task.hourlyRate) return parseFloat(task.hourlyRate.toString());
+      if (task.type === 'SUPPORT' && client.supportHourlyRate) {
+        return parseFloat(client.supportHourlyRate.toString());
+      }
+      if (task.type === 'PROJECT' && client.developmentHourlyRate) {
+        return parseFloat(client.developmentHourlyRate.toString());
+      }
+      return null;
+    })();
+
+    const priceAmount = resolvedRate !== null
+      ? parseFloat((hours * resolvedRate).toFixed(2))
+      : null;
+
     const available = client.contractedHours - client.usedHours;
     const isLoan = available <= 0;
 
@@ -570,6 +612,9 @@ export class ClientService {
           hours,
           taskId,
           note: `Tiempo registrado en: ${task.title}`,
+          priceAmount,
+          priceRate: resolvedRate,
+          priceCurrency: priceAmount !== null ? client.currency : null,
         },
       });
 
@@ -586,13 +631,24 @@ export class ClientService {
       }
     });
 
-    this.logger.log(`Recorded ${hours}h ${isLoan ? '(loan)' : '(usage)'} for client: ${clientId}, task: ${taskId}`);
+    this.logger.log(
+      `Recorded ${hours}h ${isLoan ? '(loan)' : '(usage)'} for client ${clientId} ` +
+      `[rate: ${resolvedRate ?? 'null'}, amount: ${priceAmount ?? 'null'} ${client.currency}]`,
+    );
+
     await this.auditService.create({
       organizationId: task.project.organizationId,
       action: isLoan ? 'client.hours.loaned' : 'client.hours.consumed',
       resource: 'client',
       resourceId: clientId,
-      newData: { hours, taskId, taskTitle: task.title, type: isLoan ? 'LOAN' : 'USAGE' },
+      newData: {
+        hours,
+        priceAmount,
+        priceRate: resolvedRate,
+        taskId,
+        taskTitle: task.title,
+        type: isLoan ? 'LOAN' : 'USAGE',
+      },
     });
   }
 
