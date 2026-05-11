@@ -165,6 +165,9 @@ export class TaskService {
           createdBy: { select: { id: true, name: true, email: true, image: true } },
         },
       });
+    }, {
+      maxWait: 10_000,
+      timeout: 30_000,
     });
 
     this.eventEmitter.emit('task.created', {
@@ -472,6 +475,9 @@ export class TaskService {
           createdBy: { select: { id: true, name: true, email: true, image: true } },
         },
       });
+    }, {
+      maxWait: 10_000,
+      timeout: 30_000,
     });
 
     // Emit ticket transition event (outside transaction — fire & forget)
