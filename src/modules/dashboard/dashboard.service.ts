@@ -50,18 +50,21 @@ export class DashboardService {
       teamMembers,
       hours,
       overdueTasks,
-      period: { startDate: dateRange.start, endDate: dateRange.end },
+      period: {
+        startDate: dateRange.start ?? null,
+        endDate: dateRange.end ?? null,
+      },
       complianceMonth: { start: monthRange.start, end: monthRange.end },
     };
   }
 
   private buildDateRange(startDate?: string, endDate?: string) {
-    const now = new Date();
-    const start = startDate
-      ? new Date(startDate)
-      : new Date(now.getFullYear(), now.getMonth(), 1);
-    const end = endDate ? new Date(endDate) : now;
-    return { start, end };
+    // Sin defaults: si el usuario no envia fechas, devolvemos undefined y los
+    // queries no aplican filtro de rango. Default = historico completo.
+    return {
+      start: startDate ? new Date(startDate) : undefined,
+      end: endDate ? new Date(endDate) : undefined,
+    };
   }
 
   private buildCurrentMonthRange() {
@@ -99,7 +102,7 @@ export class DashboardService {
 
   private async getPendingTasks(
     orgId: string,
-    _dateRange: { start: Date; end: Date },
+    _dateRange: { start?: Date; end?: Date },
     clientId?: string,
     memberId?: string,
   ) {
@@ -138,7 +141,7 @@ export class DashboardService {
 
   private async getCompletedTasks(
     orgId: string,
-    dateRange: { start: Date; end: Date },
+    dateRange: { start?: Date; end?: Date },
     clientId?: string,
     memberId?: string,
   ) {
@@ -149,7 +152,12 @@ export class DashboardService {
         ...(clientId && { clientId }),
       },
       status: 'DONE',
-      updatedAt: { gte: dateRange.start, lte: dateRange.end },
+      ...((dateRange.start || dateRange.end) && {
+        updatedAt: {
+          ...(dateRange.start && { gte: dateRange.start }),
+          ...(dateRange.end && { lte: dateRange.end }),
+        },
+      }),
     };
     if (memberId) where.assignments = { some: { userId: memberId } };
 
@@ -175,7 +183,7 @@ export class DashboardService {
 
   private async getTeamMembers(
     orgId: string,
-    dateRange: { start: Date; end: Date },
+    dateRange: { start?: Date; end?: Date },
     monthRange: { start: Date; end: Date },
     clientId?: string,
     memberId?: string,
@@ -224,7 +232,12 @@ export class DashboardService {
           task: {
             project: projectFilter,
             status: 'DONE',
-            updatedAt: { gte: dateRange.start, lte: dateRange.end },
+            ...((dateRange.start || dateRange.end) && {
+              updatedAt: {
+                ...(dateRange.start && { gte: dateRange.start }),
+                ...(dateRange.end && { lte: dateRange.end }),
+              },
+            }),
           },
         },
         _count: true,
@@ -324,7 +337,7 @@ export class DashboardService {
 
   private async getHours(
     orgId: string,
-    dateRange: { start: Date; end: Date },
+    dateRange: { start?: Date; end?: Date },
     clientId?: string,
     memberId?: string,
   ) {
@@ -340,7 +353,12 @@ export class DashboardService {
     const timeEntries = await this.prisma.timeEntry.findMany({
       where: {
         task: taskFilter,
-        startTime: { gte: dateRange.start, lte: dateRange.end },
+        ...((dateRange.start || dateRange.end) && {
+          startTime: {
+            ...(dateRange.start && { gte: dateRange.start }),
+            ...(dateRange.end && { lte: dateRange.end }),
+          },
+        }),
       },
       include: {
         task: {

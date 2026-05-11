@@ -5,17 +5,16 @@ import {
   Get,
   HttpCode,
   HttpStatus,
-  Patch,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
-import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
+import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { AuthGuard } from '../auth/guards/auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { NotificationPushService } from './notification-push.service';
-import { SubscribePushDto, UnsubscribePushDto } from './dto/subscribe-push.dto';
-import { UpdatePreferencesDto } from './dto/update-preferences.dto';
+import { SubscribePushDto } from './dto/subscribe-push.dto';
 
 @ApiTags('Notifications Push')
 @ApiBearerAuth()
@@ -43,11 +42,12 @@ export class NotificationPushController {
   @Delete('unsubscribe')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Eliminar una suscripcion push especifica' })
+  @ApiQuery({ name: 'endpoint', required: true, description: 'Endpoint de la suscripcion a eliminar' })
   unsubscribe(
     @CurrentUser() user: AuthenticatedUser,
-    @Body() dto: UnsubscribePushDto,
+    @Query('endpoint') endpoint: string,
   ) {
-    return this.pushService.unsubscribe(user.id, dto);
+    return this.pushService.unsubscribe(user.id, endpoint);
   }
 
   @Delete('unsubscribe-all')
@@ -57,18 +57,4 @@ export class NotificationPushController {
     return this.pushService.unsubscribeAll(user.id);
   }
 
-  @Get('preferences')
-  @ApiOperation({ summary: 'Obtener las preferencias granulares del usuario' })
-  getPreferences(@CurrentUser() user: AuthenticatedUser) {
-    return this.pushService.getPreferences(user.id);
-  }
-
-  @Patch('preferences')
-  @ApiOperation({ summary: 'Actualizar preferencias granulares del usuario' })
-  updatePreferences(
-    @CurrentUser() user: AuthenticatedUser,
-    @Body() dto: UpdatePreferencesDto,
-  ) {
-    return this.pushService.updatePreferences(user.id, dto);
-  }
 }

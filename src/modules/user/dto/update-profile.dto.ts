@@ -1,4 +1,4 @@
-import { IsString, IsOptional, MinLength, MaxLength, IsUrl } from 'class-validator';
+import { IsString, IsOptional, MinLength, MaxLength, IsUrl, IsEmail, ValidateIf } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 
 export class UpdateProfileDto {
@@ -16,4 +16,14 @@ export class UpdateProfileDto {
   @IsOptional()
   @IsUrl({}, { message: 'La URL de la imagen no es valida' })
   image?: string;
+
+  @ApiPropertyOptional({
+    example: 'juan.alt@empresa.com',
+    description: 'Email alternativo para recibir notificaciones (override del email de login). Enviar string vacio o null para limpiar.',
+    nullable: true,
+  })
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null && value !== '')
+  @IsEmail({}, { message: 'El email de notificaciones no es valido' })
+  notificationEmail?: string | null;
 }

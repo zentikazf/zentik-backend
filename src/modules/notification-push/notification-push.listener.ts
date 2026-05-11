@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
 import { PrismaService } from '../../database/prisma.service';
 import { NotificationPushService } from './notification-push.service';
+import { NotificationEmailService } from './notification-email.service';
 import { PUSH_EVENT_TYPES } from './push-events.constants';
 
 /**
@@ -18,6 +19,7 @@ export class NotificationPushListener {
   constructor(
     private readonly prisma: PrismaService,
     private readonly pushService: NotificationPushService,
+    private readonly emailService: NotificationEmailService,
   ) {}
 
   @OnEvent('document.shared')
@@ -84,7 +86,9 @@ export class NotificationPushListener {
           id: true,
           type: true,
           name: true,
-          ticket: { select: { id: true, title: true, ticketNumber: true } },
+          ticket: {
+            select: { id: true, title: true, ticketNumber: true, status: true },
+          },
           members: {
             where: { userId: { not: payload.userId } },
             select: { userId: true },
@@ -111,7 +115,7 @@ export class NotificationPushListener {
 
       const url = channel.ticket?.id ? `/tickets/${channel.ticket.id}` : '/dashboard';
 
-      // Enviar a todos los miembros del canal excepto al sender
+      // 1) Push (best-effort, todos los miembros menos el sender)
       await Promise.all(
         channel.members.map((m) =>
           this.pushService.sendToUser(m.userId, PUSH_EVENT_TYPES.CHAT_MESSAGE, {
@@ -125,6 +129,31 @@ export class NotificationPushListener {
               ticketId: channel.ticket?.id,
             },
           }),
+        ),
+      );
+
+      // 2) Email a destinatarios cliente (best-effort, con branding de su organizacion).
+      // El service internamente filtra: solo envia si el destinatario es cliente
+      // y tiene preferencia EMAIL para chat.message habilitada.
+      await Promise.all(
+        channel.members.map((m) =>
+          this.emailService
+            .sendChatTicketReplyToClient({
+              recipientUserId: m.userId,
+              senderName,
+              ticketNumber: channel.ticket?.ticketNumber
+                ? String(channel.ticket.ticketNumber)
+                : null,
+              ticketTitle: channel.ticket?.title ?? null,
+              ticketStatus: channel.ticket?.status ?? null,
+              ticketId: channel.ticket?.id ?? null,
+              messageContent: payload.content,
+            })
+            .catch((err: any) =>
+              this.logger.warn(
+                `Error enviando email chat-ticket a ${m.userId}: ${err?.message ?? err}`,
+              ),
+            ),
         ),
       );
     } catch (err: any) {

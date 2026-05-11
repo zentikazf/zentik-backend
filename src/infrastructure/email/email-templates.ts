@@ -185,3 +185,141 @@ export function clientSubUserEmail(params: {
 ${button('Acceder al Portal', params.portalUrl)}
   `);
 }
+
+/**
+ * Template parametrizable para notificaciones por email.
+ * Espejo del push del navegador: mismo titulo, mismo mensaje, mismo link.
+ * Siempre incluye footer con link a preferencias para opt-out granular.
+ */
+export function notificationEmail(params: {
+  title: string;
+  message: string;
+  ctaUrl?: string;
+  ctaLabel?: string;
+  preferencesUrl: string;
+}): string {
+  const cta = params.ctaUrl ? button(params.ctaLabel ?? 'Ver detalle', params.ctaUrl) : '';
+  return layout(`
+<h2 style="margin:0 0 16px;font-size:18px;color:#1e293b">${escapeHtml(params.title)}</h2>
+<p style="color:#475569;font-size:14px;line-height:1.6;margin:0 0 8px">
+  ${escapeHtml(params.message)}
+</p>
+${cta}
+<div style="margin-top:32px;padding-top:16px;border-top:1px solid #e2e8f0">
+  <p style="color:#94a3b8;font-size:11px;margin:0;line-height:1.5">
+    Recibiste este correo porque tienes activadas las notificaciones por email para este tipo de evento.
+    <a href="${params.preferencesUrl}" style="color:${BRAND_COLOR};text-decoration:none">Administrar notificaciones</a>.
+  </p>
+</div>
+  `);
+}
+
+/** Escapa caracteres HTML para prevenir inyeccion en templates */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+/**
+ * Template ULTRA-profesional para emails enviados al cliente final del portal.
+ * Branding de la organizacion (no de Zentikk). Logo personalizado, saludo personalizado,
+ * preview del mensaje real, badge de estado y CTA hacia el portal.
+ *
+ * Diferencias con notificationEmail() (template team):
+ * - Header con logo/nombre de la ORGANIZACION (no "Zentikk")
+ * - Saludo personalizado al cliente
+ * - Quote block del mensaje real
+ * - Badge de estado opcional
+ * - Footer menciona Zentikk solo como "plataforma usada por {Org}"
+ */
+export function clientNotificationEmail(params: {
+  organizationName: string;
+  organizationLogo: string | null;
+  clientName: string;
+  contextLine: string;
+  quoteContent?: string;
+  statusBadge?: { label: string; tone: 'info' | 'success' | 'warning' };
+  ctaPrimary: { label: string; url: string };
+  ctaSecondary?: { label: string; url: string };
+  preferencesUrl: string;
+}): string {
+  const orgName = escapeHtml(params.organizationName);
+  const header = params.organizationLogo
+    ? `<img src="${escapeHtml(params.organizationLogo)}" alt="${orgName}" style="max-height:36px;max-width:180px;display:inline-block" />`
+    : `<span style="font-size:20px;font-weight:700;color:#1e293b;letter-spacing:-0.01em">${orgName}</span>`;
+
+  const quote = params.quoteContent
+    ? `
+<blockquote style="margin:16px 0 20px;padding:14px 18px;background:#f8fafc;border-left:3px solid ${BRAND_COLOR};border-radius:4px;color:#475569;font-size:14px;line-height:1.6;font-style:italic">
+  ${escapeHtml(params.quoteContent)}
+</blockquote>`
+    : '';
+
+  const badge = params.statusBadge
+    ? `
+<div style="margin:0 0 20px">
+  <span style="display:inline-block;padding:4px 10px;background:${badgeBg(params.statusBadge.tone)};color:${badgeText(params.statusBadge.tone)};font-size:12px;font-weight:600;border-radius:6px">${escapeHtml(params.statusBadge.label)}</span>
+</div>`
+    : '';
+
+  const secondary = params.ctaSecondary
+    ? `
+<p style="text-align:center;margin:8px 0 0">
+  <a href="${escapeHtml(params.ctaSecondary.url)}" style="color:${BRAND_COLOR};font-size:13px;text-decoration:none">${escapeHtml(params.ctaSecondary.label)}</a>
+</p>`
+    : '';
+
+  return `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:${BRAND_BG};font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="padding:40px 20px">
+<tr><td align="center">
+<table width="560" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.08)">
+
+<tr><td style="padding:28px 40px 22px;border-bottom:1px solid #e2e8f0">
+  ${header}
+</td></tr>
+
+<tr><td style="padding:32px 40px">
+  <p style="margin:0 0 8px;color:#0f172a;font-size:16px;font-weight:600">Hola ${escapeHtml(params.clientName)},</p>
+  <p style="margin:0 0 16px;color:#334155;font-size:14px;line-height:1.6">${escapeHtml(params.contextLine)}</p>
+  ${quote}
+  ${badge}
+  ${button(params.ctaPrimary.label, params.ctaPrimary.url)}
+  ${secondary}
+</td></tr>
+
+<tr><td style="padding:20px 40px 28px;background:#fafbfc;border-top:1px solid #e2e8f0">
+  <p style="color:#94a3b8;font-size:11px;margin:0 0 6px;line-height:1.6">
+    Recibis este correo porque <strong style="color:#64748b">${orgName}</strong> usa Zentikk como su plataforma de gestion y soporte.
+  </p>
+  <p style="color:#94a3b8;font-size:11px;margin:0;line-height:1.6">
+    <a href="${escapeHtml(params.preferencesUrl)}" style="color:${BRAND_COLOR};text-decoration:none">Administrar notificaciones</a>
+    &middot; &copy; ${new Date().getFullYear()} ${orgName}
+  </p>
+</td></tr>
+
+</table>
+</td></tr>
+</table>
+</body>
+</html>`;
+}
+
+function badgeBg(tone: 'info' | 'success' | 'warning'): string {
+  if (tone === 'success') return '#dcfce7';
+  if (tone === 'warning') return '#fef3c7';
+  return '#dbeafe';
+}
+
+function badgeText(tone: 'info' | 'success' | 'warning'): string {
+  if (tone === 'success') return '#166534';
+  if (tone === 'warning') return '#92400e';
+  return '#1e40af';
+}

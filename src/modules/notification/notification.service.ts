@@ -3,6 +3,7 @@ import { PrismaService } from '../../database/prisma.service';
 import { AppException } from '../../common/filters/app-exception';
 import { ChatGateway } from '../chat/chat.gateway';
 import { NotificationPushService } from '../notification-push/notification-push.service';
+import { NotificationEmailService } from '../notification-push/notification-email.service';
 
 @Injectable()
 export class NotificationService {
@@ -12,6 +13,7 @@ export class NotificationService {
     private readonly prisma: PrismaService,
     private readonly chatGateway: ChatGateway,
     private readonly pushService: NotificationPushService,
+    private readonly emailService: NotificationEmailService,
   ) {}
 
   async create(data: {
@@ -55,6 +57,19 @@ export class NotificationService {
       })
       .catch((err) =>
         this.logger.warn(`Error enviando push (no critico): ${err?.message ?? err}`),
+      );
+
+    // Email (best-effort, respeta preferencias del usuario)
+    this.emailService
+      .sendFromNotification({
+        userId: data.userId,
+        type: data.type,
+        title: data.title,
+        message: data.body,
+        data: data.metadata,
+      })
+      .catch((err) =>
+        this.logger.warn(`Error enviando email-notification (no critico): ${err?.message ?? err}`),
       );
 
     return notification;

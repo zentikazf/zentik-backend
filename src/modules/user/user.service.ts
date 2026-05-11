@@ -47,6 +47,7 @@ export class UserService {
         name: true,
         image: true,
         emailVerified: true,
+        notificationEmail: true,
         createdAt: true,
         updatedAt: true,
         organizationMembers: {
@@ -84,6 +85,7 @@ export class UserService {
       name: user.name,
       image: user.image,
       emailVerified: user.emailVerified,
+      notificationEmail: user.notificationEmail,
       createdAt: user.createdAt,
       updatedAt: user.updatedAt,
       organizations: user.organizationMembers.map((m) => ({
@@ -165,6 +167,13 @@ export class UserService {
       updateData.image = dto.image;
     }
 
+    if (dto.notificationEmail !== undefined) {
+      // Permitir "" o null para limpiar el override; sino guardar email
+      updateData.notificationEmail = dto.notificationEmail
+        ? dto.notificationEmail
+        : null;
+    }
+
     if (Object.keys(updateData).length === 0) {
       throw new AppException(
         'No se proporcionaron campos para actualizar',
@@ -182,6 +191,7 @@ export class UserService {
         name: true,
         image: true,
         emailVerified: true,
+        notificationEmail: true,
         updatedAt: true,
       },
     });
