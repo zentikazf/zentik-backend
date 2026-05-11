@@ -231,6 +231,7 @@ model User {
   onboardingCompleted Boolean @default(false) @map("onboarding_completed")
   mustChangePassword  Boolean @default(false) @map("must_change_password")
   clientId      String?  @map("client_id")
+  notificationEmail String? @map("notification_email")
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @updatedAt @map("updated_at")
 
@@ -319,6 +320,7 @@ model Organization {
   name      String
   slug      String   @unique
   logo      String?
+  supportEmail String? @map("support_email")
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 

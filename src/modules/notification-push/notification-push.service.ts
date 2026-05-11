@@ -2,7 +2,7 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import * as webpush from 'web-push';
 import { PrismaService } from '../../database/prisma.service';
 import { AppConfigService } from '../../config/app.config';
-import { SubscribePushDto, UnsubscribePushDto } from './dto/subscribe-push.dto';
+import { SubscribePushDto } from './dto/subscribe-push.dto';
 import { UpdatePreferencesDto } from './dto/update-preferences.dto';
 import {
   PUSH_EVENT_CATALOG,
@@ -106,9 +106,10 @@ export class NotificationPushService implements OnModuleInit {
     return { ok: true, id: created.id };
   }
 
-  async unsubscribe(userId: string, dto: UnsubscribePushDto) {
+  async unsubscribe(userId: string, endpoint: string) {
+    if (!endpoint) return { ok: true };
     await this.prisma.pushSubscription
-      .deleteMany({ where: { userId, endpoint: dto.endpoint } })
+      .deleteMany({ where: { userId, endpoint } })
       .catch(() => {});
     return { ok: true };
   }
@@ -120,23 +121,29 @@ export class NotificationPushService implements OnModuleInit {
 
   // ── Preferences ───────────────────────────────────────────────
 
-  async getPreferences(userId: string) {
+  /**
+   * Devuelve la matriz completa de preferencias del usuario para ambos canales (PUSH y EMAIL).
+   * Si no hay registro persistido para un canal/evento, usa el default del catalogo.
+   */
+  async getPreferencesMultiChannel(userId: string) {
     const stored = await this.prisma.userNotificationPreference.findMany({
-      where: { userId, channel: 'PUSH' },
+      where: { userId, channel: { in: ['PUSH', 'EMAIL'] } },
     });
 
-    const storedMap = new Map(stored.map((p) => [p.eventType, p]));
+    const pushMap = new Map(
+      stored.filter((p) => p.channel === 'PUSH').map((p) => [p.eventType, p.enabled]),
+    );
+    const emailMap = new Map(
+      stored.filter((p) => p.channel === 'EMAIL').map((p) => [p.eventType, p.enabled]),
+    );
 
-    // Devolver siempre el catalogo completo con el estado actual
-    return PUSH_EVENT_CATALOG.map((meta) => {
-      const record = storedMap.get(meta.eventType);
-      return {
-        eventType: meta.eventType,
-        label: meta.label,
-        description: meta.description,
-        enabled: record ? record.enabled : meta.defaultEnabled,
-      };
-    });
+    return PUSH_EVENT_CATALOG.map((meta) => ({
+      eventType: meta.eventType,
+      label: meta.label,
+      description: meta.description,
+      push: pushMap.has(meta.eventType) ? !!pushMap.get(meta.eventType) : meta.defaultPushEnabled,
+      email: emailMap.has(meta.eventType) ? !!emailMap.get(meta.eventType) : meta.defaultEmailEnabled,
+    }));
   }
 
   async updatePreferences(userId: string, dto: UpdatePreferencesDto) {
@@ -173,7 +180,7 @@ export class NotificationPushService implements OnModuleInit {
         userId,
         eventType: meta.eventType,
         channel: 'PUSH',
-        enabled: meta.defaultEnabled,
+        enabled: meta.defaultPushEnabled,
       })),
       skipDuplicates: true,
     });
@@ -199,7 +206,7 @@ export class NotificationPushService implements OnModuleInit {
       if (!pref.enabled) return;
     } else {
       const meta = PUSH_EVENT_CATALOG.find((e) => e.eventType === eventType);
-      if (!meta?.defaultEnabled) return;
+      if (!meta?.defaultPushEnabled) return;
     }
 
     const subs = await this.prisma.pushSubscription.findMany({
