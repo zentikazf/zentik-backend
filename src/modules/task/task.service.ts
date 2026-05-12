@@ -184,6 +184,25 @@ export class TaskService {
       });
     }
 
+    // Emit task.assigned por cada asignado inicial (mismo evento que assignTask posterior)
+    // Esto dispara notificaciones in-app + push + email respetando preferencias del usuario.
+    if (dto.assigneeIds?.length) {
+      for (const assigneeId of dto.assigneeIds) {
+        this.eventEmitter.emit('task.assigned', {
+          ...domainEvent('task.assigned', 'task', task!.id, project.organizationId, userId, {
+            taskTitle: task!.title,
+            assigneeId,
+            projectId,
+          }),
+          taskId: task!.id,
+          taskTitle: task!.title,
+          assigneeId,
+          assignedById: userId,
+          projectId,
+        });
+      }
+    }
+
     this.logger.log(`Task created: ${task!.id} in project ${projectId}`);
 
     return task;
