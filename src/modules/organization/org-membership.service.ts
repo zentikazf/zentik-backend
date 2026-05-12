@@ -11,6 +11,7 @@ import {
 import { domainEvent } from '../../common/events/domain-event.helper';
 import { OrganizationService } from './organization.service';
 import { EmailInvitationService } from '../../infrastructure/email/email-invitation.service';
+import { OnboardingService } from '../auth/onboarding/onboarding.service';
 
 @Injectable()
 export class OrgMembershipService {
@@ -21,6 +22,7 @@ export class OrgMembershipService {
     private readonly eventEmitter: EventEmitter2,
     private readonly organizationService: OrganizationService,
     private readonly emailInvitationService: EmailInvitationService,
+    private readonly onboardingService: OnboardingService,
   ) {}
 
   async listMembers(orgId: string, excludeRole?: string) {
@@ -299,23 +301,43 @@ export class OrgMembershipService {
       userId: user.id,
     });
 
-    // Send team invitation email (fire & forget)
-    const inviter = await this.prisma.user.findUnique({ where: { id: createdById }, select: { name: true } });
+    // Resolver org para nombre del header en email
     const org = await this.prisma.organization.findUnique({ where: { id: orgId }, select: { name: true } });
-    this.emailInvitationService.sendTeamInviteEmail({
-      email: user.email,
-      memberName: dto.name,
-      invitedByName: inviter?.name || 'El equipo',
-      organizationName: org?.name || 'la organizacion',
-      roleName: role.name,
-      temporaryPassword: tempPassword,
-    }).catch((err) => {
-      this.logger.error(`Failed to send team invite email to ${user.email}`, err);
-    });
+
+    // Si el admin paso un password explicito (dto.password), respeta el flujo
+    // tradicional y NO usa link de activacion (asume control manual).
+    // Si NO paso password Y email service esta disponible, usar link de activacion.
+    let activationMode: 'email-sent' | 'temp-password' = 'temp-password';
+    if (!dto.password && this.onboardingService) {
+      const result = await this.onboardingService.createActivation({
+        userId: user.id,
+        userName: dto.name,
+        userEmail: user.email,
+        organizationName: org?.name ?? null,
+      });
+      activationMode = result.mode;
+    }
+
+    // Si NO se envio link de activacion, mandar el email tradicional con temp password
+    if (activationMode === 'temp-password') {
+      const inviter = await this.prisma.user.findUnique({ where: { id: createdById }, select: { name: true } });
+      this.emailInvitationService.sendTeamInviteEmail({
+        email: user.email,
+        memberName: dto.name,
+        invitedByName: inviter?.name || 'El equipo',
+        organizationName: org?.name || 'la organizacion',
+        roleName: role.name,
+        temporaryPassword: tempPassword,
+      }).catch((err) => {
+        this.logger.error(`Failed to send team invite email to ${user.email}`, err);
+      });
+    }
 
     return {
       member,
-      temporaryPassword: dto.password ? undefined : tempPassword,
+      // Solo expone tempPassword en UI cuando el link de activacion NO se envio
+      temporaryPassword: activationMode === 'temp-password' && !dto.password ? tempPassword : undefined,
+      activationMode,
       isNewUser,
     };
   }
