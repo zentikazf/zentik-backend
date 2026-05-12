@@ -557,6 +557,74 @@ export class NotificationListener {
     }
   }
 
+  // ============================================
+  // COMMENT EVENTS
+  // ============================================
+  // Notifica a los assignees de la task cuando alguien comenta. NO notifica al
+  // autor del propio comentario.
+
+  @OnEvent('comment.created')
+  async handleCommentCreated(event: {
+    type?: string;
+    entity?: string;
+    entityId?: string;
+    organizationId?: string;
+    userId?: string;
+    data?: { taskId?: string; content?: string };
+  }) {
+    const taskId = event.data?.taskId;
+    const authorId = event.userId;
+    const content = event.data?.content ?? '';
+    if (!taskId || !authorId) return;
+
+    try {
+      const [task, author] = await Promise.all([
+        this.prisma.task.findUnique({
+          where: { id: taskId },
+          select: {
+            title: true,
+            projectId: true,
+            assignments: { select: { userId: true } },
+          },
+        }),
+        this.prisma.user.findUnique({
+          where: { id: authorId },
+          select: { name: true },
+        }),
+      ]);
+
+      if (!task) return;
+
+      const targets = task.assignments
+        .map((a) => a.userId)
+        .filter((id) => id !== authorId);
+
+      if (targets.length === 0) return;
+
+      const authorName = author?.name ?? 'Alguien';
+      const preview = content.length > 120 ? `${content.slice(0, 120)}…` : content;
+
+      await Promise.all(
+        targets.map((userId) =>
+          this.notificationService.create({
+            userId,
+            type: 'COMMENT_ADDED',
+            title: `${authorName} comentó en "${task.title}"`,
+            body: preview || 'Hizo un comentario en una tarea donde estás asignado.',
+            metadata: {
+              taskId,
+              projectId: task.projectId,
+              commentId: event.entityId,
+              authorId,
+            },
+          }),
+        ),
+      );
+    } catch (err: any) {
+      this.logger.error(`Error notifying comment.created: ${err?.message ?? err}`);
+    }
+  }
+
   @OnEvent('ticket.updated')
   async handleTicketUpdated(event: {
     ticketId: string;
