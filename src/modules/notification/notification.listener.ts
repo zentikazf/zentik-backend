@@ -498,6 +498,65 @@ export class NotificationListener {
     }
   }
 
+  // ============================================
+  // CLIENT DOCUMENT SHARED
+  // ============================================
+  // Movido desde notification-push.listener.ts para que dispare in-app + push + email
+  // unificadamente via NotificationService.create() en vez de solo push directo.
+
+  @OnEvent('document.shared')
+  async handleDocumentShared(event: {
+    fileId: string;
+    fileName: string;
+    projectId: string;
+    projectName: string;
+    clientId: string;
+    organizationId: string;
+    sharedById: string;
+  }) {
+    try {
+      // Resolver users del cliente: el "owner" (Client.userId) + sub-users (User.clientId)
+      const client = await this.prisma.client.findUnique({
+        where: { id: event.clientId },
+        select: {
+          userId: true,
+          users: { select: { id: true } },
+        },
+      });
+      if (!client) return;
+
+      const targetUserIds = new Set<string>();
+      if (client.userId) targetUserIds.add(client.userId);
+      for (const u of client.users) targetUserIds.add(u.id);
+
+      if (targetUserIds.size === 0) {
+        this.logger.warn(
+          `Cliente ${event.clientId} sin usuarios asociados, no se notifica documento compartido`,
+        );
+        return;
+      }
+
+      await Promise.all(
+        Array.from(targetUserIds).map((userId) =>
+          this.notificationService.create({
+            userId,
+            type: 'CLIENT_DOCUMENT_SHARED',
+            title: 'Nuevo documento compartido',
+            body: `${event.projectName} · ${event.fileName}`,
+            metadata: {
+              fileId: event.fileId,
+              projectId: event.projectId,
+              projectName: event.projectName,
+              fileName: event.fileName,
+            },
+          }),
+        ),
+      );
+    } catch (err: any) {
+      this.logger.error(`Error notifying document shared: ${err?.message ?? err}`);
+    }
+  }
+
   @OnEvent('ticket.updated')
   async handleTicketUpdated(event: {
     ticketId: string;

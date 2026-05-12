@@ -22,6 +22,7 @@ const NOTIFICATION_TYPE_TO_EVENT: Record<string, PushEventType | null> = {
   TASK_APPROVAL_REQUESTED: 'approval.requested',
   COMMENT_ADDED: 'comment.created',
   ALCANCE_SUBMITTED: 'alcance.submitted',
+  CLIENT_DOCUMENT_SHARED: 'client.document.shared',
 };
 
 interface ClientContext {
@@ -66,11 +67,22 @@ export class NotificationEmailService {
     message: string;
     data?: any;
   }) {
-    if (!this.emailService.isEnabled) return;
-    if (!notification.userId) return;
+    const logPrefix = `[email-notif user=${notification.userId} type=${notification.type}]`;
+
+    if (!this.emailService.isEnabled) {
+      this.logger.debug(`${logPrefix} skip: email service deshabilitado (RESEND_API_KEY?)`);
+      return;
+    }
+    if (!notification.userId) {
+      this.logger.debug(`${logPrefix} skip: sin userId`);
+      return;
+    }
 
     const eventType = NOTIFICATION_TYPE_TO_EVENT[notification.type];
-    if (!eventType) return;
+    if (!eventType) {
+      this.logger.debug(`${logPrefix} skip: tipo no mapeado a evento de email`);
+      return;
+    }
 
     // Verificar preference EMAIL (respeta opt-out explicito, usa default si no hay registro)
     const pref = await this.prisma.userNotificationPreference.findUnique({
@@ -83,14 +95,29 @@ export class NotificationEmailService {
       },
     });
     if (pref) {
-      if (!pref.enabled) return;
+      if (!pref.enabled) {
+        this.logger.log(`${logPrefix} skip: preferencia EMAIL=false para ${eventType}`);
+        return;
+      }
     } else {
       const meta = PUSH_EVENT_CATALOG.find((e) => e.eventType === eventType);
-      if (!meta?.defaultEmailEnabled) return;
+      if (!meta?.defaultEmailEnabled) {
+        this.logger.log(
+          `${logPrefix} skip: sin preferencia + default EMAIL=false para ${eventType}`,
+        );
+        return;
+      }
     }
 
     const recipient = await this.resolveRecipientContext(notification.userId);
-    if (!recipient) return;
+    if (!recipient) {
+      this.logger.warn(`${logPrefix} skip: no se pudo resolver recipient context`);
+      return;
+    }
+
+    this.logger.log(
+      `${logPrefix} sending: event=${eventType} kind=${recipient.kind} to=${recipient.email}`,
+    );
 
     const ctaPath = this.buildUrlForNotification(notification);
     const ctaUrl = `${this.config.webUrl}${ctaPath}`;
@@ -277,6 +304,9 @@ export class NotificationEmailService {
 
   private buildUrlForNotification(notification: { type: string; data?: any }): string {
     const data = notification.data ?? {};
+    if (notification.type === 'CLIENT_DOCUMENT_SHARED' && data.projectId) {
+      return `/portal/projects/${data.projectId}/documents`;
+    }
     if (data.ticketId) return `/tickets/${data.ticketId}`;
     if (data.taskId && data.projectId) return `/projects/${data.projectId}/tasks/${data.taskId}`;
     if (data.projectId) return `/projects/${data.projectId}/backlog`;

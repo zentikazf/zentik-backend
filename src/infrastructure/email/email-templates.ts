@@ -187,6 +187,34 @@ ${button('Acceder al Portal', params.portalUrl)}
 }
 
 /**
+ * Email de activacion: enviado al crear usuario para que defina su contrasena
+ * vía link unico en vez de recibir un password temporal en pantalla.
+ */
+export function activationEmail(params: {
+  name: string;
+  activationUrl: string;
+  expiresInHours: number;
+  organizationName?: string | null;
+}): string {
+  const headerName = params.organizationName
+    ? `Te invitaron a ${escapeHtml(params.organizationName)}`
+    : 'Activá tu cuenta en Zentikk';
+  return layout(`
+<h2 style="margin:0 0 16px;font-size:18px;color:#1e293b">${headerName}</h2>
+<p style="color:#475569;font-size:14px;line-height:1.6;margin:0 0 8px">
+  Hola ${escapeHtml(params.name)}, tu cuenta fue creada. Para empezar a usarla, definí tu contraseña haciendo clic abajo.
+</p>
+${button('Activar mi cuenta', params.activationUrl)}
+<p style="color:#94a3b8;font-size:12px;line-height:1.6;margin:16px 0 0">
+  El enlace expira en <strong>${params.expiresInHours} horas</strong>. Si lo dejás vencer, pedile al admin que te reenvie la invitación.
+</p>
+<p style="color:#94a3b8;font-size:12px;margin:16px 0 0">
+  Si no esperabas este correo, podés ignorarlo — sin hacer clic, la cuenta queda inutilizable.
+</p>
+  `);
+}
+
+/**
  * Template parametrizable para notificaciones por email.
  * Espejo del push del navegador: mismo titulo, mismo mensaje, mismo link.
  * Siempre incluye footer con link a preferencias para opt-out granular.

@@ -130,6 +130,7 @@ enum NotificationType {
   SLA_BREACH_WARNING
   SLA_BREACHED
   PROJECT_DEVELOPMENT_STARTED
+  CLIENT_DOCUMENT_SHARED
 }
 
 enum AlcanceStatus {
@@ -234,6 +235,8 @@ model User {
   notificationEmail String? @map("notification_email")
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @updatedAt @map("updated_at")
+
+  activationTokens UserActivationToken[]
 
   // Better Auth relations
   accounts Account[]
@@ -1319,4 +1322,19 @@ model UserNotificationPreference {
   @@unique([userId, eventType, channel])
   @@index([userId])
   @@map("user_notification_preferences")
+}
+
+model UserActivationToken {
+  id        String    @id @default(cuid())
+  userId    String    @map("user_id")
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("user_activation_tokens")
 }
