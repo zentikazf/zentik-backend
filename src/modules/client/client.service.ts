@@ -9,6 +9,7 @@ import { AppException, DuplicateResourceException } from '../../common/filters/a
 import { PaginatedResult } from '../../common/interfaces/request.interface';
 import { AuditService } from '../audit/audit.service';
 import { EmailInvitationService } from '../../infrastructure/email/email-invitation.service';
+import { OnboardingService } from '../auth/onboarding/onboarding.service';
 
 @Injectable()
 export class ClientService {
@@ -18,6 +19,7 @@ export class ClientService {
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
     private readonly emailInvitationService: EmailInvitationService,
+    private readonly onboardingService: OnboardingService,
   ) {}
 
   async create(orgId: string, dto: CreateClientDto) {
@@ -269,20 +271,35 @@ export class ClientService {
       newData: { email: dto.email, name: dto.name, userId: updatedClient.userId },
     });
 
-    // Send client portal access email (fire & forget)
+    // Decidir si enviar link de activacion (email) o temp password (UI fallback)
     const org = await this.prisma.organization.findUnique({ where: { id: orgId }, select: { name: true } });
-    this.emailInvitationService.sendClientUserEmail({
-      email: dto.email.toLowerCase(),
-      clientName: dto.name,
-      organizationName: org?.name || 'la organizacion',
-      temporaryPassword: tempPassword,
-    }).catch((err) => {
-      this.logger.error(`Failed to send client user email to ${dto.email}`, err);
-    });
+
+    let activationMode: 'email-sent' | 'temp-password' = 'temp-password';
+    if (!dto.password && updatedClient.userId) {
+      const result = await this.onboardingService.createActivation({
+        userId: updatedClient.userId,
+        userName: dto.name,
+        userEmail: dto.email.toLowerCase(),
+        organizationName: org?.name ?? null,
+      });
+      activationMode = result.mode;
+    }
+
+    if (activationMode === 'temp-password') {
+      this.emailInvitationService.sendClientUserEmail({
+        email: dto.email.toLowerCase(),
+        clientName: dto.name,
+        organizationName: org?.name || 'la organizacion',
+        temporaryPassword: tempPassword,
+      }).catch((err) => {
+        this.logger.error(`Failed to send client user email to ${dto.email}`, err);
+      });
+    }
 
     return {
       ...updatedClient,
-      temporaryPassword: dto.password ? undefined : tempPassword,
+      temporaryPassword: activationMode === 'temp-password' && !dto.password ? tempPassword : undefined,
+      activationMode,
     };
   }
 
@@ -363,24 +380,39 @@ export class ClientService {
       newData: { email: dto.email, name: dto.name, userId: user.id },
     });
 
-    // Send client sub-user invitation email (fire & forget)
+    // Decidir si enviar link de activacion (email) o temp password (UI fallback)
     const org = await this.prisma.organization.findUnique({ where: { id: orgId }, select: { name: true } });
-    this.emailInvitationService.sendClientSubUserEmail({
-      email: dto.email.toLowerCase(),
-      userName: dto.name,
-      clientName: client.name,
-      organizationName: org?.name || 'la organizacion',
-      temporaryPassword: tempPassword,
-    }).catch((err) => {
-      this.logger.error(`Failed to send client sub-user email to ${dto.email}`, err);
-    });
+
+    let activationMode: 'email-sent' | 'temp-password' = 'temp-password';
+    if (!dto.password) {
+      const result = await this.onboardingService.createActivation({
+        userId: user.id,
+        userName: dto.name,
+        userEmail: dto.email.toLowerCase(),
+        organizationName: org?.name ?? null,
+      });
+      activationMode = result.mode;
+    }
+
+    if (activationMode === 'temp-password') {
+      this.emailInvitationService.sendClientSubUserEmail({
+        email: dto.email.toLowerCase(),
+        userName: dto.name,
+        clientName: client.name,
+        organizationName: org?.name || 'la organizacion',
+        temporaryPassword: tempPassword,
+      }).catch((err) => {
+        this.logger.error(`Failed to send client sub-user email to ${dto.email}`, err);
+      });
+    }
 
     return {
       id: user.id,
       name: user.name,
       email: user.email,
       createdAt: user.createdAt,
-      temporaryPassword: dto.password ? undefined : tempPassword,
+      temporaryPassword: activationMode === 'temp-password' && !dto.password ? tempPassword : undefined,
+      activationMode,
     };
   }
 

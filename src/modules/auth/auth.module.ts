@@ -4,13 +4,12 @@ import { AuthService } from './auth.service';
 import { AuthGuard } from './guards/auth.guard';
 import { RolesGuard } from './guards/roles.guard';
 import { OrganizationModule } from '../organization/organization.module';
-import { OnboardingController } from './onboarding/onboarding.controller';
-import { OnboardingService } from './onboarding/onboarding.service';
+import { OnboardingModule } from './onboarding/onboarding.module';
 
 @Module({
-  imports: [OrganizationModule],
-  controllers: [AuthController, OnboardingController],
-  providers: [AuthService, AuthGuard, RolesGuard, OnboardingService],
-  exports: [AuthService, AuthGuard, RolesGuard, OnboardingService],
+  imports: [OrganizationModule, OnboardingModule],
+  controllers: [AuthController],
+  providers: [AuthService, AuthGuard, RolesGuard],
+  exports: [AuthService, AuthGuard, RolesGuard],
 })
 export class AuthModule {}
