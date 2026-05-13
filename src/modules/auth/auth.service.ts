@@ -341,7 +341,7 @@ export class AuthService {
   async resendVerification(userId: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, email: true, emailVerified: true },
+      select: { id: true, email: true, name: true, emailVerified: true },
     });
 
     if (!user) {
@@ -352,12 +352,40 @@ export class AuthService {
       return { message: 'El correo electronico ya esta verificado' };
     }
 
+    if (!this.emailInvitationService.isEnabled) {
+      throw new AppException(
+        'El servicio de email no esta disponible. Contacta al administrador.',
+        'EMAIL_SERVICE_UNAVAILABLE',
+        503,
+      );
+    }
+
     const verificationToken = randomBytes(32).toString('hex');
 
     await this.prisma.account.updateMany({
       where: { userId: user.id, providerId: 'credential' },
       data: { idToken: verificationToken },
     });
+
+    // Bug fix: antes solo se emitia un evento sin listener -> el mail nunca salia
+    // de Resend aunque el endpoint devolviera 200. Ahora llamamos directo al
+    // EmailInvitationService como hace AuthService.register en el flujo inicial.
+    try {
+      await this.emailInvitationService.sendVerificationEmail(
+        user.email,
+        user.name,
+        verificationToken,
+      );
+    } catch (err: any) {
+      this.logger.error(
+        `Failed to resend verification email to ${user.email}: ${err?.message ?? err}`,
+      );
+      throw new AppException(
+        'No se pudo reenviar el correo de verificacion. Intenta de nuevo en unos minutos.',
+        'EMAIL_RESEND_FAILED',
+        500,
+      );
+    }
 
     this.eventEmitter.emit('user.verification_requested', {
       userId: user.id,
