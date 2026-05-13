@@ -7,12 +7,21 @@ import {
 import { Request, Response } from 'express';
 import { PrismaService } from '../../../database/prisma.service';
 import { AppConfigService } from '../../../config/app.config';
-import { UnauthorizedException } from '../../../common/filters/app-exception';
+import { AppException, UnauthorizedException } from '../../../common/filters/app-exception';
 import { AuthenticatedUser } from '../../../common/interfaces/request.interface';
 
 const SESSION_TTL_HOURS = 5;
 const SESSION_TTL_MS = SESSION_TTL_HOURS * 60 * 60 * 1000;
 const SESSION_COOKIE = 'zentik.session_token';
+
+// Endpoints permitidos para usuarios con emailVerified=false. El resto se
+// bloquea con 403 EMAIL_NOT_VERIFIED — el frontend redirige a /verify-pending.
+const ALLOWED_PATHS_UNVERIFIED = [
+  '/auth/verify-email',
+  '/auth/resend-verification',
+  '/auth/logout',
+  '/auth/me',
+];
 
 @Injectable()
 export class AuthGuard implements CanActivate {
@@ -43,6 +52,7 @@ export class AuthGuard implements CanActivate {
               id: true,
               email: true,
               name: true,
+              emailVerified: true,
               organizationMembers: {
                 select: {
                   organizationId: true,
@@ -114,6 +124,20 @@ export class AuthGuard implements CanActivate {
       (request as any).user = authenticatedUser;
       (request as any).sessionId = session.id;
 
+      // Bloqueo duro: si email no verificado, solo permitir paths de verificacion +
+      // logout + me (para que la UI pueda mostrar "Verifica tu correo" sin loopear).
+      if (!user.emailVerified) {
+        const path = request.path ?? request.url ?? '';
+        const isAllowed = ALLOWED_PATHS_UNVERIFIED.some((p) => path.includes(p));
+        if (!isAllowed) {
+          throw new AppException(
+            'Verifica tu correo electronico para acceder a esta funcionalidad',
+            'EMAIL_NOT_VERIFIED',
+            403,
+          );
+        }
+      }
+
       // Sliding session: renew expiration on every authenticated request
       const newExpiresAt = new Date(Date.now() + SESSION_TTL_MS);
       const response = context.switchToHttp().getResponse<Response>();
@@ -135,6 +159,9 @@ export class AuthGuard implements CanActivate {
       return true;
     } catch (error) {
       if (error instanceof UnauthorizedException) {
+        throw error;
+      }
+      if (error instanceof AppException) {
         throw error;
       }
       this.logger.error('Error validating session', error);
