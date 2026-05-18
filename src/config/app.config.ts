@@ -36,6 +36,9 @@ export class AppConfigService {
   get sentryDsn(): string | undefined { return this.configService.get<string>('SENTRY_DSN'); }
   get logLevel(): string { return this.configService.getOrThrow<string>('LOG_LEVEL'); }
 
+  get prismaTxTimeoutMs(): number { return this.configService.getOrThrow<number>('PRISMA_TX_TIMEOUT_MS'); }
+  get prismaTxMaxWaitMs(): number { return this.configService.getOrThrow<number>('PRISMA_TX_MAX_WAIT_MS'); }
+
   // Web Push (VAPID) — optional: si no estan configuradas, el push se desactiva silenciosamente
   get vapidPublicKey(): string | undefined { return this.configService.get<string>('VAPID_PUBLIC_KEY'); }
   get vapidPrivateKey(): string | undefined { return this.configService.get<string>('VAPID_PRIVATE_KEY'); }

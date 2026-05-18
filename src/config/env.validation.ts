@@ -23,6 +23,12 @@ export const envSchema = z.object({
   STORAGE_REGION: z.string().default('us-east-1'),
   SENTRY_DSN: z.string().optional(),
   LOG_LEVEL: z.enum(['error', 'warn', 'info', 'debug']).default('debug'),
+
+  // Prisma $transaction tunables. Default seguro para dev con BD remota (Railway):
+  // 15s para tx que hacen 6-10 queries secuenciales con latencia ~300ms. En prod
+  // (Railway<->Railway, latencia ~5ms) podes bajar via env vars sin recompilar.
+  PRISMA_TX_TIMEOUT_MS: z.coerce.number().default(15000),
+  PRISMA_TX_MAX_WAIT_MS: z.coerce.number().default(10000),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;
