@@ -1,6 +1,7 @@
 import {
   IsString,
   IsOptional,
+  IsBoolean,
   MinLength,
   MaxLength,
   IsEmail,
@@ -54,4 +55,13 @@ export class CreateClientDto {
   @IsString()
   @IsIn(['PYG', 'USD', 'EUR'])
   currency?: string;
+
+  @ApiPropertyOptional({
+    example: false,
+    default: false,
+    description: 'Si true, los usuarios portal del cliente ven la pagina /portal/billing',
+  })
+  @IsOptional()
+  @IsBoolean({ message: 'portalBillingEnabled debe ser un booleano' })
+  portalBillingEnabled?: boolean;
 }

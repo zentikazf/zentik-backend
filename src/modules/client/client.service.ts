@@ -33,6 +33,7 @@ export class ClientService {
         developmentHourlyRate: dto.developmentHourlyRate,
         supportHourlyRate: dto.supportHourlyRate,
         ...(dto.currency && { currency: dto.currency }),
+        ...(dto.portalBillingEnabled !== undefined && { portalBillingEnabled: dto.portalBillingEnabled }),
       },
     });
 
@@ -122,6 +123,7 @@ export class ClientService {
           ...(dto.developmentHourlyRate !== undefined && { developmentHourlyRate: dto.developmentHourlyRate }),
           ...(dto.supportHourlyRate !== undefined && { supportHourlyRate: dto.supportHourlyRate }),
           ...(dto.currency !== undefined && { currency: dto.currency }),
+          ...(dto.portalBillingEnabled !== undefined && { portalBillingEnabled: dto.portalBillingEnabled }),
         },
         include: { user: { select: { id: true, name: true, email: true } } },
       });

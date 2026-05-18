@@ -411,6 +411,15 @@ export class AuthService {
         onboardingCompleted: true,
         mustChangePassword: true,
         createdAt: true,
+        clientId: true,
+        clientGroup: {
+          select: {
+            id: true,
+            name: true,
+            portalEnabled: true,
+            portalBillingEnabled: true,
+          },
+        },
         organizationMembers: {
           select: {
             organizationId: true,
@@ -450,6 +459,17 @@ export class AuthService {
         onboardingCompleted: user.onboardingCompleted,
         mustChangePassword: user.mustChangePassword,
         createdAt: user.createdAt,
+        // Client al que pertenece (solo cuando el user es usuario portal de un cliente).
+        // Expone feature flags por cliente (portalBillingEnabled, etc.) para gating
+        // multitenant del portal sin matching de strings frágil.
+        client: user.clientGroup
+          ? {
+              id: user.clientGroup.id,
+              name: user.clientGroup.name,
+              portalEnabled: user.clientGroup.portalEnabled,
+              portalBillingEnabled: user.clientGroup.portalBillingEnabled,
+            }
+          : null,
       },
       organizations: user.organizationMembers.map((m) => {
         let permissions = m.role.rolePermissions.map(
