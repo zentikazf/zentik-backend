@@ -124,4 +124,9 @@ export class CreateTaskDto {
   @IsOptional()
   @IsBoolean({ message: 'clientVisible debe ser un booleano' })
   clientVisible?: boolean;
+
+  @ApiPropertyOptional({ example: true, default: true, description: 'Si false, las horas no descuentan del cupo del cliente (trabajo interno). Default: true.' })
+  @IsOptional()
+  @IsBoolean({ message: 'billable debe ser un booleano' })
+  billable?: boolean;
 }

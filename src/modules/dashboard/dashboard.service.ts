@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../database/prisma.service';
 import { DashboardFilterDto } from './dto';
 import { Prisma } from '@prisma/client';
+import { TicketService } from '../ticket/ticket.service';
 
 // Umbrales absolutos mensuales de cumplimiento de horas por miembro.
 // Verde: >= 120h | Naranja: [100, 120) h | Rojo: < 100h
@@ -19,7 +20,10 @@ const getComplianceStatus = (totalHours: number): ComplianceStatus => {
 
 @Injectable()
 export class DashboardService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly ticketService: TicketService,
+  ) {}
 
   async getManagerialDashboard(orgId: string, filters: DashboardFilterDto) {
     const { startDate, endDate, clientId, memberId } = filters;
@@ -34,6 +38,7 @@ export class DashboardService {
       teamMembers,
       hours,
       overdueTasks,
+      openTickets,
     ] = await Promise.all([
       this.getActiveProjects(orgId, clientId, memberId),
       this.getPendingTasks(orgId, dateRange, clientId, memberId),
@@ -41,6 +46,7 @@ export class DashboardService {
       this.getTeamMembers(orgId, dateRange, monthRange, clientId, memberId),
       this.getHours(orgId, dateRange, clientId, memberId),
       this.getOverdueTasks(orgId, clientId, memberId),
+      this.ticketService.getOpenTicketsCount(orgId),
     ]);
 
     return {
@@ -50,6 +56,7 @@ export class DashboardService {
       teamMembers,
       hours,
       overdueTasks,
+      openTickets,
       period: {
         startDate: dateRange.start ?? null,
         endDate: dateRange.end ?? null,
