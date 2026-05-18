@@ -1020,6 +1020,7 @@ model Client {
   userId          String?  @unique @map("user_id")
   status          ClientStatus @default(ACTIVE)
   portalEnabled   Boolean  @default(false) @map("portal_enabled")
+  portalBillingEnabled Boolean @default(false) @map("portal_billing_enabled")
   contractedHours Float    @default(0) @map("contracted_hours")
   usedHours       Float    @default(0) @map("used_hours")
   loanedHours     Float    @default(0) @map("loaned_hours")
