@@ -595,6 +595,7 @@ export class ClientService {
         id: true,
         title: true,
         type: true,
+        billable: true,
         hourlyRate: true, // Override por tarea (Fase Precio Hora)
         project: {
           select: { id: true, name: true, clientId: true, organizationId: true },
@@ -614,6 +615,29 @@ export class ClientService {
 
     const client = await this.prisma.client.findUnique({ where: { id: clientId } });
     if (!client) return;
+
+    // Tarea no facturable (trabajo interno): registramos la transaccion como INTERNAL
+    // para trazabilidad, pero NO incrementamos usedHours ni guardamos precio.
+    if (!task.billable) {
+      await this.prisma.hoursTransaction.create({
+        data: {
+          clientId,
+          type: 'INTERNAL',
+          hours,
+          taskId,
+          note: `Tiempo interno (no facturable): ${task.title}`,
+        },
+      });
+      this.logger.log(`Recorded ${hours}h INTERNAL (no descuenta) for task ${taskId}, client ${clientId}`);
+      await this.auditService.create({
+        organizationId: task.project.organizationId,
+        action: 'client.hours.internal',
+        resource: 'client',
+        resourceId: clientId,
+        newData: { hours, taskId, taskTitle: task.title },
+      });
+      return;
+    }
 
     // Resolver tarifa snapshot (Fase Precio Hora):
     // Prioridad: task.hourlyRate (override) → client.{type}HourlyRate

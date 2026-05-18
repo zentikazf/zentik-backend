@@ -18,6 +18,7 @@ import { UpsertBusinessHoursDto } from './dto/upsert-business-hours.dto';
 import { domainEvent } from '../../common/events/domain-event.helper';
 import { calculateBusinessDeadline, parseBusinessDays } from './sla.util';
 import { TicketEventsService } from './ticket-events.service';
+import { AppConfigService } from '../../config/app.config';
 
 /**
  * Generates a sequential ticket number per org: YYYYMMDD-NNN
@@ -93,6 +94,7 @@ export class TicketService {
     private readonly prisma: PrismaService,
     private readonly eventEmitter: EventEmitter2,
     private readonly events: TicketEventsService,
+    private readonly config: AppConfigService,
   ) {}
 
   // ────────────────────────────────────────────────────────────
@@ -532,6 +534,12 @@ export class TicketService {
       }
 
       return result;
+    }, {
+      // Configurable por entorno via PRISMA_TX_TIMEOUT_MS y PRISMA_TX_MAX_WAIT_MS.
+      // Default 15s/10s (dev local con BD remota Railway). En prod basta con
+      // 5s/2s — bajalo en el .env de produccion si querés ahorrar memoria.
+      timeout: this.config.prismaTxTimeoutMs,
+      maxWait: this.config.prismaTxMaxWaitMs,
     });
 
     // ── Emit domain events AFTER transaction commits ─────────

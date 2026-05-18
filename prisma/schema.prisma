@@ -618,6 +618,7 @@ model Task {
   hourlyRate       Decimal?     @map("hourly_rate") @db.Decimal(12, 2)
   roleId         String?      @map("role_id")
   clientVisible  Boolean      @default(false) @map("client_visible")
+  billable       Boolean      @default(true)  @map("billable")
   reviewAttempts Int          @default(0) @map("review_attempts")
   createdById    String       @map("created_by_id")
   createdAt      DateTime     @default(now()) @map("created_at")

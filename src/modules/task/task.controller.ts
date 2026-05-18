@@ -226,6 +226,7 @@ export class TaskController {
   }
 
   @Post('tasks/:taskId/approve')
+  @Permissions('manage:projects')
   @ApiOperation({ summary: 'Aprobar una tarea en revisión (moverla a Deploy)' })
   @ApiResponse({ status: 200, description: 'Tarea aprobada y TimeEntry confirmado' })
   async approveTask(
@@ -237,6 +238,7 @@ export class TaskController {
   }
 
   @Post('tasks/:taskId/reject')
+  @Permissions('manage:projects')
   @ApiOperation({ summary: 'Rechazar una tarea en revisión (vuelve a Desarrollo)' })
   @ApiResponse({ status: 200, description: 'Tarea rechazada y devuelta a Desarrollo' })
   async rejectTask(
@@ -248,6 +250,7 @@ export class TaskController {
   }
 
   @Get('organizations/:orgId/approvals/count')
+  @Permissions('manage:projects')
   @ApiOperation({ summary: 'Contar tareas pendientes de aprobación' })
   @ApiResponse({ status: 200, description: 'Conteo de aprobaciones pendientes' })
   async getApprovalsCount(
@@ -258,6 +261,7 @@ export class TaskController {
   }
 
   @Get('organizations/:orgId/approvals')
+  @Permissions('manage:projects')
   @ApiOperation({ summary: 'Listar tareas pendientes de aprobación en la organización' })
   @ApiResponse({ status: 200, description: 'Lista de tareas pendientes de aprobación' })
   async getPendingApprovals(
@@ -267,6 +271,7 @@ export class TaskController {
   }
 
   @Get('projects/:projectId/approvals')
+  @Permissions('manage:projects')
   @ApiOperation({ summary: 'Listar tareas pendientes de aprobación en el proyecto' })
   @ApiResponse({ status: 200, description: 'Lista de tareas pendientes de aprobación del proyecto' })
   async getProjectApprovals(
