@@ -532,6 +532,12 @@ export class TicketService {
       }
 
       return result;
+    }, {
+      // BD remota (Railway): la transaccion tiene 6-10 queries secuenciales y
+      // la latencia desde dev local puede pasar el default de 5s. En prod
+      // (Railway<->Railway) la latencia es ~5ms y este timeout es holgado.
+      timeout: 15000,
+      maxWait: 10000,
     });
 
     // ── Emit domain events AFTER transaction commits ─────────
