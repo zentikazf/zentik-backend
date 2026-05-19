@@ -120,6 +120,7 @@ export class TaskService {
           roleId: dto.roleId,
           boardColumnId: autoColumnId,
           sprintId: dto.sprintId,
+          ...(dto.clientVisible !== undefined && { clientVisible: dto.clientVisible }),
           ...(dto.billable !== undefined && { billable: dto.billable }),
           position: (maxPosition._max.position ?? -1) + 1,
           createdById: userId,
