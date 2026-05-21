@@ -1340,3 +1340,22 @@ model UserActivationToken {
   @@index([expiresAt])
   @@map("user_activation_tokens")
 }
+
+// ============================================================================
+// EMAIL DELIVERY FAILURES (best-effort retry persistence)
+// ============================================================================
+
+model FailedEmail {
+  id            String   @id @default(cuid())
+  to            String
+  subject       String
+  html          String   @db.Text
+  fromName      String?  @map("from_name")
+  error         String   @db.Text
+  attempts      Int      @default(3)
+  lastAttemptAt DateTime @map("last_attempt_at")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@map("failed_emails")
+}

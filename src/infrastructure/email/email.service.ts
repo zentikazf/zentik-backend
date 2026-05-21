@@ -22,37 +22,34 @@ export class EmailService {
     return this.resend !== null;
   }
 
-  async send(
+  /**
+   * Envia un email via Resend y propaga errores si falla.
+   *
+   * Usada por:
+   * - AsyncEmailDispatcher (necesita saber si fallo para reintentar).
+   * - OnboardingService (necesita saber si fallo para activar fallback temp-password).
+   *
+   * NO usar directamente desde controllers - bloquea el request HTTP.
+   * Para envios async usar AsyncEmailDispatcher.dispatch().
+   */
+  async sendOrThrow(
     to: string,
     subject: string,
     html: string,
     options?: { fromName?: string },
   ): Promise<void> {
     if (!this.resend) {
-      this.logger.warn(`Email not sent (no API key): "${subject}" → ${to}`);
-      return;
+      throw new Error('EMAIL_SERVICE_DISABLED');
     }
 
     const from = options?.fromName
       ? this.buildFromWithName(options.fromName)
       : this.config.emailFrom;
 
-    try {
-      const { error } = await this.resend.emails.send({
-        from,
-        to,
-        subject,
-        html,
-      });
+    const { error } = await this.resend.emails.send({ from, to, subject, html });
 
-      if (error) {
-        this.logger.error(`Resend error: ${error.message}`, error);
-        return;
-      }
-
-      this.logger.log(`Email sent: "${subject}" → ${to}`);
-    } catch (err) {
-      this.logger.error(`Failed to send email: "${subject}" → ${to}`, err);
+    if (error) {
+      throw new Error(`Resend error: ${error.message}`);
     }
   }
 

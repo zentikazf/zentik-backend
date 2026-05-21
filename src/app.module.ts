@@ -8,7 +8,6 @@ import { PrismaModule } from './database/prisma.module';
 import { RedisModule } from './infrastructure/redis/redis.module';
 import { EmailModule } from './infrastructure/email/email.module';
 import { StorageModule } from './infrastructure/storage/storage.module';
-import { QueueModule } from './infrastructure/queue/queue.module';
 import { AppConfigModule } from './config/config.module';
 import databaseConfig from './config/database.config';
 import redisConfig from './config/redis.config';
@@ -62,7 +61,6 @@ import { DashboardModule } from './modules/dashboard/dashboard.module';
     RedisModule,
     EmailModule,
     StorageModule,
-    QueueModule,
 
     // Feature modules
     AuthModule,
