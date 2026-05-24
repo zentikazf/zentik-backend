@@ -5,6 +5,7 @@ import { randomBytes } from 'crypto';
 import { PrismaService } from '../../database/prisma.service';
 import { CreateClientDto, UpdateClientDto } from './dto';
 import { CreateClientUserDto } from './dto/create-client-user.dto';
+import { EditHoursTransactionDto } from './dto/edit-hours-transaction.dto';
 import { AppException, DuplicateResourceException } from '../../common/filters/app-exception';
 import { PaginatedResult } from '../../common/interfaces/request.interface';
 import { AuditService } from '../audit/audit.service';
@@ -588,6 +589,130 @@ export class ClientService {
       oldData: { transactionId, type: tx.type, hours: tx.hours, note: tx.note },
       newData: { deletedBy: deletedByUser?.name, reason },
     });
+  }
+
+  async editHoursTransaction(
+    orgId: string,
+    clientId: string,
+    transactionId: string,
+    dto: EditHoursTransactionDto,
+    editedById: string,
+  ) {
+    const client = await this.findById(orgId, clientId);
+
+    const tx = await this.prisma.hoursTransaction.findFirst({
+      where: { id: transactionId, clientId, deletedAt: null },
+    });
+
+    if (!tx) {
+      throw new AppException(
+        'Transaccion no encontrada o ya eliminada',
+        'TRANSACTION_NOT_FOUND',
+        404,
+      );
+    }
+
+    // Solo USAGE y LOAN son editables (afectan cupo del cliente).
+    // PURCHASE/REFUND/INTERNAL no son consumo facturable y no se editan.
+    if (tx.type !== 'USAGE' && tx.type !== 'LOAN') {
+      throw new AppException(
+        'Solo se pueden editar transacciones de uso (USAGE) o prestamo (LOAN)',
+        'TRANSACTION_NOT_EDITABLE',
+        400,
+        { type: tx.type },
+      );
+    }
+
+    if (dto.hours === undefined && dto.priceRate === undefined) {
+      throw new AppException(
+        'Debes enviar al menos un campo a editar (hours o priceRate)',
+        'NOTHING_TO_EDIT',
+        400,
+      );
+    }
+
+    // Calcular nuevos valores. priceRate=null/0 limpia la tarifa.
+    const newHours = dto.hours ?? tx.hours;
+    const newRate: number | null =
+      dto.priceRate !== undefined
+        ? (dto.priceRate ?? 0) > 0
+          ? Number(dto.priceRate)
+          : null
+        : tx.priceRate
+        ? parseFloat(tx.priceRate.toString())
+        : null;
+    const newAmount =
+      newRate !== null && newRate > 0
+        ? parseFloat((newHours * newRate).toFixed(2))
+        : null;
+    // Currency: preservar la original si ya existia. Si la tx nunca tuvo
+    // currency y ahora se agrega tarifa por primera vez, usar la moneda
+    // actual del cliente.
+    const newCurrency = tx.priceCurrency
+      ? tx.priceCurrency
+      : newAmount !== null
+      ? client.currency
+      : null;
+
+    const delta = newHours - tx.hours;
+
+    const oldData = {
+      hours: tx.hours,
+      priceAmount: tx.priceAmount ? parseFloat(tx.priceAmount.toString()) : null,
+      priceRate: tx.priceRate ? parseFloat(tx.priceRate.toString()) : null,
+      priceCurrency: tx.priceCurrency,
+    };
+
+    await this.prisma.$transaction(async (prisma) => {
+      await prisma.hoursTransaction.update({
+        where: { id: transactionId },
+        data: {
+          hours: newHours,
+          priceAmount: newAmount,
+          priceRate: newRate,
+          priceCurrency: newCurrency,
+        },
+      });
+
+      // Ajustar cupo del cliente segun el delta de horas. USAGE->usedHours,
+      // LOAN->loanedHours. Si delta=0, no hace nada.
+      if (delta !== 0) {
+        const counterField: 'usedHours' | 'loanedHours' =
+          tx.type === 'USAGE' ? 'usedHours' : 'loanedHours';
+        await prisma.client.update({
+          where: { id: clientId },
+          data: { [counterField]: { increment: delta } },
+        });
+      }
+    });
+
+    const editedByUser = await this.prisma.user.findUnique({
+      where: { id: editedById },
+      select: { name: true, email: true },
+    });
+
+    this.logger.log(
+      `Hours transaction ${transactionId} edited by ${editedByUser?.email} — ` +
+        `hours: ${tx.hours} -> ${newHours}, rate: ${oldData.priceRate} -> ${newRate}, ` +
+        `amount: ${oldData.priceAmount} -> ${newAmount}`,
+    );
+
+    await this.auditService.create({
+      organizationId: orgId,
+      action: 'client.hours.edited',
+      resource: 'client',
+      resourceId: clientId,
+      oldData: { transactionId, type: tx.type, ...oldData },
+      newData: {
+        editedBy: editedByUser?.name,
+        hours: newHours,
+        priceAmount: newAmount,
+        priceRate: newRate,
+        priceCurrency: newCurrency,
+      },
+    });
+
+    return { success: true, transactionId };
   }
 
   async recordHoursUsage(taskId: string, durationMinutes: number) {
