@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../database/prisma.service';
 import { AppConfigService } from '../../config/app.config';
 import { EmailService } from '../../infrastructure/email/email.service';
+import { AsyncEmailDispatcher } from '../../infrastructure/email/async-email-dispatcher.service';
 import {
   notificationEmail,
   clientNotificationEmail,
@@ -50,6 +51,7 @@ export class NotificationEmailService {
     private readonly prisma: PrismaService,
     private readonly config: AppConfigService,
     private readonly emailService: EmailService,
+    private readonly dispatcher: AsyncEmailDispatcher,
   ) {}
 
   /**
@@ -281,25 +283,20 @@ export class NotificationEmailService {
       ctaLabel: 'Ver detalle',
       preferencesUrl: `${this.config.webUrl}/profile/notifications`,
     });
-    try {
-      await this.emailService.send(ctx.email, `[Zentikk] ${params.title}`, html);
-    } catch (err: any) {
-      this.logger.warn(
-        `Error enviando email-team a user ${ctx.userId}: ${err?.message ?? err}`,
-      );
-    }
+    this.dispatcher.dispatch({
+      to: ctx.email,
+      subject: `[Zentikk] ${params.title}`,
+      html,
+    });
   }
 
   private async sendWithBranding(ctx: ClientContext, subject: string, html: string) {
-    try {
-      await this.emailService.send(ctx.email, subject, html, {
-        fromName: ctx.organizationName,
-      });
-    } catch (err: any) {
-      this.logger.warn(
-        `Error enviando email-client a user ${ctx.userId}: ${err?.message ?? err}`,
-      );
-    }
+    this.dispatcher.dispatch({
+      to: ctx.email,
+      subject,
+      html,
+      fromName: ctx.organizationName,
+    });
   }
 
   private buildUrlForNotification(notification: { type: string; data?: any }): string {

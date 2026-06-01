@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { EmailService } from './email.service';
+import { AsyncEmailDispatcher } from './async-email-dispatcher.service';
 import { AppConfigService } from '../../config/app.config';
 import {
   welcomeEmail,
@@ -17,6 +18,7 @@ export class EmailInvitationService {
 
   constructor(
     private readonly emailService: EmailService,
+    private readonly dispatcher: AsyncEmailDispatcher,
     private readonly config: AppConfigService,
   ) {}
 
@@ -29,14 +31,14 @@ export class EmailInvitationService {
   async sendWelcomeEmail(email: string, name: string) {
     const loginUrl = `${this.config.webUrl}/login`;
     const html = welcomeEmail(name, loginUrl);
-    await this.emailService.send(email, 'Bienvenido a Zentikk', html);
+    this.dispatcher.dispatch({ to: email, subject: 'Bienvenido a Zentikk', html });
   }
 
   /** Send email verification with token link */
   async sendVerificationEmail(email: string, name: string, token: string) {
     const verifyUrl = `${this.config.webUrl}/verify-email?token=${token}`;
     const html = verifyEmailTemplate(name, verifyUrl);
-    await this.emailService.send(email, 'Verifica tu correo — Zentikk', html);
+    this.dispatcher.dispatch({ to: email, subject: 'Verifica tu correo — Zentikk', html });
   }
 
   /** Send team member invitation email with temporary credentials */
@@ -57,11 +59,11 @@ export class EmailInvitationService {
       temporaryPassword: params.temporaryPassword,
       loginUrl,
     });
-    await this.emailService.send(
-      params.email,
-      `Invitacion al equipo de ${params.organizationName}`,
+    this.dispatcher.dispatch({
+      to: params.email,
+      subject: `Invitacion al equipo de ${params.organizationName}`,
       html,
-    );
+    });
   }
 
   /** Send client user portal access email */
@@ -79,11 +81,11 @@ export class EmailInvitationService {
       temporaryPassword: params.temporaryPassword,
       portalUrl,
     });
-    await this.emailService.send(
-      params.email,
-      `Acceso al Portal de ${params.organizationName}`,
+    this.dispatcher.dispatch({
+      to: params.email,
+      subject: `Acceso al Portal de ${params.organizationName}`,
       html,
-    );
+    });
   }
 
   /** Send password reset email with time-limited token. Throws if Resend unavailable. */
@@ -107,7 +109,11 @@ export class EmailInvitationService {
       expiresInHours: params.expiresInHours,
       requestIp: params.requestIp,
     });
-    await this.emailService.send(params.email, 'Restablecer tu contrasena — Onnix', html);
+    this.dispatcher.dispatch({
+      to: params.email,
+      subject: 'Restablecer tu contrasena — Onnix',
+      html,
+    });
   }
 
   /** Send informational email after a successful password change. Non-blocking — failures logged only. */
@@ -130,7 +136,11 @@ export class EmailInvitationService {
       ipAddress: params.ipAddress,
       supportUrl,
     });
-    await this.emailService.send(params.email, 'Tu contrasena fue actualizada — Onnix', html);
+    this.dispatcher.dispatch({
+      to: params.email,
+      subject: 'Tu contrasena fue actualizada — Onnix',
+      html,
+    });
   }
 
   /** Send client sub-user invitation email */
@@ -150,10 +160,10 @@ export class EmailInvitationService {
       temporaryPassword: params.temporaryPassword,
       portalUrl,
     });
-    await this.emailService.send(
-      params.email,
-      `Invitacion al Portal — ${params.organizationName}`,
+    this.dispatcher.dispatch({
+      to: params.email,
+      subject: `Invitacion al Portal — ${params.organizationName}`,
       html,
-    );
+    });
   }
 }

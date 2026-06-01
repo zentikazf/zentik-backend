@@ -76,7 +76,7 @@ export class OnboardingService {
       : '[Zentikk] Activa tu cuenta';
 
     try {
-      await this.emailService.send(
+      await this.emailService.sendOrThrow(
         params.userEmail,
         subject,
         html,

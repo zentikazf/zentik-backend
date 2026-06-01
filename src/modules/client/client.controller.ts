@@ -12,14 +12,18 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
-import { AuthGuard } from '../auth/guards';
+import { AuthGuard, PermissionsGuard } from '../auth/guards';
+import { Permissions } from '../../common/decorators/permissions.decorator';
+import { CurrentUser } from '../../common/decorators';
+import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { ClientService } from './client.service';
 import { CreateClientDto, UpdateClientDto } from './dto';
 import { CreateClientUserDto } from './dto/create-client-user.dto';
+import { EditHoursTransactionDto } from './dto/edit-hours-transaction.dto';
 
 @ApiTags('Clients')
 @ApiBearerAuth()
-@UseGuards(AuthGuard)
+@UseGuards(AuthGuard, PermissionsGuard)
 @Controller('organizations/:orgId/clients')
 export class ClientController {
   constructor(private readonly clientService: ClientService) {}
@@ -182,6 +186,20 @@ export class ClientController {
     @Body() body: { reason: string; deletedById: string },
   ) {
     return this.clientService.deleteHoursTransaction(orgId, clientId, transactionId, body.deletedById, body.reason);
+  }
+
+  @Post(':clientId/hours/:transactionId/edit')
+  @Permissions('manage:projects')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Editar horas/tarifa de una transacción histórica (solo USAGE/LOAN)' })
+  editHoursTransaction(
+    @Param('orgId') orgId: string,
+    @Param('clientId') clientId: string,
+    @Param('transactionId') transactionId: string,
+    @Body() dto: EditHoursTransactionDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.clientService.editHoursTransaction(orgId, clientId, transactionId, dto, user.id);
   }
 
   @Post(':clientId/hours/sync')
