@@ -43,6 +43,7 @@ export class OrgMembershipService {
             name: true,
             email: true,
             image: true,
+            emailVerified: true,
           },
         },
         role: {

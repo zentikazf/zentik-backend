@@ -46,12 +46,14 @@ export class ClientController {
     @Query('page') page?: string,
     @Query('limit') limit?: string,
     @Query('status') status?: string,
+    @Query('withUsers') withUsers?: string,
   ) {
     return this.clientService.findAll(orgId, {
       search,
       page: page ? Number(page) : undefined,
       limit: limit ? Number(limit) : undefined,
       status,
+      withUsers: withUsers === 'true',
     });
   }
 
