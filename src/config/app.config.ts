@@ -52,4 +52,28 @@ export class AppConfigService {
   get vapidPrivateKey(): string | undefined { return this.configService.get<string>('VAPID_PRIVATE_KEY'); }
   get vapidSubject(): string { return this.configService.get<string>('VAPID_SUBJECT') || 'mailto:admin@zentikk.com'; }
   get pushEnabled(): boolean { return !!(this.vapidPublicKey && this.vapidPrivateKey); }
+
+  // === Admin MCP Chat (feature #8) ===
+  // Wrapper Number(...)/casting explicito porque ConfigService.getOrThrow<number>
+  // devuelve string en runtime — el generico es solo TS hint.
+  get mcpBaseUrl(): string { return this.configService.getOrThrow<string>('MCP_BASE_URL'); }
+  get mcpHttpTimeoutMs(): number { return Number(this.configService.getOrThrow<number>('MCP_HTTP_TIMEOUT_MS')); }
+  get mcpToolsCacheTtlSec(): number { return Number(this.configService.getOrThrow<number>('MCP_TOOLS_CACHE_TTL_SEC')); }
+
+  get llmProvider(): 'openrouter' | 'deepseek' | 'openai' | 'qwen' {
+    return this.configService.getOrThrow<'openrouter' | 'deepseek' | 'openai' | 'qwen'>('LLM_PROVIDER');
+  }
+  get llmBaseUrl(): string | undefined { return this.configService.get<string>('LLM_BASE_URL'); }
+  get llmApiKey(): string { return this.configService.getOrThrow<string>('LLM_API_KEY'); }
+  get llmModel(): string { return this.configService.getOrThrow<string>('LLM_MODEL'); }
+  get llmMaxTokens(): number { return Number(this.configService.getOrThrow<number>('LLM_MAX_TOKENS')); }
+  get llmMaxIterations(): number { return Number(this.configService.getOrThrow<number>('LLM_MAX_ITERATIONS')); }
+  get llmTimeoutMs(): number { return Number(this.configService.getOrThrow<number>('LLM_TIMEOUT_MS')); }
+
+  get adminMcpRateLimitPerMinute(): number {
+    return Number(this.configService.getOrThrow<number>('ADMIN_MCP_RATE_LIMIT_PER_MINUTE'));
+  }
+  get adminMcpRateLimitPerDay(): number {
+    return Number(this.configService.getOrThrow<number>('ADMIN_MCP_RATE_LIMIT_PER_DAY'));
+  }
 }

@@ -29,6 +29,34 @@ export const envSchema = z.object({
   // (Railway<->Railway, latencia ~5ms) podes bajar via env vars sin recompilar.
   PRISMA_TX_TIMEOUT_MS: z.coerce.number().default(15000),
   PRISMA_TX_MAX_WAIT_MS: z.coerce.number().default(10000),
+
+  // === Admin MCP Chat (feature #8) ===
+  // URL completa del MCP HTTP (incluye /mcp suffix). Ejemplo:
+  //   https://zentikazf-mcp-production.up.railway.app/mcp
+  MCP_BASE_URL: z.string().url(),
+  // Timeout por call HTTP al MCP (ms).
+  MCP_HTTP_TIMEOUT_MS: z.coerce.number().default(15000),
+  // TTL del cache de tools/list (segundos).
+  MCP_TOOLS_CACHE_TTL_SEC: z.coerce.number().default(300),
+
+  // LLM provider: openrouter | deepseek | openai | qwen (todos via SDK openai).
+  LLM_PROVIDER: z.enum(['openrouter', 'deepseek', 'openai', 'qwen']).default('openrouter'),
+  // Override explicito del baseURL del provider (opcional; el factory aplica defaults).
+  LLM_BASE_URL: z.string().url().optional(),
+  // API key del provider LLM. SECRETA - nunca commitear.
+  LLM_API_KEY: z.string().min(1),
+  // Modelo a usar (formato vendor/modelo en OpenRouter, ej. anthropic/claude-sonnet-4-5).
+  LLM_MODEL: z.string().default('anthropic/claude-sonnet-4-5'),
+  // Max output tokens por turno del LLM.
+  LLM_MAX_TOKENS: z.coerce.number().default(4096),
+  // Max iteraciones del loop tool_use <-> tool_result por turno.
+  LLM_MAX_ITERATIONS: z.coerce.number().default(6),
+  // Timeout total por call al LLM (ms).
+  LLM_TIMEOUT_MS: z.coerce.number().default(30000),
+
+  // Rate limits del endpoint /admin/mcp/chat por usuario.
+  ADMIN_MCP_RATE_LIMIT_PER_MINUTE: z.coerce.number().default(30),
+  ADMIN_MCP_RATE_LIMIT_PER_DAY: z.coerce.number().default(200),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;

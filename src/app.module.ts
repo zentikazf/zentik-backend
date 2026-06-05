@@ -39,6 +39,7 @@ import { LabelModule } from './modules/label/label.module';
 import { MeetingModule } from './modules/meeting/meeting.module';
 import { TicketModule } from './modules/ticket/ticket.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
+import { AdminMcpModule } from './modules/admin-mcp/admin-mcp.module';
 
 @Module({
   imports: [
@@ -89,6 +90,7 @@ import { DashboardModule } from './modules/dashboard/dashboard.module';
     MeetingModule,
     TicketModule,
     DashboardModule,
+    AdminMcpModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },
