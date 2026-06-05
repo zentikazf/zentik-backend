@@ -356,6 +356,16 @@ export class NotificationListener {
   // TICKET EVENTS
   // ============================================
 
+  // Roles que SIEMPRE reciben notificacion de ticket nuevo, independiente de
+  // si el proyecto tiene responsible asignado. Garantiza que nunca se pierda
+  // un aviso por falta de configuracion del proyecto.
+  private static readonly TICKET_NOTIFY_ROLES = [
+    'Owner',
+    'Product Owner',
+    'Project Manager',
+    'Developer',
+  ];
+
   @OnEvent('ticket.created')
   async handleTicketCreated(event: {
     ticketId: string;
@@ -363,6 +373,7 @@ export class NotificationListener {
     category: string;
     projectId: string;
     clientName: string;
+    userId?: string; // actor que creo el ticket (cliente del portal usualmente)
   }) {
     this.logger.log(`Ticket creado: ${event.ticketId}`);
 
@@ -374,6 +385,31 @@ export class NotificationListener {
 
       if (!project) return;
 
+      // Union de destinatarios: responsible del proyecto + members con rol literal
+      // en TICKET_NOTIFY_ROLES. Se hace en un solo query y luego se dedupe.
+      const roleMembers = await this.prisma.organizationMember.findMany({
+        where: {
+          organizationId: project.organizationId,
+          role: { name: { in: NotificationListener.TICKET_NOTIFY_ROLES } },
+        },
+        select: { userId: true },
+      });
+
+      const targets = new Set<string>();
+      if (project.responsibleId) targets.add(project.responsibleId);
+      for (const m of roleMembers) targets.add(m.userId);
+
+      // Excluir al actor que creo el ticket (evita autonotificacion si por
+      // alguna razon esta en la org como team y cumple algun rol).
+      if (event.userId) targets.delete(event.userId);
+
+      if (targets.size === 0) {
+        this.logger.warn(
+          `Ticket ${event.ticketId} en proyecto ${event.projectId} sin destinatarios para notificacion`,
+        );
+        return;
+      }
+
       const notificationData = {
         type: 'TICKET_CREATED' as const,
         title: 'Nuevo ticket de soporte',
@@ -381,30 +417,9 @@ export class NotificationListener {
         metadata: { ticketId: event.ticketId, projectId: event.projectId },
       };
 
-      // Notify project responsible
-      if (project.responsibleId) {
-        await this.notificationService.create({
-          userId: project.responsibleId,
-          ...notificationData,
-        });
-      }
-
-      // Notify Product Owners
-      const poMembers = await this.prisma.organizationMember.findMany({
-        where: {
-          organizationId: project.organizationId,
-          role: { name: 'Product Owner' },
-          userId: { not: project.responsibleId ?? undefined },
-        },
-        select: { userId: true },
-      });
-
       await Promise.all(
-        poMembers.map((member) =>
-          this.notificationService.create({
-            userId: member.userId,
-            ...notificationData,
-          }),
+        Array.from(targets).map((userId) =>
+          this.notificationService.create({ userId, ...notificationData }),
         ),
       );
     } catch (err: any) {

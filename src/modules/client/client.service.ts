@@ -51,7 +51,7 @@ export class ClientService {
 
   async findAll(
     orgId: string,
-    params: { search?: string; page?: number; limit?: number; status?: string },
+    params: { search?: string; page?: number; limit?: number; status?: string; withUsers?: boolean },
   ): Promise<PaginatedResult<any>> {
     const page = params.page ?? 1;
     const limit = params.limit ?? 50;
@@ -70,6 +70,27 @@ export class ClientService {
       ];
     }
 
+    // Si withUsers=true, incluir owner + sub-users del cliente para la vista
+    // unificada de miembros (Feature #7: rediseno-vista-miembros-organizacion).
+    const userInclude = params.withUsers
+      ? {
+          user: {
+            select: {
+              id: true, name: true, email: true,
+              emailVerified: true, createdAt: true, image: true,
+            },
+          },
+          users: {
+            select: {
+              id: true, name: true, email: true,
+              emailVerified: true, createdAt: true, image: true,
+            },
+          },
+        }
+      : {
+          user: { select: { email: true } },
+        };
+
     const [data, total] = await this.prisma.$transaction([
       this.prisma.client.findMany({
         where,
@@ -78,7 +99,7 @@ export class ClientService {
         take: limit,
         include: {
           _count: { select: { projects: true } },
-          user: { select: { email: true } },
+          ...userInclude,
         },
       }),
       this.prisma.client.count({ where }),
