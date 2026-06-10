@@ -216,7 +216,17 @@ export class DashboardService {
 
     const memberIds = members.map((m) => m.user.id);
     if (memberIds.length === 0) {
-      return { count: 0, items: [] };
+      // Contrato consistente con el return de exito (linea ~296): incluir
+      // thresholds para que el frontend no reciba shape distinto y pueda
+      // renderizar empty state sin romper.
+      return {
+        count: 0,
+        items: [],
+        thresholds: {
+          green: HOURS_COMPLIANCE_GREEN_MIN,
+          orange: HOURS_COMPLIANCE_ORANGE_MIN,
+        },
+      };
     }
 
     // Tareas activas por usuario (filtradas por cliente si aplica).
