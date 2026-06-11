@@ -114,3 +114,67 @@ export function getSlaProgress(createdAt: Date, deadline: Date): number {
 export function parseBusinessDays(daysString: string): number[] {
   return daysString.split(',').map(Number).filter((n) => n >= 1 && n <= 7);
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// SLA outcome helpers (feature #9 — dashboard tickets breakdown)
+// ────────────────────────────────────────────────────────────────────────
+
+export type SlaOutcome =
+  | 'COMPLIED'
+  | 'BREACHED_RESPONSE'
+  | 'BREACHED_RESOLUTION'
+  | 'BREACHED_BOTH'
+  | 'NO_SLA'
+  | 'IN_FLIGHT';
+
+/**
+ * Calcula minutos de exceso entre completedAt y deadline.
+ * - Devuelve null si falta cualquiera de los inputs (no hay SLA o aun no completado).
+ * - Devuelve 0 si llego a tiempo (completedAt <= deadline).
+ * - Devuelve >0 si hubo overshoot.
+ */
+export function calculateSlaOvershoot(
+  deadline: Date | null | undefined,
+  completedAt: Date | null | undefined,
+): number | null {
+  if (!deadline || !completedAt) return null;
+  const diffMs = completedAt.getTime() - deadline.getTime();
+  if (diffMs <= 0) return 0;
+  return Math.floor(diffMs / 60000);
+}
+
+export interface TicketSlaShape {
+  status: string;
+  responseDeadline: Date | null;
+  resolutionDeadline: Date | null;
+  firstResponseAt: Date | null;
+  resolvedAt: Date | null;
+  slaResponseBreached: boolean;
+  slaResolutionBreached: boolean;
+}
+
+/**
+ * Clasifica el desenlace SLA de un ticket.
+ *
+ * Reglas (ver requirements.md R8 — feature #9):
+ * - NO_SLA: sin responseDeadline ni resolutionDeadline.
+ * - BREACHED_BOTH: ambas flags de breach en true.
+ * - BREACHED_RESPONSE / BREACHED_RESOLUTION: solo una en true.
+ * - IN_FLIGHT: estado no terminal (OPEN/IN_PROGRESS/IN_REVIEW) sin breach todavia.
+ * - COMPLIED: estado RESOLVED sin breaches (llego a tiempo).
+ */
+export function classifySlaOutcome(ticket: TicketSlaShape): SlaOutcome {
+  const noResponseSla = ticket.responseDeadline === null;
+  const noResolutionSla = ticket.resolutionDeadline === null;
+  if (noResponseSla && noResolutionSla) return 'NO_SLA';
+
+  const respBreach = ticket.slaResponseBreached;
+  const resoBreach = ticket.slaResolutionBreached;
+  if (respBreach && resoBreach) return 'BREACHED_BOTH';
+  if (respBreach) return 'BREACHED_RESPONSE';
+  if (resoBreach) return 'BREACHED_RESOLUTION';
+
+  const isTerminal = ticket.status === 'RESOLVED';
+  if (!isTerminal) return 'IN_FLIGHT';
+  return 'COMPLIED';
+}

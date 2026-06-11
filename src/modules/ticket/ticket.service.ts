@@ -58,13 +58,30 @@ export async function generateTicketNumber(
   );
 }
 
+/**
+ * Escapa un valor para que pueda ir en una celda CSV.
+ * Regla RFC 4180: si el valor contiene coma, comilla doble o newline,
+ * lo envolvemos en comillas dobles y duplicamos las comillas internas.
+ * Valores vacios o sin caracteres especiales se devuelven tal cual.
+ */
+function csvEscape(value: string): string {
+  if (value === '' || value === null || value === undefined) return '';
+  const needsQuoting = /[",\r\n]/.test(value);
+  if (!needsQuoting) return value;
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
 // ─── State machine: transiciones válidas del ticket ────────────────────
+// CLOSED queda como key con array vacio para preservar el enum en lectura
+// (tickets historicos pre-feature #10), pero ningun estado origen permite
+// transicionar a CLOSED — el cierre fue deprecado, los tickets terminan en
+// RESOLVED. Ver docs en spec tickets-eliminar-closed-pulir-listing/design.md.
 const ALLOWED_TRANSITIONS: Record<TicketStatus, TicketStatus[]> = {
-  OPEN:        ['IN_PROGRESS', 'IN_REVIEW', 'RESOLVED', 'CLOSED'],
-  IN_PROGRESS: ['IN_REVIEW', 'RESOLVED', 'OPEN', 'CLOSED'],
-  IN_REVIEW:   ['IN_PROGRESS', 'RESOLVED', 'CLOSED'],
-  RESOLVED:    ['CLOSED', 'IN_PROGRESS'],
-  CLOSED:      ['IN_PROGRESS'],
+  OPEN:        ['IN_PROGRESS'],
+  IN_PROGRESS: ['IN_REVIEW', 'RESOLVED', 'OPEN'],
+  IN_REVIEW:   ['IN_PROGRESS', 'RESOLVED'],
+  RESOLVED:    ['IN_PROGRESS'],
+  CLOSED:      [],
 };
 
 // ─── Mapping: estado del ticket → estado del task en kanban ────────────
@@ -252,9 +269,16 @@ export class TicketService {
     return base;
   }
 
-  async getOrgTickets(orgId: string, query: ListTicketsQueryDto) {
-    const limit = Math.min(query.limit ?? 20, 50);
-
+  /**
+   * Builder del where Prisma para el listing de tickets de la organizacion.
+   * Reutilizado por getOrgTickets (paginado) y exportCsv (sin paginar).
+   *
+   * Nota sobre overshootMinGte: NO se incluye aca porque Prisma no expone
+   * filtros aritmeticos entre dos columnas (resolvedAt - resolutionDeadline).
+   * Lo manejamos como post-filtro en memoria — aceptable porque solo aplica
+   * a tickets RESOLVED (volumen <500/mes por org segun spec feature #10).
+   */
+  private buildOrgTicketsWhere(orgId: string, query: ListTicketsQueryDto): Prisma.TicketWhereInput {
     const where: Prisma.TicketWhereInput = {
       organizationId: orgId,
       ...(query.status && { status: query.status as TicketStatus }),
@@ -271,11 +295,174 @@ export class TicketService {
           { ticketNumber: { contains: query.search, mode: 'insensitive' as const } },
         ],
       }),
+      ...(query.criticality && query.criticality.length > 0 && {
+        criticality: { in: query.criticality },
+      }),
+      ...(query.category && query.category.length > 0 && {
+        category: { in: query.category },
+      }),
+      ...((query.resolvedFrom || query.resolvedTo) && {
+        resolvedAt: {
+          ...(query.resolvedFrom && { gte: new Date(query.resolvedFrom) }),
+          ...(query.resolvedTo && { lte: new Date(query.resolvedTo) }),
+        },
+      }),
     };
+
+    // slaOutcome → cláusulas sobre flags + deadlines.
+    // Las reglas se alinean con classifySlaOutcome (sla.util.ts).
+    if (query.slaOutcome) {
+      switch (query.slaOutcome) {
+        case 'COMPLIED':
+          // Sin breaches Y al menos una deadline definida Y status RESOLVED.
+          where.slaResponseBreached = false;
+          where.slaResolutionBreached = false;
+          where.status = 'RESOLVED';
+          where.OR = [
+            ...(Array.isArray(where.OR) ? where.OR : []),
+            { responseDeadline: { not: null } },
+            { resolutionDeadline: { not: null } },
+          ];
+          break;
+        case 'BREACHED_RESPONSE':
+          where.slaResponseBreached = true;
+          where.slaResolutionBreached = false;
+          break;
+        case 'BREACHED_RESOLUTION':
+          where.slaResponseBreached = false;
+          where.slaResolutionBreached = true;
+          break;
+        case 'BREACHED_BOTH':
+          where.slaResponseBreached = true;
+          where.slaResolutionBreached = true;
+          break;
+        case 'NO_SLA':
+          where.responseDeadline = null;
+          where.resolutionDeadline = null;
+          break;
+      }
+    }
+
+    return where;
+  }
+
+  /**
+   * Aplica el post-filtro de overshootMinGte sobre un set de tickets ya cargados.
+   * overshootMin = (resolvedAt - resolutionDeadline) / 60000, redondeado al minuto.
+   * Devuelve solo los tickets con overshoot >= threshold. Tickets sin deadline o
+   * sin resolvedAt se descartan (no se pueden medir).
+   */
+  private filterByOvershoot<T extends { resolvedAt: Date | null; resolutionDeadline: Date | null }>(
+    tickets: T[],
+    overshootMinGte: number | undefined,
+  ): T[] {
+    if (overshootMinGte === undefined || overshootMinGte === null) return tickets;
+    return tickets.filter((t) => {
+      if (!t.resolvedAt || !t.resolutionDeadline) return false;
+      const diffMin = Math.floor((t.resolvedAt.getTime() - t.resolutionDeadline.getTime()) / 60000);
+      return diffMin >= overshootMinGte;
+    });
+  }
+
+  /**
+   * Exporta tickets de la organizacion a CSV (UTF-8).
+   * Reusa el where builder de getOrgTickets — SIN paginacion para entregar
+   * el set completo. Aplica el mismo post-filtro de overshootMinGte.
+   * 13 columnas en orden exacto (ver design.md feature #10 R24).
+   *
+   * Volumen objetivo: <500 tickets/mes/org. Carga en memoria OK.
+   */
+  async exportTicketsCsv(orgId: string, query: ListTicketsQueryDto): Promise<Buffer> {
+    const where = this.buildOrgTicketsWhere(orgId, query);
+
+    const rows = await this.prisma.ticket.findMany({
+      where,
+      select: {
+        ticketNumber: true,
+        title: true,
+        category: true,
+        criticality: true,
+        status: true,
+        createdAt: true,
+        firstResponseAt: true,
+        resolvedAt: true,
+        resolutionDeadline: true,
+        responseDeadline: true,
+        closeReason: true,
+        client: { select: { name: true } },
+        project: { select: { name: true } },
+      },
+      orderBy: [{ resolvedAt: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
+    });
+
+    const filtered = this.filterByOvershoot(rows, query.overshootMinGte);
+
+    const headers = [
+      'ticketNumber',
+      'title',
+      'client',
+      'project',
+      'category',
+      'criticality',
+      'status',
+      'createdAt',
+      'firstResponseAt',
+      'resolvedAt',
+      'responseOvershoot',
+      'resolutionOvershoot',
+      'closeReason',
+    ];
+
+    const lines: string[] = [headers.join(',')];
+
+    for (const t of filtered) {
+      const responseOvershoot = t.firstResponseAt && t.responseDeadline
+        ? Math.max(0, Math.floor((t.firstResponseAt.getTime() - t.responseDeadline.getTime()) / 60000))
+        : '';
+      const resolutionOvershoot = t.resolvedAt && t.resolutionDeadline
+        ? Math.max(0, Math.floor((t.resolvedAt.getTime() - t.resolutionDeadline.getTime()) / 60000))
+        : '';
+
+      const cols: Array<string | number> = [
+        t.ticketNumber ?? '',
+        t.title ?? '',
+        t.client?.name ?? '',
+        t.project?.name ?? '',
+        t.category ?? '',
+        t.criticality ?? '',
+        t.status ?? '',
+        t.createdAt ? t.createdAt.toISOString() : '',
+        t.firstResponseAt ? t.firstResponseAt.toISOString() : '',
+        t.resolvedAt ? t.resolvedAt.toISOString() : '',
+        responseOvershoot,
+        resolutionOvershoot,
+        t.closeReason ?? '',
+      ];
+
+      lines.push(cols.map((v) => csvEscape(String(v))).join(','));
+    }
+
+    // CRLF entre filas para compatibilidad con Excel en Windows.
+    const csv = lines.join('\r\n');
+    // BOM UTF-8 (U+FEFF) para que Excel detecte el encoding correctamente
+    // y muestre tildes / caracteres especiales (clientes "Soluciones S.A." etc).
+    return Buffer.concat([Buffer.from('﻿', 'utf8'), Buffer.from(csv, 'utf8')]);
+  }
+
+  async getOrgTickets(orgId: string, query: ListTicketsQueryDto) {
+    const limit = Math.min(query.limit ?? 20, 50);
+    const where = this.buildOrgTicketsWhere(orgId, query);
+
+    const hasOvershootFilter = query.overshootMinGte !== undefined && query.overshootMinGte !== null;
+
+    // Si hay filtro de overshoot, traemos un buffer mayor (limit * 3, max 150)
+    // y descartamos en memoria. Si el buffer no alcanza, hasNext queda en false
+    // (caller debe ajustar limit). Volumen <500/mes lo hace tolerable.
+    const fetchTake = hasOvershootFilter ? Math.min(limit * 3, 150) + 1 : limit + 1;
 
     const items = await this.prisma.ticket.findMany({
       where,
-      take: limit + 1,
+      take: fetchTake,
       ...(query.cursor && { cursor: { id: query.cursor }, skip: 1 }),
       include: {
         client: { select: { id: true, name: true, email: true } },
@@ -298,8 +485,9 @@ export class TicketService {
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     });
 
-    const hasNext = items.length > limit;
-    const data = hasNext ? items.slice(0, limit) : items;
+    const filtered = this.filterByOvershoot(items, query.overshootMinGte);
+    const hasNext = filtered.length > limit;
+    const data = hasNext ? filtered.slice(0, limit) : filtered;
     const nextCursor = hasNext ? data[data.length - 1].id : null;
 
     return {
@@ -399,17 +587,20 @@ export class TicketService {
     const wantsAssignee = dto.assigneeId !== undefined;
     const wantsNotes = dto.adminNotes !== undefined;
 
-    if (wantsStatus) {
-      this.validateStatusTransition(ticket.status, dto.status as TicketStatus);
-    }
-
-    // Cannot transition to CLOSED via PATCH — must use the dedicated /close endpoint
+    // El estado CLOSED fue deprecado (feature #10). Cualquier intento de
+    // transicionar a CLOSED via PATCH falla con error explicito antes de
+    // validar la state machine (que tambien lo bloquearia, pero con mensaje
+    // generico de transicion invalida).
     if (wantsStatus && dto.status === 'CLOSED') {
       throw new AppException(
-        'Para cerrar un ticket usa el endpoint POST /tickets/:id/close con motivo',
-        'CLOSE_ENDPOINT_REQUIRED',
-        400,
+        'El estado CLOSED fue deprecado. Los tickets terminan en RESOLVED.',
+        'TICKET_CLOSE_DEPRECATED',
+        410,
       );
+    }
+
+    if (wantsStatus) {
+      this.validateStatusTransition(ticket.status, dto.status as TicketStatus);
     }
 
     const previousAssigneeId = ticket.task?.assignments[0]?.userId ?? null;
@@ -519,6 +710,27 @@ export class TicketService {
           source: 'TICKET',
           userId,
         });
+
+        // 3.b) Audit timeline para hitos SLA: FIRST_RESPONSE / RESOLVED.
+        // Solo se emiten cuando este mismo update setea por primera vez la
+        // fecha (data.firstResponseAt / data.resolvedAt) — NO sustituyen al
+        // STATUS_CHANGE, son eventos del timeline SLA para reporteria.
+        if (data.firstResponseAt) {
+          await this.events.writeEventTx(tx, {
+            ticketId,
+            type: 'FIRST_RESPONSE',
+            source: 'TICKET',
+            userId,
+          });
+        }
+        if (data.resolvedAt) {
+          await this.events.writeEventTx(tx, {
+            ticketId,
+            type: 'RESOLVED',
+            source: 'TICKET',
+            userId,
+          });
+        }
       }
 
       // 4) Sync kanban: si hay task asociada, mover según mapping
@@ -603,6 +815,11 @@ export class TicketService {
 
     const previousStatus = ticket.status;
 
+    // Capturar los flags ANTES de la tx para decidir emision de eventos SLA
+    // (firstResponseAt y resolvedAt se setean dentro de la tx solo si eran null).
+    const willSetFirstResponse = ticket.firstResponseAt === null;
+    const willSetResolved = ticket.resolvedAt === null;
+
     await this.prisma.$transaction(async (tx) => {
       await tx.ticket.update({
         where: { id: ticketId },
@@ -613,8 +830,8 @@ export class TicketService {
           closedAt: new Date(),
           closedByUserId: userId,
           // SLA auto-marks
-          ...(ticket.firstResponseAt === null && { firstResponseAt: new Date() }),
-          ...(ticket.resolvedAt === null && { resolvedAt: new Date() }),
+          ...(willSetFirstResponse && { firstResponseAt: new Date() }),
+          ...(willSetResolved && { resolvedAt: new Date() }),
         },
       });
 
@@ -627,6 +844,25 @@ export class TicketService {
         userId,
         metadata: { reason: dto.reason, note: dto.note },
       });
+
+      // Audit timeline para hitos SLA: FIRST_RESPONSE / RESOLVED.
+      // Solo se emiten si el cierre fuerza la marca por primera vez.
+      if (willSetFirstResponse) {
+        await this.events.writeEventTx(tx, {
+          ticketId,
+          type: 'FIRST_RESPONSE',
+          source: 'TICKET',
+          userId,
+        });
+      }
+      if (willSetResolved) {
+        await this.events.writeEventTx(tx, {
+          ticketId,
+          type: 'RESOLVED',
+          source: 'TICKET',
+          userId,
+        });
+      }
 
       // Sync task → DONE (a menos que el ticket se cerró sin resolverse,
       // en cuyo caso preservamos el comportamiento legacy: cancelar la task)
@@ -762,6 +998,28 @@ export class TicketService {
         userId,
         metadata: { taskId, newTaskStatus },
       });
+
+      // Audit timeline para hitos SLA: FIRST_RESPONSE / RESOLVED.
+      // El sync desde kanban tambien puede marcar por primera vez los hitos.
+      // source = KANBAN porque la transicion vino del board.
+      if (data.firstResponseAt) {
+        await this.events.writeEventTx(tx, {
+          ticketId: ticket.id,
+          type: 'FIRST_RESPONSE',
+          source: 'KANBAN',
+          userId,
+          metadata: { taskId },
+        });
+      }
+      if (data.resolvedAt) {
+        await this.events.writeEventTx(tx, {
+          ticketId: ticket.id,
+          type: 'RESOLVED',
+          source: 'KANBAN',
+          userId,
+          metadata: { taskId },
+        });
+      }
       return result;
     });
 

@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { PrismaService } from '../../database/prisma.service';
+import { TicketEventsService } from './ticket-events.service';
 
 @Injectable()
 export class SlaCronService {
@@ -10,6 +11,7 @@ export class SlaCronService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly eventEmitter: EventEmitter2,
+    private readonly events: TicketEventsService,
   ) {}
 
   @Cron(CronExpression.EVERY_5_MINUTES)
@@ -34,9 +36,21 @@ export class SlaCronService {
     });
 
     if (responseBreached.length > 0) {
-      await this.prisma.ticket.updateMany({
-        where: { id: { in: responseBreached.map((t) => t.id) } },
-        data: { slaResponseBreached: true },
+      // Transaccion: flag + TicketEvent atomicos para no quedar en estado
+      // inconsistente (flag seteado sin evento o viceversa).
+      await this.prisma.$transaction(async (tx) => {
+        await tx.ticket.updateMany({
+          where: { id: { in: responseBreached.map((t) => t.id) } },
+          data: { slaResponseBreached: true },
+        });
+        for (const ticket of responseBreached) {
+          await this.events.writeEventTx(tx, {
+            ticketId: ticket.id,
+            type: 'SLA_BREACH_RESPONSE',
+            source: 'SYSTEM',
+            metadata: { detectedAt: now.toISOString() },
+          });
+        }
       });
 
       for (const ticket of responseBreached) {
@@ -69,9 +83,19 @@ export class SlaCronService {
     });
 
     if (resolutionBreached.length > 0) {
-      await this.prisma.ticket.updateMany({
-        where: { id: { in: resolutionBreached.map((t) => t.id) } },
-        data: { slaResolutionBreached: true },
+      await this.prisma.$transaction(async (tx) => {
+        await tx.ticket.updateMany({
+          where: { id: { in: resolutionBreached.map((t) => t.id) } },
+          data: { slaResolutionBreached: true },
+        });
+        for (const ticket of resolutionBreached) {
+          await this.events.writeEventTx(tx, {
+            ticketId: ticket.id,
+            type: 'SLA_BREACH_RESOLUTION',
+            source: 'SYSTEM',
+            metadata: { detectedAt: now.toISOString() },
+          });
+        }
       });
 
       for (const ticket of resolutionBreached) {
@@ -111,6 +135,25 @@ export class SlaCronService {
       const progress = elapsed / total;
 
       if (progress >= 0.8 && progress < 1.0) {
+        // Idempotencia: el cron corre cada 5min y el ticket puede permanecer
+        // en la ventana [80%, 100%) varios ciclos. Persistimos UN solo
+        // SLA_WARNING por ticket para no inflar el timeline.
+        const existing = await this.prisma.ticketEvent.findFirst({
+          where: { ticketId: ticket.id, type: 'SLA_WARNING' },
+          select: { id: true },
+        });
+        if (!existing) {
+          await this.events.writeEvent({
+            ticketId: ticket.id,
+            type: 'SLA_WARNING',
+            source: 'SYSTEM',
+            metadata: {
+              detectedAt: now.toISOString(),
+              progress: Math.round(progress * 100),
+            },
+          });
+        }
+
         this.eventEmitter.emit('sla.warning', {
           ticketId: ticket.id,
           title: ticket.title,
