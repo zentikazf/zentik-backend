@@ -10,7 +10,22 @@ import {
   Max,
   Min,
 } from 'class-validator';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
+
+/**
+ * Convierte un valor que viene de query string en array. Acepta:
+ * - undefined / null -> queda igual (campo opcional).
+ * - string suelto (?category=X) -> [X]. Patron mas comun del frontend.
+ * - array (?category=X&category=Y) -> sin cambios.
+ * Sin esto, el frontend que serializa category como string simple choca con
+ * @IsArray() y devuelve 400 BAD_REQUEST silencioso.
+ */
+const toArray = ({ value }: { value: unknown }): unknown =>
+  value === undefined || value === null
+    ? value
+    : Array.isArray(value)
+    ? value
+    : [value];
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { TicketCategory, TicketCriticality } from '@prisma/client';
 import { TicketStatusDto } from './update-ticket.dto';
@@ -101,7 +116,7 @@ export class ListTicketsQueryDto {
     description: 'Filtrar por uno o varios niveles de criticidad',
   })
   @IsOptional()
-  @Type(() => String)
+  @Transform(toArray)
   @IsArray()
   @IsEnum(TicketCriticality, { each: true, message: 'criticality contiene un valor invalido' })
   criticality?: TicketCriticality[];
@@ -129,7 +144,7 @@ export class ListTicketsQueryDto {
     description: 'Filtrar por uno o varios tipos de ticket',
   })
   @IsOptional()
-  @Type(() => String)
+  @Transform(toArray)
   @IsArray()
   @IsEnum(TicketCategory, { each: true, message: 'category contiene un valor invalido' })
   category?: TicketCategory[];
