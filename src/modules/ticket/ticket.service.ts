@@ -256,9 +256,16 @@ export class TicketService {
     return base;
   }
 
-  async getOrgTickets(orgId: string, query: ListTicketsQueryDto) {
-    const limit = Math.min(query.limit ?? 20, 50);
-
+  /**
+   * Builder del where Prisma para el listing de tickets de la organizacion.
+   * Reutilizado por getOrgTickets (paginado) y exportCsv (sin paginar).
+   *
+   * Nota sobre overshootMinGte: NO se incluye aca porque Prisma no expone
+   * filtros aritmeticos entre dos columnas (resolvedAt - resolutionDeadline).
+   * Lo manejamos como post-filtro en memoria — aceptable porque solo aplica
+   * a tickets RESOLVED (volumen <500/mes por org segun spec feature #10).
+   */
+  private buildOrgTicketsWhere(orgId: string, query: ListTicketsQueryDto): Prisma.TicketWhereInput {
     const where: Prisma.TicketWhereInput = {
       organizationId: orgId,
       ...(query.status && { status: query.status as TicketStatus }),
@@ -275,11 +282,89 @@ export class TicketService {
           { ticketNumber: { contains: query.search, mode: 'insensitive' as const } },
         ],
       }),
+      ...(query.criticality && query.criticality.length > 0 && {
+        criticality: { in: query.criticality },
+      }),
+      ...(query.category && query.category.length > 0 && {
+        category: { in: query.category },
+      }),
+      ...((query.resolvedFrom || query.resolvedTo) && {
+        resolvedAt: {
+          ...(query.resolvedFrom && { gte: new Date(query.resolvedFrom) }),
+          ...(query.resolvedTo && { lte: new Date(query.resolvedTo) }),
+        },
+      }),
     };
+
+    // slaOutcome → cláusulas sobre flags + deadlines.
+    // Las reglas se alinean con classifySlaOutcome (sla.util.ts).
+    if (query.slaOutcome) {
+      switch (query.slaOutcome) {
+        case 'COMPLIED':
+          // Sin breaches Y al menos una deadline definida Y status RESOLVED.
+          where.slaResponseBreached = false;
+          where.slaResolutionBreached = false;
+          where.status = 'RESOLVED';
+          where.OR = [
+            ...(Array.isArray(where.OR) ? where.OR : []),
+            { responseDeadline: { not: null } },
+            { resolutionDeadline: { not: null } },
+          ];
+          break;
+        case 'BREACHED_RESPONSE':
+          where.slaResponseBreached = true;
+          where.slaResolutionBreached = false;
+          break;
+        case 'BREACHED_RESOLUTION':
+          where.slaResponseBreached = false;
+          where.slaResolutionBreached = true;
+          break;
+        case 'BREACHED_BOTH':
+          where.slaResponseBreached = true;
+          where.slaResolutionBreached = true;
+          break;
+        case 'NO_SLA':
+          where.responseDeadline = null;
+          where.resolutionDeadline = null;
+          break;
+      }
+    }
+
+    return where;
+  }
+
+  /**
+   * Aplica el post-filtro de overshootMinGte sobre un set de tickets ya cargados.
+   * overshootMin = (resolvedAt - resolutionDeadline) / 60000, redondeado al minuto.
+   * Devuelve solo los tickets con overshoot >= threshold. Tickets sin deadline o
+   * sin resolvedAt se descartan (no se pueden medir).
+   */
+  private filterByOvershoot<T extends { resolvedAt: Date | null; resolutionDeadline: Date | null }>(
+    tickets: T[],
+    overshootMinGte: number | undefined,
+  ): T[] {
+    if (overshootMinGte === undefined || overshootMinGte === null) return tickets;
+    return tickets.filter((t) => {
+      if (!t.resolvedAt || !t.resolutionDeadline) return false;
+      const diffMin = Math.floor((t.resolvedAt.getTime() - t.resolutionDeadline.getTime()) / 60000);
+      return diffMin >= overshootMinGte;
+    });
+  }
+
+  async getOrgTickets(orgId: string, query: ListTicketsQueryDto) {
+    const limit = Math.min(query.limit ?? 20, 50);
+    const where = this.buildOrgTicketsWhere(orgId, query);
+
+    const hasOvershootFilter = query.overshootMinGte !== undefined && query.overshootMinGte !== null;
+
+    // Si hay filtro de overshoot, traemos un buffer mayor (limit * 3, max 150)
+    // y descartamos en memoria. Si el buffer no alcanza, hasNext queda en false
+    // (caller debe ajustar limit). Volumen <500/mes lo hace tolerable.
+    const fetchTake = hasOvershootFilter ? Math.min(limit * 3, 150) + 1 : limit + 1;
 
     const items = await this.prisma.ticket.findMany({
       where,
-      take: limit + 1,
+      take: fetchTake,
       ...(query.cursor && { cursor: { id: query.cursor }, skip: 1 }),
       include: {
         client: { select: { id: true, name: true, email: true } },
@@ -302,8 +387,9 @@ export class TicketService {
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     });
 
-    const hasNext = items.length > limit;
-    const data = hasNext ? items.slice(0, limit) : items;
+    const filtered = this.filterByOvershoot(items, query.overshootMinGte);
+    const hasNext = filtered.length > limit;
+    const data = hasNext ? filtered.slice(0, limit) : filtered;
     const nextCursor = hasNext ? data[data.length - 1].id : null;
 
     return {
