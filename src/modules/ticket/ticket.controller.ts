@@ -18,11 +18,11 @@ import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { TicketService } from './ticket.service';
 import { UpdateTicketDto } from './dto/update-ticket.dto';
 import { CreateAdminTicketDto } from './dto/create-admin-ticket.dto';
-import { CloseTicketDto } from './dto/close-ticket.dto';
 import { ListTicketsQueryDto } from './dto/list-tickets-query.dto';
 import { CreateCategoryConfigDto, UpdateCategoryConfigDto } from './dto/create-category-config.dto';
 import { UpsertSlaConfigDto } from './dto/upsert-sla-config.dto';
 import { UpsertBusinessHoursDto } from './dto/upsert-business-hours.dto';
+import { AppException } from '../../common/filters/app-exception';
 
 @ApiTags('Tickets')
 @ApiBearerAuth()
@@ -93,15 +93,22 @@ export class TicketController {
     return this.ticketService.updateTicket(ticketId, dto, user.id);
   }
 
+  // DEPRECATED — feature #10 elimina el estado CLOSED del modelo.
+  // El handler se mantiene para devolver un 410 Gone con mensaje claro
+  // a clientes legacy en vez de un 404 confuso. NO eliminar el codigo
+  // de TicketService.closeTicket — preserva audit trail de tickets
+  // historicos cerrados antes de la migracion.
   @Post('tickets/:ticketId/close')
-  @ApiOperation({ summary: 'Cerrar ticket con motivo' })
-  @HttpCode(HttpStatus.OK)
-  closeTicket(
-    @Param('ticketId') ticketId: string,
-    @Body() dto: CloseTicketDto,
-    @CurrentUser() user: AuthenticatedUser,
-  ) {
-    return this.ticketService.closeTicket(ticketId, dto, user.id);
+  @ApiOperation({
+    summary: 'DEPRECATED — devuelve 410 Gone. Usar POST /tickets/:id/resolve',
+    deprecated: true,
+  })
+  closeTicket(): never {
+    throw new AppException(
+      'Endpoint deprecado. Usar PATCH /tickets/:ticketId con status=RESOLVED',
+      'TICKET_CLOSE_DEPRECATED',
+      HttpStatus.GONE,
+    );
   }
 
   // ── Ticket Category Configs ──────────────────────────────
