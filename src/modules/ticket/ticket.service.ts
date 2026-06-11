@@ -58,6 +58,19 @@ export async function generateTicketNumber(
   );
 }
 
+/**
+ * Escapa un valor para que pueda ir en una celda CSV.
+ * Regla RFC 4180: si el valor contiene coma, comilla doble o newline,
+ * lo envolvemos en comillas dobles y duplicamos las comillas internas.
+ * Valores vacios o sin caracteres especiales se devuelven tal cual.
+ */
+function csvEscape(value: string): string {
+  if (value === '' || value === null || value === undefined) return '';
+  const needsQuoting = /[",\r\n]/.test(value);
+  if (!needsQuoting) return value;
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
 // ─── State machine: transiciones válidas del ticket ────────────────────
 // CLOSED queda como key con array vacio para preservar el enum en lectura
 // (tickets historicos pre-feature #10), pero ningun estado origen permite
@@ -349,6 +362,91 @@ export class TicketService {
       const diffMin = Math.floor((t.resolvedAt.getTime() - t.resolutionDeadline.getTime()) / 60000);
       return diffMin >= overshootMinGte;
     });
+  }
+
+  /**
+   * Exporta tickets de la organizacion a CSV (UTF-8).
+   * Reusa el where builder de getOrgTickets — SIN paginacion para entregar
+   * el set completo. Aplica el mismo post-filtro de overshootMinGte.
+   * 13 columnas en orden exacto (ver design.md feature #10 R24).
+   *
+   * Volumen objetivo: <500 tickets/mes/org. Carga en memoria OK.
+   */
+  async exportTicketsCsv(orgId: string, query: ListTicketsQueryDto): Promise<Buffer> {
+    const where = this.buildOrgTicketsWhere(orgId, query);
+
+    const rows = await this.prisma.ticket.findMany({
+      where,
+      select: {
+        ticketNumber: true,
+        title: true,
+        category: true,
+        criticality: true,
+        status: true,
+        createdAt: true,
+        firstResponseAt: true,
+        resolvedAt: true,
+        resolutionDeadline: true,
+        responseDeadline: true,
+        closeReason: true,
+        client: { select: { name: true } },
+        project: { select: { name: true } },
+      },
+      orderBy: [{ resolvedAt: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
+    });
+
+    const filtered = this.filterByOvershoot(rows, query.overshootMinGte);
+
+    const headers = [
+      'ticketNumber',
+      'title',
+      'client',
+      'project',
+      'category',
+      'criticality',
+      'status',
+      'createdAt',
+      'firstResponseAt',
+      'resolvedAt',
+      'responseOvershoot',
+      'resolutionOvershoot',
+      'closeReason',
+    ];
+
+    const lines: string[] = [headers.join(',')];
+
+    for (const t of filtered) {
+      const responseOvershoot = t.firstResponseAt && t.responseDeadline
+        ? Math.max(0, Math.floor((t.firstResponseAt.getTime() - t.responseDeadline.getTime()) / 60000))
+        : '';
+      const resolutionOvershoot = t.resolvedAt && t.resolutionDeadline
+        ? Math.max(0, Math.floor((t.resolvedAt.getTime() - t.resolutionDeadline.getTime()) / 60000))
+        : '';
+
+      const cols: Array<string | number> = [
+        t.ticketNumber ?? '',
+        t.title ?? '',
+        t.client?.name ?? '',
+        t.project?.name ?? '',
+        t.category ?? '',
+        t.criticality ?? '',
+        t.status ?? '',
+        t.createdAt ? t.createdAt.toISOString() : '',
+        t.firstResponseAt ? t.firstResponseAt.toISOString() : '',
+        t.resolvedAt ? t.resolvedAt.toISOString() : '',
+        responseOvershoot,
+        resolutionOvershoot,
+        t.closeReason ?? '',
+      ];
+
+      lines.push(cols.map((v) => csvEscape(String(v))).join(','));
+    }
+
+    // CRLF entre filas para compatibilidad con Excel en Windows.
+    const csv = lines.join('\r\n');
+    // BOM UTF-8 (U+FEFF) para que Excel detecte el encoding correctamente
+    // y muestre tildes / caracteres especiales (clientes "Soluciones S.A." etc).
+    return Buffer.concat([Buffer.from('﻿', 'utf8'), Buffer.from(csv, 'utf8')]);
   }
 
   async getOrgTickets(orgId: string, query: ListTicketsQueryDto) {

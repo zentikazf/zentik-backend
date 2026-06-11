@@ -7,13 +7,16 @@ import {
   Param,
   Body,
   Query,
+  Res,
   UseGuards,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
-import { AuthGuard } from '../auth/guards';
+import { Response } from 'express';
+import { AuthGuard, PermissionsGuard } from '../auth/guards';
 import { CurrentUser } from '../../common/decorators';
+import { Permissions } from '../../common/decorators/permissions.decorator';
 import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { TicketService } from './ticket.service';
 import { UpdateTicketDto } from './dto/update-ticket.dto';
@@ -52,6 +55,35 @@ export class TicketController {
     @Query() query: ListTicketsQueryDto,
   ) {
     return this.ticketService.getOrgTickets(orgId, query);
+  }
+
+  /**
+   * Exportar tickets de la organizacion como CSV.
+   *
+   * Reutiliza los mismos filtros de GET /organizations/:orgId/tickets,
+   * pero NO pagina (devuelve el set completo). Volumen objetivo <500/mes/org.
+   *
+   * Permission: manage:projects (Owner / PO / PM solamente). Sub-usuarios
+   * cliente no acceden — proteccion de campos sensibles (closeReason,
+   * adminNotes via export futuro).
+   */
+  @Get('organizations/:orgId/tickets/export-csv')
+  @UseGuards(PermissionsGuard)
+  @Permissions('manage:projects')
+  @ApiOperation({
+    summary: 'Exportar tickets filtrados como CSV (13 columnas, UTF-8 BOM)',
+  })
+  async exportOrgTicketsCsv(
+    @Param('orgId') orgId: string,
+    @Query() query: ListTicketsQueryDto,
+    @Res({ passthrough: false }) res: Response,
+  ): Promise<void> {
+    const buffer = await this.ticketService.exportTicketsCsv(orgId, query);
+    const filename = `tickets-${new Date().toISOString().slice(0, 10)}.csv`;
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', buffer.length.toString());
+    res.send(buffer);
   }
 
   @Post('organizations/:orgId/tickets')
