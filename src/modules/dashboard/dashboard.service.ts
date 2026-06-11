@@ -16,7 +16,7 @@ type TicketCategoryActive = 'SUPPORT_REQUEST' | 'NEW_DEVELOPMENT';
 const ACTIVE_STATUSES: TicketStatusActive[] = ['OPEN', 'IN_PROGRESS', 'IN_REVIEW', 'RESOLVED'];
 const ACTIVE_CATEGORIES: TicketCategoryActive[] = ['SUPPORT_REQUEST', 'NEW_DEVELOPMENT'];
 
-interface StatusBucket {
+export interface StatusBucket {
   count: number;
   complied: number;
   breachedResponse: number;
@@ -26,7 +26,7 @@ interface StatusBucket {
   avgOvershootMin: number | null;
 }
 
-interface CategorySlaSummary {
+export interface CategorySlaSummary {
   complied: number;
   breachedResponse: number;
   breachedResolution: number;
@@ -35,13 +35,13 @@ interface CategorySlaSummary {
   noSlaCount: number;
 }
 
-interface CategoryBlock {
+export interface CategoryBlock {
   total: number;
   byStatus: Record<TicketStatusActive, StatusBucket>;
   sla: CategorySlaSummary;
 }
 
-interface TicketsBreakdownResponse {
+export interface TicketsBreakdownResponse {
   total: number;
   byCategory: Record<TicketCategoryActive, CategoryBlock>;
   period: { startDate: Date | null; endDate: Date | null };

@@ -21,4 +21,15 @@ export class DashboardController {
   ) {
     return this.dashboardService.getManagerialDashboard(orgId, filters);
   }
+
+  @Get('organizations/:orgId/dashboard/tickets-breakdown')
+  @ApiOperation({
+    summary: 'Breakdown de tickets por categoria y estado con metricas SLA',
+  })
+  async getTicketsBreakdown(
+    @Param('orgId') orgId: string,
+    @Query() filters: DashboardFilterDto,
+  ) {
+    return this.dashboardService.getTicketsBreakdown(orgId, filters);
+  }
 }
