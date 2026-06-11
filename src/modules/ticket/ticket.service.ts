@@ -519,6 +519,27 @@ export class TicketService {
           source: 'TICKET',
           userId,
         });
+
+        // 3.b) Audit timeline para hitos SLA: FIRST_RESPONSE / RESOLVED.
+        // Solo se emiten cuando este mismo update setea por primera vez la
+        // fecha (data.firstResponseAt / data.resolvedAt) — NO sustituyen al
+        // STATUS_CHANGE, son eventos del timeline SLA para reporteria.
+        if (data.firstResponseAt) {
+          await this.events.writeEventTx(tx, {
+            ticketId,
+            type: 'FIRST_RESPONSE',
+            source: 'TICKET',
+            userId,
+          });
+        }
+        if (data.resolvedAt) {
+          await this.events.writeEventTx(tx, {
+            ticketId,
+            type: 'RESOLVED',
+            source: 'TICKET',
+            userId,
+          });
+        }
       }
 
       // 4) Sync kanban: si hay task asociada, mover según mapping
@@ -603,6 +624,11 @@ export class TicketService {
 
     const previousStatus = ticket.status;
 
+    // Capturar los flags ANTES de la tx para decidir emision de eventos SLA
+    // (firstResponseAt y resolvedAt se setean dentro de la tx solo si eran null).
+    const willSetFirstResponse = ticket.firstResponseAt === null;
+    const willSetResolved = ticket.resolvedAt === null;
+
     await this.prisma.$transaction(async (tx) => {
       await tx.ticket.update({
         where: { id: ticketId },
@@ -613,8 +639,8 @@ export class TicketService {
           closedAt: new Date(),
           closedByUserId: userId,
           // SLA auto-marks
-          ...(ticket.firstResponseAt === null && { firstResponseAt: new Date() }),
-          ...(ticket.resolvedAt === null && { resolvedAt: new Date() }),
+          ...(willSetFirstResponse && { firstResponseAt: new Date() }),
+          ...(willSetResolved && { resolvedAt: new Date() }),
         },
       });
 
@@ -627,6 +653,25 @@ export class TicketService {
         userId,
         metadata: { reason: dto.reason, note: dto.note },
       });
+
+      // Audit timeline para hitos SLA: FIRST_RESPONSE / RESOLVED.
+      // Solo se emiten si el cierre fuerza la marca por primera vez.
+      if (willSetFirstResponse) {
+        await this.events.writeEventTx(tx, {
+          ticketId,
+          type: 'FIRST_RESPONSE',
+          source: 'TICKET',
+          userId,
+        });
+      }
+      if (willSetResolved) {
+        await this.events.writeEventTx(tx, {
+          ticketId,
+          type: 'RESOLVED',
+          source: 'TICKET',
+          userId,
+        });
+      }
 
       // Sync task → DONE (a menos que el ticket se cerró sin resolverse,
       // en cuyo caso preservamos el comportamiento legacy: cancelar la task)
@@ -762,6 +807,28 @@ export class TicketService {
         userId,
         metadata: { taskId, newTaskStatus },
       });
+
+      // Audit timeline para hitos SLA: FIRST_RESPONSE / RESOLVED.
+      // El sync desde kanban tambien puede marcar por primera vez los hitos.
+      // source = KANBAN porque la transicion vino del board.
+      if (data.firstResponseAt) {
+        await this.events.writeEventTx(tx, {
+          ticketId: ticket.id,
+          type: 'FIRST_RESPONSE',
+          source: 'KANBAN',
+          userId,
+          metadata: { taskId },
+        });
+      }
+      if (data.resolvedAt) {
+        await this.events.writeEventTx(tx, {
+          ticketId: ticket.id,
+          type: 'RESOLVED',
+          source: 'KANBAN',
+          userId,
+          metadata: { taskId },
+        });
+      }
       return result;
     });
 
