@@ -59,12 +59,16 @@ export async function generateTicketNumber(
 }
 
 // ─── State machine: transiciones válidas del ticket ────────────────────
+// CLOSED queda como key con array vacio para preservar el enum en lectura
+// (tickets historicos pre-feature #10), pero ningun estado origen permite
+// transicionar a CLOSED — el cierre fue deprecado, los tickets terminan en
+// RESOLVED. Ver docs en spec tickets-eliminar-closed-pulir-listing/design.md.
 const ALLOWED_TRANSITIONS: Record<TicketStatus, TicketStatus[]> = {
-  OPEN:        ['IN_PROGRESS', 'IN_REVIEW', 'RESOLVED', 'CLOSED'],
-  IN_PROGRESS: ['IN_REVIEW', 'RESOLVED', 'OPEN', 'CLOSED'],
-  IN_REVIEW:   ['IN_PROGRESS', 'RESOLVED', 'CLOSED'],
-  RESOLVED:    ['CLOSED', 'IN_PROGRESS'],
-  CLOSED:      ['IN_PROGRESS'],
+  OPEN:        ['IN_PROGRESS'],
+  IN_PROGRESS: ['IN_REVIEW', 'RESOLVED', 'OPEN'],
+  IN_REVIEW:   ['IN_PROGRESS', 'RESOLVED'],
+  RESOLVED:    ['IN_PROGRESS'],
+  CLOSED:      [],
 };
 
 // ─── Mapping: estado del ticket → estado del task en kanban ────────────
@@ -399,17 +403,20 @@ export class TicketService {
     const wantsAssignee = dto.assigneeId !== undefined;
     const wantsNotes = dto.adminNotes !== undefined;
 
-    if (wantsStatus) {
-      this.validateStatusTransition(ticket.status, dto.status as TicketStatus);
-    }
-
-    // Cannot transition to CLOSED via PATCH — must use the dedicated /close endpoint
+    // El estado CLOSED fue deprecado (feature #10). Cualquier intento de
+    // transicionar a CLOSED via PATCH falla con error explicito antes de
+    // validar la state machine (que tambien lo bloquearia, pero con mensaje
+    // generico de transicion invalida).
     if (wantsStatus && dto.status === 'CLOSED') {
       throw new AppException(
-        'Para cerrar un ticket usa el endpoint POST /tickets/:id/close con motivo',
-        'CLOSE_ENDPOINT_REQUIRED',
-        400,
+        'El estado CLOSED fue deprecado. Los tickets terminan en RESOLVED.',
+        'TICKET_CLOSE_DEPRECATED',
+        410,
       );
+    }
+
+    if (wantsStatus) {
+      this.validateStatusTransition(ticket.status, dto.status as TicketStatus);
     }
 
     const previousAssigneeId = ticket.task?.assignments[0]?.userId ?? null;
