@@ -2,6 +2,7 @@ import {
   IsArray,
   IsDateString,
   IsEnum,
+  IsIn,
   IsInt,
   IsNumber,
   IsOptional,
@@ -13,6 +14,21 @@ import { Type } from 'class-transformer';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { TicketCategory, TicketCriticality } from '@prisma/client';
 import { TicketStatusDto } from './update-ticket.dto';
+
+/**
+ * Campos por los que se puede ordenar el listing.
+ * - createdAt: default historico (fecha de creacion DESC).
+ * - resolvedAt: usado en tab Resueltos para los mas recientes primero.
+ * - priority: orden lexicografico del enum (HIGH antes que MEDIUM antes que LOW).
+ * - overshoot: cuanto se paso del SLA — proxy con resolutionDeadline DESC + resolvedAt
+ *   en el helper buildOrderBy del service.
+ */
+export enum TicketSortBy {
+  CREATED_AT = 'createdAt',
+  RESOLVED_AT = 'resolvedAt',
+  PRIORITY = 'priority',
+  OVERSHOOT = 'overshoot',
+}
 
 /**
  * Resultado SLA del ticket — usado para filtrar el listing en la vista
@@ -117,4 +133,20 @@ export class ListTicketsQueryDto {
   @IsArray()
   @IsEnum(TicketCategory, { each: true, message: 'category contiene un valor invalido' })
   category?: TicketCategory[];
+
+  @ApiPropertyOptional({
+    enum: TicketSortBy,
+    description: 'Campo por el cual ordenar (default createdAt en DESC)',
+  })
+  @IsOptional()
+  @IsEnum(TicketSortBy, { message: 'sortBy invalido' })
+  sortBy?: TicketSortBy;
+
+  @ApiPropertyOptional({
+    enum: ['asc', 'desc'],
+    description: 'Orden ascendente o descendente (default desc)',
+  })
+  @IsOptional()
+  @IsIn(['asc', 'desc'], { message: 'sortOrder debe ser asc o desc' })
+  sortOrder?: 'asc' | 'desc';
 }

@@ -352,6 +352,33 @@ export class TicketService {
    * Devuelve solo los tickets con overshoot >= threshold. Tickets sin deadline o
    * sin resolvedAt se descartan (no se pueden medir).
    */
+  /**
+   * Helper para armar el orderBy del listing y export CSV segun los params
+   * sortBy / sortOrder del DTO. Mantiene default historico (createdAt DESC + id DESC)
+   * cuando no se especifica. Para resolvedAt usa nulls last asi tickets sin
+   * resolver no bloquean el orden cuando se mezclan estados.
+   */
+  private buildOrderBy(
+    sortBy: 'createdAt' | 'resolvedAt' | 'priority' | 'overshoot' | undefined,
+    sortOrder: 'asc' | 'desc' | undefined,
+  ): Prisma.TicketOrderByWithRelationInput[] {
+    const direction: 'asc' | 'desc' = sortOrder ?? 'desc';
+    if (!sortBy || sortBy === 'createdAt') {
+      return [{ createdAt: direction }, { id: 'desc' }];
+    }
+    if (sortBy === 'resolvedAt') {
+      // nulls last asi RESOLVED-with-date aparece primero. Tickets sin resolvedAt
+      // (otros tabs) quedan al final.
+      return [{ resolvedAt: { sort: direction, nulls: 'last' } }, { id: 'desc' }];
+    }
+    if (sortBy === 'priority') {
+      return [{ priority: direction }, { createdAt: 'desc' }, { id: 'desc' }];
+    }
+    // overshoot: proxy con resolutionDeadline + resolvedAt. El filtro filterByOvershoot
+    // en memoria se encarga del calculo exacto; aqui ordenamos por deadline como aproximacion.
+    return [{ resolutionDeadline: { sort: direction, nulls: 'last' } }, { id: 'desc' }];
+  }
+
   private filterByOvershoot<T extends { resolvedAt: Date | null; resolutionDeadline: Date | null }>(
     tickets: T[],
     overshootMinGte: number | undefined,
@@ -392,7 +419,7 @@ export class TicketService {
         client: { select: { name: true } },
         project: { select: { name: true } },
       },
-      orderBy: [{ resolvedAt: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
+      orderBy: this.buildOrderBy(query.sortBy ?? 'resolvedAt', query.sortOrder),
     });
 
     const filtered = this.filterByOvershoot(rows, query.overshootMinGte);
@@ -482,7 +509,7 @@ export class TicketService {
         categoryConfig: { select: { id: true, name: true, criticality: true } },
         createdByUser: { select: { id: true, name: true } },
       },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      orderBy: this.buildOrderBy(query.sortBy, query.sortOrder),
     });
 
     const filtered = this.filterByOvershoot(items, query.overshootMinGte);
