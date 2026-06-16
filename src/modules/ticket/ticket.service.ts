@@ -19,6 +19,7 @@ import { domainEvent } from '../../common/events/domain-event.helper';
 import { calculateBusinessDeadline, parseBusinessDays } from './sla.util';
 import { TicketEventsService } from './ticket-events.service';
 import { AppConfigService } from '../../config/app.config';
+import { OutboxService } from '../sync/outbox.service';
 
 /**
  * Generates a sequential ticket number per org: YYYYMMDD-NNN
@@ -112,6 +113,7 @@ export class TicketService {
     private readonly eventEmitter: EventEmitter2,
     private readonly events: TicketEventsService,
     private readonly config: AppConfigService,
+    private readonly outbox: OutboxService,
   ) {}
 
   // ────────────────────────────────────────────────────────────
@@ -738,6 +740,13 @@ export class TicketService {
           userId,
         });
 
+        // Outbox sync Onnix (feature #13): cambio de estado en la MISMA tx (R10).
+        await this.outbox.enqueueTx(tx, {
+          eventType: 'STATUS_CHANGED',
+          aggregateId: ticketId,
+          payload: { ticketId },
+        });
+
         // 3.b) Audit timeline para hitos SLA: FIRST_RESPONSE / RESOLVED.
         // Solo se emiten cuando este mismo update setea por primera vez la
         // fecha (data.firstResponseAt / data.resolvedAt) — NO sustituyen al
@@ -1231,6 +1240,17 @@ export class TicketService {
         source: 'TICKET',
         userId: createdByUserId,
         metadata: { event: 'created' },
+      });
+
+      // Outbox sync Onnix (feature #13): encolar en la MISMA tx (R1, R8).
+      await this.outbox.enqueueTx(tx, {
+        eventType: 'TICKET_CREATED',
+        aggregateId: created.id,
+        payload: {
+          ticketId: created.id,
+          clientId: dto.clientId,
+          projectId: dto.projectId,
+        },
       });
 
       return created;

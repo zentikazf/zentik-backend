@@ -8,9 +8,10 @@ import { TicketEventsService } from './ticket-events.service';
 import { TicketSyncListener } from './ticket-sync.listener';
 import { TicketsGateway } from './tickets.gateway';
 import { SlaCronService } from './sla-cron.service';
+import { OutboxModule } from '../sync/outbox.module';
 
 @Module({
-  imports: [PrismaModule, ScheduleModule.forRoot(), AppConfigModule],
+  imports: [PrismaModule, ScheduleModule.forRoot(), AppConfigModule, OutboxModule],
   controllers: [TicketController],
   providers: [
     TicketService,
