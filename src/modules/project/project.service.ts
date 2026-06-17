@@ -188,6 +188,10 @@ export class ProjectService {
       where.lifecycleStatus = filters.lifecycleStatus;
     }
 
+    if (filters.clientId) {
+      where.clientId = filters.clientId;
+    }
+
     if (filters.search) {
       where.OR = [
         { name: { contains: filters.search, mode: 'insensitive' } },

@@ -31,6 +31,14 @@ export class ProjectFilterDto {
   search?: string;
 
   @ApiPropertyOptional({
+    example: 'clnt_abc123',
+    description: 'Filtrar proyectos por cliente',
+  })
+  @IsOptional()
+  @IsString()
+  clientId?: string;
+
+  @ApiPropertyOptional({
     example: 1,
     description: 'Numero de pagina',
     default: 1,
