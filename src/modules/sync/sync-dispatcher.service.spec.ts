@@ -42,6 +42,10 @@ describe('SyncDispatcherService', () => {
     config.onnixSyncBatchSize = 50;
     config.onnixSyncMaxAttempts = 3;
     config.onnixDlqMaxAgeMin = 1440;
+    // Default: simulacro APAGADO. mockDeep auto-stub-earia el getter a una funcion
+    // (truthy); lo fijamos explicito para que el camino normal (POST real) corra en
+    // todos los tests salvo los de dry-run.
+    config.onnixSyncDryRun = false;
 
     service = new SyncDispatcherService(prisma, config, outbox, onnix, mapping);
     // Neutraliza los backoffs reales (retryWithJitter -> sleep) para tests rapidos.
@@ -260,6 +264,62 @@ describe('SyncDispatcherService', () => {
 
       expect(res).toEqual({ synced: 0, failed: 1 });
       expect(outbox.markFailed).toHaveBeenCalledWith('row_st4', expect.stringContaining('422'), true);
+    });
+  });
+
+  describe('DRY_RUN — modo simulacro (ONNIX_SYNC_DRY_RUN=true)', () => {
+    beforeEach(() => {
+      config.onnixSyncDryRun = true;
+    });
+
+    it('TICKET_CREATED: corre el pipeline pero NO llama createTicket (0) ni deja external_id real', async () => {
+      const row = makeRow('row_dry1', 'TICKET_CREATED', { external_id: null });
+      outbox.claim.mockResolvedValueOnce([row]);
+      prisma.ticket.findUnique.mockResolvedValueOnce(makeTicket());
+      mapping.resolveClientId.mockResolvedValueOnce(555);
+      mapping.resolveProjectId.mockResolvedValueOnce(777);
+      mapping.resolveCatalogIds.mockResolvedValueOnce({
+        ticketTypeId: 10,
+        ticketCategoryId: 20,
+        ticketPriorityId: 30,
+      });
+
+      const res = await service.processPending();
+
+      // El pipeline corrio (gate org -> mapeo) pero NO se hizo el POST a Onnix.
+      expect(mapping.resolveClientId).toHaveBeenCalledWith('org-test', 'client_1');
+      expect(onnix.createTicket).not.toHaveBeenCalled();
+      // NO cuenta como synced ni como failed real; cuenta como dryRun.
+      expect(res).toEqual({ synced: 0, failed: 0, dryRun: 1 });
+      // La fila NO queda con external_id real: markSynced (que persistiria el code)
+      // NO se llama; se marca terminal-no-loop con texto DRY_RUN.
+      expect(outbox.markSynced).not.toHaveBeenCalled();
+      expect(prisma.ticket.update).not.toHaveBeenCalled();
+      expect(outbox.markFailed).toHaveBeenCalledWith(
+        'row_dry1',
+        expect.stringContaining('DRY_RUN'),
+        true,
+      );
+    });
+
+    it('STATUS_CHANGED: resuelve slug pero NO llama setEstado, marca DRY_RUN terminal', async () => {
+      outbox.claim.mockResolvedValueOnce([makeRow('row_dry2', 'STATUS_CHANGED')]);
+      outbox.getCreatedExternalId.mockResolvedValueOnce('TK-2026-000123');
+      prisma.ticket.findUnique.mockResolvedValueOnce({ status: TicketStatus.RESOLVED } as never);
+      mapping.resolveStatusSlug.mockResolvedValueOnce('resuelto');
+
+      const res = await service.processPending();
+
+      // Resolvio el slug (pipeline completo) pero NO hizo el POST de estado.
+      expect(mapping.resolveStatusSlug).toHaveBeenCalledWith(TicketStatus.RESOLVED, expect.any(String));
+      expect(onnix.setEstado).not.toHaveBeenCalled();
+      expect(res).toEqual({ synced: 0, failed: 0, dryRun: 1 });
+      expect(outbox.markSynced).not.toHaveBeenCalled();
+      expect(outbox.markFailed).toHaveBeenCalledWith(
+        'row_dry2',
+        expect.stringContaining('DRY_RUN'),
+        true,
+      );
     });
   });
 });

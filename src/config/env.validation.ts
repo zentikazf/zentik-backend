@@ -71,6 +71,13 @@ export const envSchema = z.object({
   ONNIX_BASE_URL: z.string().url().optional(),
   ONNIX_EMAIL: z.string().optional(),
   ONNIX_PASSWORD: z.string().optional(),
+  // Modo simulacro (opt-in, default false). Con `true` el drenador corre TODO el
+  // pipeline (gate org, claim, mapeo, ordering, build del body) pero NO hace el
+  // POST real a Onnix: loggea el body resuelto (solo ids de mapeo + slug + traceId)
+  // y marca la fila terminal-no-loop. Permite validar el pipeline en produccion sin
+  // escribir en Onnix (que no tiene endpoint de borrado). Ortogonal a ENABLED:
+  // requiere ENABLED=true para que el pipeline corra.
+  ONNIX_SYNC_DRY_RUN: z.string().optional(),
   // Scoping multi-tenant: CSV de org cuids habilitadas para sync Onnix. Opcional;
   // si esta vacia/ausente, el outbox no captura tickets de ninguna organizacion.
   ONNIX_SYNC_ORG_IDS: z.string().optional(),

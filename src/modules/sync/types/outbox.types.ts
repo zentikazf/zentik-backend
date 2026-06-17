@@ -62,4 +62,11 @@ export interface OutboxRow {
 export interface DrainResult {
   synced: number;
   failed: number;
+  /**
+   * Filas procesadas en modo simulacro (ONNIX_SYNC_DRY_RUN=true): se resolvio el
+   * mapeo y se construyo el body pero NO se hizo el POST a Onnix. NO cuentan como
+   * synced (no hay external_id real) ni como failed real (no es un defecto). Solo
+   * presente cuando hubo al menos una fila en dry-run.
+   */
+  dryRun?: number;
 }

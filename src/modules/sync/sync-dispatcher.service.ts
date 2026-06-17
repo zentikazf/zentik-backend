@@ -12,8 +12,13 @@ import { DrainResult, OutboxRow } from './types/outbox.types';
 import { OnnixCreateTicketBody } from './types/onnix.types';
 
 const SHUTDOWN_TIMEOUT_MS = 10_000;
-/** Resultado del procesamiento de una fila. `skipped` = ordering gate, no cuenta. */
-type RowOutcome = 'synced' | 'failed' | 'skipped';
+/**
+ * Resultado del procesamiento de una fila.
+ * - `skipped` = ordering gate, no cuenta.
+ * - `dry_run` = simulacro (ONNIX_SYNC_DRY_RUN): pipeline completo SIN POST a Onnix;
+ *   no cuenta como synced (no hay external_id real) ni como failed real.
+ */
+type RowOutcome = 'synced' | 'failed' | 'skipped' | 'dry_run';
 
 /**
  * Drenador del outbox → Onnix (feature #13, D2/D5/D7/D10).
@@ -73,6 +78,7 @@ export class SyncDispatcherService implements OnModuleDestroy {
     if (!this.config.onnixSyncEnabled) return { synced: 0, failed: 0 };
     const traceId = randomUUID();
     const result: DrainResult = { synced: 0, failed: 0 };
+    let dryRun = 0;
     this.running = true;
     try {
       const rows = await this.outbox.claim(this.config.onnixSyncBatchSize);
@@ -85,13 +91,16 @@ export class SyncDispatcherService implements OnModuleDestroy {
         }
         if (outcome === 'synced') result.synced++;
         else if (outcome === 'failed') result.failed++;
+        else if (outcome === 'dry_run') dryRun++;
       }
       await this.checkDlqAge();
     } finally {
       this.running = false;
     }
+    if (dryRun > 0) result.dryRun = dryRun;
     this.logger.log(
-      `onnix-sync drain done traceId=${traceId} synced=${result.synced} failed=${result.failed}`,
+      `onnix-sync drain done traceId=${traceId} synced=${result.synced} failed=${result.failed}` +
+        (dryRun > 0 ? ` dryRun=${dryRun}` : ''),
     );
     return result;
   }
@@ -154,6 +163,27 @@ export class SyncDispatcherService implements OnModuleDestroy {
       origin: 'api',
     };
 
+    // Modo simulacro (R27/R43): pipeline completo resuelto, NO se hace el POST a
+    // Onnix. Se loggea SOLO el body de mapeo (sin subject/description para no
+    // exponer datos de cliente) y la fila se marca terminal-no-loop con texto
+    // DRY_RUN — NO queda con un external_id falso, claramente NO sincronizada.
+    if (this.config.onnixSyncDryRun) {
+      this.logger.warn(
+        `onnix-sync DRY_RUN (simulacro, NO enviado a Onnix) eventType=${row.event_type} ` +
+          `ticketId=${row.aggregate_id} aggregate_id=${row.aggregate_id} ` +
+          `client_id=${body.client_id} project_id=${body.project_id ?? 'null'} ` +
+          `ticket_type_id=${body.ticket_type_id} ticket_category_id=${body.ticket_category_id} ` +
+          `ticket_priority_id=${body.ticket_priority_id} origin=${body.origin ?? 'api'} ` +
+          `traceId=${traceId}`,
+      );
+      await this.outbox.markFailed(
+        row.id,
+        'DRY_RUN: simulacro, no enviado a Onnix',
+        true,
+      );
+      return 'dry_run';
+    }
+
     try {
       const outcome = await this.retryWithJitter(() =>
         this.onnix.createTicket(body, traceId),
@@ -200,6 +230,22 @@ export class SyncDispatcherService implements OnModuleDestroy {
     }
     // Estado ACTUAL (R22), no snapshot: si hubo N transiciones se envía el final.
     const slug = await this.mapping.resolveStatusSlug(ticket.status, traceId);
+
+    // Modo simulacro (R27/R43): se resolvio el slug y el code, NO se hace el POST a
+    // Onnix. Se loggea slug + code + ticketId + traceId (sin datos sensibles) y la
+    // fila se marca terminal-no-loop con texto DRY_RUN.
+    if (this.config.onnixSyncDryRun) {
+      this.logger.warn(
+        `onnix-sync DRY_RUN (simulacro, NO enviado a Onnix) eventType=${row.event_type} ` +
+          `ticketId=${row.aggregate_id} code=${code} status_slug=${slug} traceId=${traceId}`,
+      );
+      await this.outbox.markFailed(
+        row.id,
+        'DRY_RUN: simulacro, no enviado a Onnix',
+        true,
+      );
+      return 'dry_run';
+    }
 
     try {
       const outcome = await this.retryWithJitter(() =>
