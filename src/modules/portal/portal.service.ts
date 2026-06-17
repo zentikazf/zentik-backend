@@ -501,6 +501,11 @@ export class PortalService {
       });
 
       // Outbox sync Onnix (feature #13): encolar en la MISMA tx (R1, R9).
+      // Sin gate por categoría: el portal SIEMPRE crea tickets SUPPORT_REQUEST
+      // (ver `category: 'SUPPORT_REQUEST'` arriba en el create), que es justo el
+      // scope de la integración Onnix → todos los tickets del portal se encolan.
+      // El gate por categoría solo aplica al admin (ticket.service.createTicket),
+      // que sí puede crear otras categorías.
       await this.outbox.enqueueTx(tx, {
         eventType: 'TICKET_CREATED',
         aggregateId: created.id,
