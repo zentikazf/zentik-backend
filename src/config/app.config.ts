@@ -93,6 +93,13 @@ export class AppConfigService {
       .map((s) => s.trim())
       .filter(Boolean);
   }
+  // Modo simulacro (opt-in, default false). process.env siempre es string;
+  // comparamos contra 'true'. Con `true` y ENABLED on, el drenador corre todo el
+  // pipeline pero NO hace el POST real a Onnix (loggea el body resuelto). Ortogonal
+  // a onnixSyncEnabled: requiere ENABLED=true para que el pipeline corra.
+  get onnixSyncDryRun(): boolean {
+    return this.configService.get<string>('ONNIX_SYNC_DRY_RUN') === 'true';
+  }
   // Secretos / base url: OPTIONAL en el boot. Se validan en runtime (al primer
   // uso) solo si el flag esta on. NUNCA loggeados.
   get onnixBaseUrl(): string | undefined { return this.configService.get<string>('ONNIX_BASE_URL'); }
