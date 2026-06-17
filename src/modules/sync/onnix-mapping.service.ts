@@ -46,21 +46,32 @@ export class OnnixMappingService {
   ) {}
 
   /** client_id de Onnix; null si el cliente no está mapeado (→ fila failed, R16). */
-  async resolveClientId(zentikClientId: string): Promise<number | null> {
-    return this.lookup('client', zentikClientId);
+  async resolveClientId(
+    organizationId: string,
+    zentikClientId: string,
+  ): Promise<number | null> {
+    return this.lookup(organizationId, 'client', zentikClientId);
   }
 
   /** project_id de Onnix; null si no hay mapeo (best-effort, R18). */
   async resolveProjectId(
+    organizationId: string,
     zentikProjectId: string | null | undefined,
   ): Promise<number | null> {
     if (!zentikProjectId) return null;
-    return this.lookup('project', zentikProjectId);
+    return this.lookup(organizationId, 'project', zentikProjectId);
   }
 
-  private async lookup(entityType: string, zentikId: string): Promise<number | null> {
+  private async lookup(
+    organizationId: string,
+    entityType: string,
+    zentikId: string,
+  ): Promise<number | null> {
+    // Scoping multi-tenant: el mapeo se filtra por organizacion (clave compuesta).
     const row = await this.prisma.onnixEntityMapping.findUnique({
-      where: { entityType_zentikId: { entityType, zentikId } },
+      where: {
+        organizationId_entityType_zentikId: { organizationId, entityType, zentikId },
+      },
       select: { onnixId: true },
     });
     return row?.onnixId ?? null;
@@ -84,6 +95,7 @@ export class OnnixMappingService {
    * se puede crear el ticket → fallo terminal vía 422 si se intentara).
    */
   async resolveCatalogIds(
+    organizationId: string,
     category: string,
     priority: string,
     traceId: string,
@@ -94,18 +106,19 @@ export class OnnixMappingService {
   }> {
     const c = await this.getCatalogos(traceId);
     return {
-      ticketTypeId: await this.resolveCatalogId('ticket_type', category, c.tipos),
-      ticketCategoryId: await this.resolveCatalogId('ticket_category', category, c.categorias),
-      ticketPriorityId: await this.resolveCatalogId('ticket_priority', priority, c.prioridades),
+      ticketTypeId: await this.resolveCatalogId(organizationId, 'ticket_type', category, c.tipos),
+      ticketCategoryId: await this.resolveCatalogId(organizationId, 'ticket_category', category, c.categorias),
+      ticketPriorityId: await this.resolveCatalogId(organizationId, 'ticket_priority', priority, c.prioridades),
     };
   }
 
   private async resolveCatalogId(
+    organizationId: string,
     entityType: string,
     zentikValue: string,
     catalog: { id: number }[],
   ): Promise<number> {
-    const mapped = await this.lookup(entityType, zentikValue);
+    const mapped = await this.lookup(organizationId, entityType, zentikValue);
     if (mapped !== null) return mapped;
     if (catalog.length === 0) {
       throw new Error(`Catálogo Onnix '${entityType}' vacío; no se puede resolver id`);

@@ -744,6 +744,7 @@ export class TicketService {
         await this.outbox.enqueueTx(tx, {
           eventType: 'STATUS_CHANGED',
           aggregateId: ticketId,
+          organizationId: ticket.organizationId,
           payload: { ticketId },
         });
 
@@ -1246,6 +1247,7 @@ export class TicketService {
       await this.outbox.enqueueTx(tx, {
         eventType: 'TICKET_CREATED',
         aggregateId: created.id,
+        organizationId: orgId,
         payload: {
           ticketId: created.id,
           clientId: dto.clientId,

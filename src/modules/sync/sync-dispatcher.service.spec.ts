@@ -82,6 +82,15 @@ describe('SyncDispatcherService', () => {
 
       expect(res).toEqual({ synced: 1, failed: 0 });
       expect(onnix.createTicket).toHaveBeenCalledTimes(1);
+      // El mapeo se resuelve scoped por la org del ticket (multi-tenant).
+      expect(mapping.resolveClientId).toHaveBeenCalledWith('org-test', 'client_1');
+      expect(mapping.resolveProjectId).toHaveBeenCalledWith('org-test', 'project_1');
+      expect(mapping.resolveCatalogIds).toHaveBeenCalledWith(
+        'org-test',
+        'SUPPORT_REQUEST',
+        'MEDIUM',
+        expect.any(String),
+      );
       expect(outbox.markSynced).toHaveBeenCalledWith('row_1', 'TK-2026-000123');
       // Persiste el code en el ticket (best-effort).
       expect(prisma.ticket.update).toHaveBeenCalledWith({
@@ -284,6 +293,7 @@ function makeRow(
 function makeTicket(): never {
   return {
     id: 'ticket_1',
+    organizationId: 'org-test',
     clientId: 'client_1',
     projectId: 'project_1',
     title: 'Ticket de prueba',

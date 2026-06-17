@@ -35,6 +35,15 @@ export class OutboxService {
     tx: Prisma.TransactionClient,
     input: EnqueueInput,
   ): Promise<void> {
+    // GATE de scoping multi-tenant: solo se capturan tickets de las orgs
+    // habilitadas (ONNIX_SYNC_ORG_IDS) y con la feature on. No-op silencioso
+    // para orgs no habilitadas o feature off — el outbox no captura nada de ellas.
+    if (
+      !this.config.onnixSyncEnabled ||
+      !this.config.onnixSyncOrgIds.includes(input.organizationId)
+    ) {
+      return;
+    }
     await tx.outboxEvent.create({
       data: {
         eventType: input.eventType,

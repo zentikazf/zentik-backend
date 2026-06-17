@@ -23,11 +23,13 @@ describe('SyncReconciliationService', () => {
   });
 
   describe('R39 — re-encolar failed re-evaluable', () => {
-    it('re-encola la fila failed cuyo cliente HOY ya tiene mapeo', async () => {
+    it('re-encola la fila failed cuyo cliente HOY ya tiene mapeo (scoped por org)', async () => {
       prisma.outboxEvent.findMany.mockResolvedValueOnce([
-        { id: 'row_failed_1', payload: { clientId: 'client_ahora_mapeado' } },
+        { id: 'row_failed_1', aggregateId: 'ticket_1', payload: { clientId: 'client_ahora_mapeado' } },
       ] as never);
-      // El cliente ahora SI tiene fila en onnix_entity_mappings.
+      // La org del ticket se resuelve por aggregateId (el payload no la persiste).
+      prisma.ticket.findUnique.mockResolvedValueOnce({ organizationId: 'org-test' } as never);
+      // El cliente ahora SI tiene fila en onnix_entity_mappings para esa org.
       prisma.onnixEntityMapping.findUnique.mockResolvedValueOnce({ id: 'map_1' } as never);
       // Sin tickets faltantes.
       prisma.$queryRaw.mockResolvedValueOnce([{ count: 0n }]);
@@ -35,14 +37,24 @@ describe('SyncReconciliationService', () => {
 
       const res = await service.reconcileV1();
 
+      // El lookup del mapeo usa la clave compuesta org+entityType+zentikId.
+      const arg = prisma.onnixEntityMapping.findUnique.mock.calls[0][0];
+      expect(arg.where).toEqual({
+        organizationId_entityType_zentikId: {
+          organizationId: 'org-test',
+          entityType: 'client',
+          zentikId: 'client_ahora_mapeado',
+        },
+      });
       expect(outbox.requeueFailed).toHaveBeenCalledWith(['row_failed_1']);
       expect(res.requeued).toBe(1);
     });
 
-    it('NO re-encola si el cliente sigue sin mapeo', async () => {
+    it('NO re-encola si el cliente sigue sin mapeo en esa org', async () => {
       prisma.outboxEvent.findMany.mockResolvedValueOnce([
-        { id: 'row_failed_2', payload: { clientId: 'client_sin_mapeo' } },
+        { id: 'row_failed_2', aggregateId: 'ticket_2', payload: { clientId: 'client_sin_mapeo' } },
       ] as never);
+      prisma.ticket.findUnique.mockResolvedValueOnce({ organizationId: 'org-test' } as never);
       prisma.onnixEntityMapping.findUnique.mockResolvedValueOnce(null); // sigue sin mapeo
       prisma.$queryRaw.mockResolvedValueOnce([{ count: 0n }]);
       outbox.requeueFailed.mockResolvedValueOnce(0);

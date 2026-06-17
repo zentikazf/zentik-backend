@@ -119,7 +119,10 @@ export class SyncDispatcherService implements OnModuleDestroy {
       return 'failed';
     }
 
-    const clientId = await this.mapping.resolveClientId(ticket.clientId);
+    const clientId = await this.mapping.resolveClientId(
+      ticket.organizationId,
+      ticket.clientId,
+    );
     if (clientId === null) {
       this.log(row, traceId, 'failed', `cliente no mapeado: ${ticket.clientId}`);
       await this.outbox.markFailed(
@@ -129,8 +132,12 @@ export class SyncDispatcherService implements OnModuleDestroy {
       );
       return 'failed';
     }
-    const projectId = await this.mapping.resolveProjectId(ticket.projectId);
+    const projectId = await this.mapping.resolveProjectId(
+      ticket.organizationId,
+      ticket.projectId,
+    );
     const catalogIds = await this.mapping.resolveCatalogIds(
+      ticket.organizationId,
       ticket.category,
       ticket.priority,
       traceId,

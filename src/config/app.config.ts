@@ -84,6 +84,15 @@ export class AppConfigService {
   get onnixSyncEnabled(): boolean {
     return this.configService.get<string>('ONNIX_SYNC_ENABLED') === 'true';
   }
+  // Whitelist de organizaciones habilitadas para sync Onnix (scoping multi-tenant).
+  // CSV de org cuids; vacio = ninguna org sincroniza (el gate de enqueueTx hace
+  // no-op). process.env siempre es string; split + trim + filter de vacios.
+  get onnixSyncOrgIds(): string[] {
+    return (this.configService.get<string>('ONNIX_SYNC_ORG_IDS') ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
   // Secretos / base url: OPTIONAL en el boot. Se validan en runtime (al primer
   // uso) solo si el flag esta on. NUNCA loggeados.
   get onnixBaseUrl(): string | undefined { return this.configService.get<string>('ONNIX_BASE_URL'); }

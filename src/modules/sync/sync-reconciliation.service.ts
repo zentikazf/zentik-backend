@@ -38,14 +38,27 @@ export class SyncReconciliationService {
   private async requeueReevaluableFailed(): Promise<number> {
     const failed = await this.prisma.outboxEvent.findMany({
       where: { status: 'failed', eventType: 'TICKET_CREATED' },
-      select: { id: true, payload: true },
+      select: { id: true, aggregateId: true, payload: true },
     });
     const ids: string[] = [];
     for (const row of failed) {
       const clientId = (row.payload as { clientId?: string } | null)?.clientId;
       if (!clientId) continue;
+      // El payload no persiste organizationId; el mapeo es scoped por org
+      // (clave compuesta), asi que resolvemos la org del ticket por aggregateId.
+      const ticket = await this.prisma.ticket.findUnique({
+        where: { id: row.aggregateId },
+        select: { organizationId: true },
+      });
+      if (!ticket) continue;
       const mapping = await this.prisma.onnixEntityMapping.findUnique({
-        where: { entityType_zentikId: { entityType: 'client', zentikId: clientId } },
+        where: {
+          organizationId_entityType_zentikId: {
+            organizationId: ticket.organizationId,
+            entityType: 'client',
+            zentikId: clientId,
+          },
+        },
         select: { id: true },
       });
       if (mapping) ids.push(row.id);

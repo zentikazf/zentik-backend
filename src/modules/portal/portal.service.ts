@@ -504,6 +504,7 @@ export class PortalService {
       await this.outbox.enqueueTx(tx, {
         eventType: 'TICKET_CREATED',
         aggregateId: created.id,
+        organizationId: project.organizationId,
         payload: { ticketId: created.id, clientId: client.id, projectId },
       });
 

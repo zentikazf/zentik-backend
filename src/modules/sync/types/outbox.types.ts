@@ -26,10 +26,15 @@ export interface OutboxPayload {
 
 /**
  * Input de `enqueueTx`. Molde de `WriteEventInput` de TicketEventsService.
+ *
+ * `organizationId` se usa SOLO para el gate de scoping multi-tenant en `enqueueTx`
+ * (no-op si la org no esta habilitada en `ONNIX_SYNC_ORG_IDS`); no se persiste en
+ * la fila (el mapeo se resuelve al drenar leyendo `ticket.organizationId`).
  */
 export interface EnqueueInput {
   eventType: OutboxEventType;
   aggregateId: string; // ticket.id (cuid)
+  organizationId: string; // scoping multi-tenant (gate de enqueueTx)
   payload: OutboxPayload;
 }
 

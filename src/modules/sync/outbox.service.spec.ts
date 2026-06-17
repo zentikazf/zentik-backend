@@ -26,6 +26,10 @@ describe('OutboxService', () => {
   beforeEach(() => {
     prisma = mockDeep<PrismaService>();
     config = mockDeep<AppConfigService>() as DeepMockProxy<AppConfigService> & WritableConfig;
+    // Scoping multi-tenant: feature on + org de los tests habilitada, para que el
+    // gate de enqueueTx deje pasar las escrituras de las pruebas existentes.
+    config.onnixSyncEnabled = true;
+    config.onnixSyncOrgIds = ['org-test'];
     service = new OutboxService(prisma, config);
   });
 
@@ -36,6 +40,7 @@ describe('OutboxService', () => {
       const input: EnqueueInput = {
         eventType: 'TICKET_CREATED',
         aggregateId: 'ticket_cuid_1',
+        organizationId: 'org-test',
         payload: { ticketId: 'ticket_cuid_1', clientId: 'client_1', projectId: 'project_1' },
       };
 
@@ -65,6 +70,7 @@ describe('OutboxService', () => {
         service.enqueueTx(tx, {
           eventType: 'TICKET_CREATED',
           aggregateId: 'ticket_x',
+          organizationId: 'org-test',
           payload: { ticketId: 'ticket_x', clientId: 'c1' },
         }),
       ).rejects.toThrow('rollback simulado');
@@ -79,10 +85,37 @@ describe('OutboxService', () => {
       await service.enqueueTx(tx, {
         eventType: 'STATUS_CHANGED',
         aggregateId: 'ticket_s1',
+        organizationId: 'org-test',
         payload: { ticketId: 'ticket_s1' },
       });
       const arg = tx.outboxEvent.create.mock.calls[0][0];
       expect(arg.data).toMatchObject({ eventType: 'STATUS_CHANGED', aggregateId: 'ticket_s1' });
+    });
+  });
+
+  describe('enqueueTx — GATE de scoping multi-tenant', () => {
+    it('org NO habilitada -> no-op (no escribe en el outbox)', async () => {
+      const tx = mockDeep<Prisma.TransactionClient>();
+      await service.enqueueTx(tx, {
+        eventType: 'TICKET_CREATED',
+        aggregateId: 'ticket_otra_org',
+        organizationId: 'org-no-habilitada',
+        payload: { ticketId: 'ticket_otra_org', clientId: 'c1' },
+      });
+      // El gate corta antes de tocar el tx: no captura tickets de orgs fuera del whitelist.
+      expect(tx.outboxEvent.create).not.toHaveBeenCalled();
+    });
+
+    it('feature off -> no-op aunque la org este en el whitelist', async () => {
+      config.onnixSyncEnabled = false;
+      const tx = mockDeep<Prisma.TransactionClient>();
+      await service.enqueueTx(tx, {
+        eventType: 'TICKET_CREATED',
+        aggregateId: 'ticket_flag_off',
+        organizationId: 'org-test',
+        payload: { ticketId: 'ticket_flag_off', clientId: 'c1' },
+      });
+      expect(tx.outboxEvent.create).not.toHaveBeenCalled();
     });
   });
 

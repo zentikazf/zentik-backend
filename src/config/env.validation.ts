@@ -71,6 +71,9 @@ export const envSchema = z.object({
   ONNIX_BASE_URL: z.string().url().optional(),
   ONNIX_EMAIL: z.string().optional(),
   ONNIX_PASSWORD: z.string().optional(),
+  // Scoping multi-tenant: CSV de org cuids habilitadas para sync Onnix. Opcional;
+  // si esta vacia/ausente, el outbox no captura tickets de ninguna organizacion.
+  ONNIX_SYNC_ORG_IDS: z.string().optional(),
   // Timeout por call HTTP a Onnix (ms) — molde de MCP_HTTP_TIMEOUT_MS.
   ONNIX_HTTP_TIMEOUT_MS: z.coerce.number().default(15000),
   // Expresion del @Cron del drenador. Default: cada hora en punto (R34).

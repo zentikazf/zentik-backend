@@ -1403,12 +1403,14 @@ model OutboxEvent {
 }
 
 model OnnixEntityMapping {
-  id         String   @id @default(cuid())
-  entityType String   @map("entity_type") // 'client' | 'project'
-  zentikId   String   @map("zentik_id") // Client.id / Project.id (cuid)
-  onnixId    Int      @map("onnix_id") // id del catalogo Onnix
-  createdAt  DateTime @default(now()) @map("created_at")
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id") // scoping multi-tenant
+  entityType     String   @map("entity_type") // 'client' | 'project'
+  zentikId       String   @map("zentik_id") // Client.id / Project.id (cuid)
+  onnixId        Int      @map("onnix_id") // id del catalogo Onnix
+  createdAt      DateTime @default(now()) @map("created_at")
 
-  @@unique([entityType, zentikId])
+  @@unique([organizationId, entityType, zentikId])
+  @@index([organizationId])
   @@map("onnix_entity_mappings")
 }
