@@ -40,6 +40,7 @@ import { MeetingModule } from './modules/meeting/meeting.module';
 import { TicketModule } from './modules/ticket/ticket.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { AdminMcpModule } from './modules/admin-mcp/admin-mcp.module';
+import { SyncModule } from './modules/sync/sync.module';
 
 @Module({
   imports: [
@@ -91,6 +92,7 @@ import { AdminMcpModule } from './modules/admin-mcp/admin-mcp.module';
     TicketModule,
     DashboardModule,
     AdminMcpModule,
+    SyncModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

@@ -1154,6 +1154,11 @@ model Ticket {
   closedAt       DateTime?          @map("closed_at")
   closedByUserId String?            @map("closed_by_user_id")
 
+  // Integracion Onnix (feature #13): code externo (TK-...) devuelto por Onnix
+  // al replicar el ticket via outbox. Aditivo, nullable, sin FK. NO se sincroniza
+  // de vuelta — es solo referencia para UI/debug.
+  onnixCode      String?            @map("onnix_code")
+
   createdAt      DateTime           @default(now()) @map("created_at")
   updatedAt      DateTime           @updatedAt @map("updated_at")
 
@@ -1363,4 +1368,49 @@ model FailedEmail {
 
   @@index([createdAt])
   @@map("failed_emails")
+}
+
+// ============================================================================
+// SYNC ONNIX — Transactional Outbox (feature #13)
+// ============================================================================
+// DDL aplicado MANUALMENTE por el dev en Railway (SQL aditivo backwards-compat).
+// El schema se sincroniza con la DB para que el client tipe estos modelos, pero
+// NO se corre `prisma migrate` (regla del proyecto, ver CLAUDE.md).
+//
+// NOTA sobre indices parciales: Prisma 5.x no expresa `WHERE status='pending'`
+// en `@@index`. La fuente de verdad del indice parcial es el SQL manual (T0):
+//   CREATE INDEX idx_outbox_pending ON outbox_events (status, created_at)
+//     WHERE status = 'pending';
+// Aqui declaramos solo los indices que Prisma sabe representar.
+
+model OutboxEvent {
+  id             String    @id @default(cuid())
+  eventType      String    @map("event_type") // TICKET_CREATED | STATUS_CHANGED
+  aggregateId    String    @map("aggregate_id") // ticketId (cuid)
+  payload        Json
+  payloadVersion Int       @default(1) @map("payload_version")
+  status         String    @default("pending") // pending | in_flight | synced | failed
+  attempts       Int       @default(0)
+  lastError      String?   @map("last_error") @db.Text
+  externalId     String?   @map("external_id") // code Onnix (TK-...)
+  lockedAt       DateTime? @map("locked_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  syncedAt       DateTime? @map("synced_at")
+
+  @@index([status, createdAt])
+  @@index([aggregateId, createdAt])
+  @@map("outbox_events")
+}
+
+model OnnixEntityMapping {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id") // scoping multi-tenant
+  entityType     String   @map("entity_type") // 'client' | 'project'
+  zentikId       String   @map("zentik_id") // Client.id / Project.id (cuid)
+  onnixId        Int      @map("onnix_id") // id del catalogo Onnix
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@unique([organizationId, entityType, zentikId])
+  @@index([organizationId])
+  @@map("onnix_entity_mappings")
 }

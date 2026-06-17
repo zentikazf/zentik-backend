@@ -57,6 +57,39 @@ export const envSchema = z.object({
   // Rate limits del endpoint /admin/mcp/chat por usuario.
   ADMIN_MCP_RATE_LIMIT_PER_MINUTE: z.coerce.number().default(30),
   ADMIN_MCP_RATE_LIMIT_PER_DAY: z.coerce.number().default(200),
+
+  // === Sync Onnix (feature #13) ===
+  // Feature flag maestro. Con `false` (default) la app arranca SIN las credenciales
+  // Onnix y todos los caminos de sync hacen early-return (no cron, no @OnEvent, no
+  // drain). Por eso BASE_URL/EMAIL/PASSWORD son `.optional()`: NO pueden romper el
+  // boot en dev/CI sin Onnix. La presencia de secretos se valida en runtime al
+  // primer uso SOLO cuando el flag esta on (ver OnnixClientService).
+  ONNIX_SYNC_ENABLED: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
+  ONNIX_BASE_URL: z.string().url().optional(),
+  ONNIX_EMAIL: z.string().optional(),
+  ONNIX_PASSWORD: z.string().optional(),
+  // Scoping multi-tenant: CSV de org cuids habilitadas para sync Onnix. Opcional;
+  // si esta vacia/ausente, el outbox no captura tickets de ninguna organizacion.
+  ONNIX_SYNC_ORG_IDS: z.string().optional(),
+  // Timeout por call HTTP a Onnix (ms) — molde de MCP_HTTP_TIMEOUT_MS.
+  ONNIX_HTTP_TIMEOUT_MS: z.coerce.number().default(15000),
+  // Expresion del @Cron del drenador. Default: cada hora en punto (R34).
+  // El boton manual cubre lo inmediato. Formato: 6 campos (con segundos).
+  ONNIX_SYNC_CRON: z.string().default('0 0 * * * *'),
+  // Cap de filas drenadas por ciclo (batch size).
+  ONNIX_SYNC_BATCH_SIZE: z.coerce.number().default(50),
+  // Cap de reintentos antes de marcar la fila failed (R32).
+  ONNIX_SYNC_MAX_ATTEMPTS: z.coerce.number().default(3),
+  // Reclamacion de filas in_flight colgadas (ms): un lock mas viejo que esto
+  // vuelve a ser elegible (cubre crash entre claim y markSynced).
+  ONNIX_SYNC_STALE_LOCK_MS: z.coerce.number().default(120000),
+  // TTL del cache de catalogos Onnix (segundos) — R20.
+  ONNIX_CATALOG_CACHE_TTL_SEC: z.coerce.number().default(600),
+  // Umbral de alerta DLQ por edad del mensaje failed mas viejo (minutos) — R44.
+  ONNIX_DLQ_MAX_AGE_MIN: z.coerce.number().default(1440),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;

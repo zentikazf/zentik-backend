@@ -32,5 +32,11 @@
     }
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "test"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "test",
+    "src/**/*.spec.ts",
+    "src/**/*.e2e-spec.ts"
+  ]
 }

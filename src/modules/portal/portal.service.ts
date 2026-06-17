@@ -12,6 +12,7 @@ import { calculateBusinessDeadline, parseBusinessDays } from '../ticket/sla.util
 import { generateTicketNumber } from '../ticket/ticket.service';
 import { FileService } from '../file/file.service';
 import { StorageService } from '../../infrastructure/storage/storage.service';
+import { OutboxService } from '../sync/outbox.service';
 
 @Injectable()
 export class PortalService {
@@ -23,6 +24,7 @@ export class PortalService {
     private readonly auditService: AuditService,
     private readonly fileService: FileService,
     private readonly storage: StorageService,
+    private readonly outbox: OutboxService,
   ) {}
 
   private async getClientByUserId(userId: string) {
@@ -496,6 +498,14 @@ export class PortalService {
           task: { select: { id: true, title: true, status: true } },
           channel: { select: { id: true, name: true } },
         },
+      });
+
+      // Outbox sync Onnix (feature #13): encolar en la MISMA tx (R1, R9).
+      await this.outbox.enqueueTx(tx, {
+        eventType: 'TICKET_CREATED',
+        aggregateId: created.id,
+        organizationId: project.organizationId,
+        payload: { ticketId: created.id, clientId: client.id, projectId },
       });
 
       return created;

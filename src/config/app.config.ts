@@ -76,4 +76,51 @@ export class AppConfigService {
   get adminMcpRateLimitPerDay(): number {
     return Number(this.configService.getOrThrow<number>('ADMIN_MCP_RATE_LIMIT_PER_DAY'));
   }
+
+  // === Sync Onnix (feature #13) ===
+  // Feature flag maestro. process.env siempre es string; comparamos contra 'true'.
+  // Con flag off los secretos Onnix son opcionales y todos los caminos de sync
+  // hacen early-return (no rompe el boot sin credenciales).
+  get onnixSyncEnabled(): boolean {
+    return this.configService.get<string>('ONNIX_SYNC_ENABLED') === 'true';
+  }
+  // Whitelist de organizaciones habilitadas para sync Onnix (scoping multi-tenant).
+  // CSV de org cuids; vacio = ninguna org sincroniza (el gate de enqueueTx hace
+  // no-op). process.env siempre es string; split + trim + filter de vacios.
+  get onnixSyncOrgIds(): string[] {
+    return (this.configService.get<string>('ONNIX_SYNC_ORG_IDS') ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  // Secretos / base url: OPTIONAL en el boot. Se validan en runtime (al primer
+  // uso) solo si el flag esta on. NUNCA loggeados.
+  get onnixBaseUrl(): string | undefined { return this.configService.get<string>('ONNIX_BASE_URL'); }
+  get onnixEmail(): string | undefined { return this.configService.get<string>('ONNIX_EMAIL'); }
+  get onnixPassword(): string | undefined { return this.configService.get<string>('ONNIX_PASSWORD'); }
+  // Tunables con default seguro EN EL GETTER (no getOrThrow): validateEnv() valida
+  // process.env pero NO inyecta los defaults de Zod de vuelta a process.env, asi que
+  // con el flag off (y sin estas vars en .env) la app debe arrancar igual. Number(...)
+  // explicito porque process.env siempre es string. Los defaults espejan env.validation.ts.
+  get onnixHttpTimeoutMs(): number {
+    return Number(this.configService.get<string>('ONNIX_HTTP_TIMEOUT_MS') ?? 15000);
+  }
+  get onnixSyncCron(): string {
+    return this.configService.get<string>('ONNIX_SYNC_CRON') ?? '0 0 * * * *';
+  }
+  get onnixSyncBatchSize(): number {
+    return Number(this.configService.get<string>('ONNIX_SYNC_BATCH_SIZE') ?? 50);
+  }
+  get onnixSyncMaxAttempts(): number {
+    return Number(this.configService.get<string>('ONNIX_SYNC_MAX_ATTEMPTS') ?? 3);
+  }
+  get onnixSyncStaleLockMs(): number {
+    return Number(this.configService.get<string>('ONNIX_SYNC_STALE_LOCK_MS') ?? 120000);
+  }
+  get onnixCatalogCacheTtlSec(): number {
+    return Number(this.configService.get<string>('ONNIX_CATALOG_CACHE_TTL_SEC') ?? 600);
+  }
+  get onnixDlqMaxAgeMin(): number {
+    return Number(this.configService.get<string>('ONNIX_DLQ_MAX_AGE_MIN') ?? 1440);
+  }
 }
