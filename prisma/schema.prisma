@@ -1159,6 +1159,12 @@ model Ticket {
   // de vuelta — es solo referencia para UI/debug.
   onnixCode      String?            @map("onnix_code")
 
+  // Ticket relacionado (feature #11): self-relation nullable para trazabilidad
+  // de follow-ups. Cuando un ticket queda RESOLVED (terminal) el cliente crea una
+  // "nueva consulta" enlazada al anterior via relatedTicketId. ON DELETE SET NULL
+  // para que borrar el ticket padre no rompa el follow-up. SQL aditivo (NO migrate).
+  relatedTicketId String?           @map("related_ticket_id")
+
   createdAt      DateTime           @default(now()) @map("created_at")
   updatedAt      DateTime           @updatedAt @map("updated_at")
 
@@ -1170,6 +1176,8 @@ model Ticket {
   categoryConfig TicketCategoryConfig? @relation(fields: [categoryConfigId], references: [id], onDelete: SetNull)
   createdByUser  User?                 @relation("TicketCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
   closedByUser   User?                 @relation("TicketCloser", fields: [closedByUserId], references: [id], onDelete: SetNull)
+  relatedTicket  Ticket?               @relation("TicketFollowUp", fields: [relatedTicketId], references: [id], onDelete: SetNull)
+  followUps      Ticket[]              @relation("TicketFollowUp")
   events         TicketEvent[]
 
   @@index([organizationId])
@@ -1181,6 +1189,7 @@ model Ticket {
   @@index([slaResolutionBreached])
   @@index([organizationId, status, createdAt(sort: Desc)])
   @@index([closedAt])
+  @@index([relatedTicketId])
   @@unique([organizationId, ticketNumber])
   @@map("tickets")
 }

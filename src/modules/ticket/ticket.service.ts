@@ -1170,6 +1170,19 @@ export class TicketService {
     }
 
     const ticket = await this.prisma.$transaction(async (tx) => {
+      // Ticket relacionado (feature #11): si viene relatedTicketId, validar que
+      // exista y pertenezca al MISMO cliente; si no, 400. Dentro de la tx para
+      // consistencia con la creación.
+      if (dto.relatedTicketId) {
+        const related = await tx.ticket.findFirst({
+          where: { id: dto.relatedTicketId, clientId: dto.clientId },
+          select: { id: true },
+        });
+        if (!related) {
+          throw new AppException('Ticket relacionado inválido', 'INVALID_RELATED_TICKET', 400);
+        }
+      }
+
       const maxPosition = await tx.task.aggregate({
         where: { projectId: dto.projectId },
         _max: { position: true },
@@ -1229,6 +1242,7 @@ export class TicketService {
           ...(criticality && { criticality: criticality as any }),
           ...(responseDeadline && { responseDeadline }),
           ...(resolutionDeadline && { resolutionDeadline }),
+          ...(dto.relatedTicketId && { relatedTicketId: dto.relatedTicketId }),
         },
         include: {
           project: { select: { id: true, name: true } },

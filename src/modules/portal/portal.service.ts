@@ -429,6 +429,19 @@ export class PortalService {
     }
 
     const ticket = await this.prisma.$transaction(async (tx) => {
+      // Ticket relacionado (feature #11): si viene relatedTicketId, validar que
+      // exista y pertenezca al MISMO cliente del user; si no, 400. Dentro de la tx
+      // para consistencia con la creación.
+      if (dto.relatedTicketId) {
+        const related = await tx.ticket.findFirst({
+          where: { id: dto.relatedTicketId, clientId: client.id },
+          select: { id: true },
+        });
+        if (!related) {
+          throw new AppException('Ticket relacionado inválido', 'INVALID_RELATED_TICKET', 400);
+        }
+      }
+
       // 1. Create the task in the project kanban
       const maxPosition = await tx.task.aggregate({
         where: { projectId },
@@ -492,6 +505,7 @@ export class PortalService {
           ...(criticality && { criticality: criticality as any }),
           ...(responseDeadline && { responseDeadline }),
           ...(resolutionDeadline && { resolutionDeadline }),
+          ...(dto.relatedTicketId && { relatedTicketId: dto.relatedTicketId }),
         },
         include: {
           project: { select: { id: true, name: true } },

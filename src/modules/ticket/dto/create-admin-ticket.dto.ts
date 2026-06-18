@@ -36,4 +36,9 @@ export class CreateAdminTicketDto {
   @IsOptional()
   @IsString()
   categoryConfigId?: string;
+
+  @ApiPropertyOptional({ description: 'ID del ticket relacionado (follow-up de un ticket previo del mismo cliente)' })
+  @IsOptional()
+  @IsString()
+  relatedTicketId?: string;
 }
