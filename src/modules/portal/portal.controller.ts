@@ -121,7 +121,9 @@ export class PortalController {
   // ── Ticket endpoints (Portal) ─────────────────────────────
 
   @Get('portal/tickets')
-  @ApiOperation({ summary: 'Listar tickets del cliente autenticado' })
+  @ApiOperation({
+    summary: 'Listar todos los tickets del cliente autenticado (filtrado/paginado client-side)',
+  })
   getTickets(
     @CurrentUser() user: AuthenticatedUser,
     @Query('projectId') projectId?: string,

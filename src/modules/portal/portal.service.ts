@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Request, Response } from 'express';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
 import { AppException } from '../../common/filters/app-exception';
 import { CreateSuggestionDto } from './dto/create-suggestion.dto';
@@ -304,16 +305,27 @@ export class PortalService {
 
   async getTickets(
     userId: string,
-    filters?: { projectId?: string; createdByUserId?: string },
+    filters?: {
+      projectId?: string;
+      createdByUserId?: string;
+    },
   ) {
     const client = await this.getClientByUserId(userId);
 
-    return this.prisma.ticket.findMany({
-      where: {
-        clientId: client.id,
-        ...(filters?.projectId && { projectId: filters.projectId }),
-        ...(filters?.createdByUserId && { createdByUserId: filters.createdByUserId }),
-      },
+    // Un cliente individual tiene POCOS tickets (volumen bajo): el portal trae
+    // TODO el set del cliente y filtra/pagina/cuenta 100% client-side (feature
+    // #12, opcion B del review). NO se pagina server-side — un paginador
+    // numerado offset desincronizaba los filtros de status/search/proyecto que
+    // el portal aplica en el cliente. Shape { data, meta: { total } } para que
+    // el frontend lea el total del set completo del cliente.
+    const where: Prisma.TicketWhereInput = {
+      clientId: client.id,
+      ...(filters?.projectId && { projectId: filters.projectId }),
+      ...(filters?.createdByUserId && { createdByUserId: filters.createdByUserId }),
+    };
+
+    const data = await this.prisma.ticket.findMany({
+      where,
       include: {
         project: { select: { id: true, name: true } },
         task: { select: { id: true, status: true } },
@@ -321,6 +333,13 @@ export class PortalService {
       },
       orderBy: { createdAt: 'desc' },
     });
+
+    return {
+      data,
+      meta: {
+        total: data.length,
+      },
+    };
   }
 
   async getTicketDetail(userId: string, ticketId: string) {
