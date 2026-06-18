@@ -741,12 +741,19 @@ export class TicketService {
         });
 
         // Outbox sync Onnix (feature #13): cambio de estado en la MISMA tx (R10).
-        await this.outbox.enqueueTx(tx, {
-          eventType: 'STATUS_CHANGED',
-          aggregateId: ticketId,
-          organizationId: ticket.organizationId,
-          payload: { ticketId },
-        });
+        // Gate por categoría: solo los tickets de soporte se replican a Onnix
+        // (scope de la integración). Un STATUS_CHANGED de un ticket que no es
+        // SUPPORT_REQUEST nunca se encola, en línea con su TICKET_CREATED que
+        // tampoco se encoló. `ticket.category` viene del findUnique con include
+        // (objeto completo) al inicio de updateTicket.
+        if (ticket.category === 'SUPPORT_REQUEST') {
+          await this.outbox.enqueueTx(tx, {
+            eventType: 'STATUS_CHANGED',
+            aggregateId: ticketId,
+            organizationId: ticket.organizationId,
+            payload: { ticketId },
+          });
+        }
 
         // 3.b) Audit timeline para hitos SLA: FIRST_RESPONSE / RESOLVED.
         // Solo se emiten cuando este mismo update setea por primera vez la
@@ -1163,6 +1170,19 @@ export class TicketService {
     }
 
     const ticket = await this.prisma.$transaction(async (tx) => {
+      // Ticket relacionado (feature #11): si viene relatedTicketId, validar que
+      // exista y pertenezca al MISMO cliente; si no, 400. Dentro de la tx para
+      // consistencia con la creación.
+      if (dto.relatedTicketId) {
+        const related = await tx.ticket.findFirst({
+          where: { id: dto.relatedTicketId, clientId: dto.clientId },
+          select: { id: true },
+        });
+        if (!related) {
+          throw new AppException('Ticket relacionado inválido', 'INVALID_RELATED_TICKET', 400);
+        }
+      }
+
       const maxPosition = await tx.task.aggregate({
         where: { projectId: dto.projectId },
         _max: { position: true },
@@ -1222,6 +1242,7 @@ export class TicketService {
           ...(criticality && { criticality: criticality as any }),
           ...(responseDeadline && { responseDeadline }),
           ...(resolutionDeadline && { resolutionDeadline }),
+          ...(dto.relatedTicketId && { relatedTicketId: dto.relatedTicketId }),
         },
         include: {
           project: { select: { id: true, name: true } },
@@ -1244,16 +1265,22 @@ export class TicketService {
       });
 
       // Outbox sync Onnix (feature #13): encolar en la MISMA tx (R1, R8).
-      await this.outbox.enqueueTx(tx, {
-        eventType: 'TICKET_CREATED',
-        aggregateId: created.id,
-        organizationId: orgId,
-        payload: {
-          ticketId: created.id,
-          clientId: dto.clientId,
-          projectId: dto.projectId,
-        },
-      });
+      // Gate por categoría: el scope de la integración Onnix es SOLO tickets de
+      // soporte. El admin puede crear cualquier categoría (SUPPORT_REQUEST /
+      // NEW_DEVELOPMENT / NEW_PROJECT), por eso acá SÍ se gatea: solo se encola
+      // si es SUPPORT_REQUEST. Los demás tipos no se replican a Onnix.
+      if (dto.category === 'SUPPORT_REQUEST') {
+        await this.outbox.enqueueTx(tx, {
+          eventType: 'TICKET_CREATED',
+          aggregateId: created.id,
+          organizationId: orgId,
+          payload: {
+            ticketId: created.id,
+            clientId: dto.clientId,
+            projectId: dto.projectId,
+          },
+        });
+      }
 
       return created;
     });

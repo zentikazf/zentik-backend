@@ -429,6 +429,19 @@ export class PortalService {
     }
 
     const ticket = await this.prisma.$transaction(async (tx) => {
+      // Ticket relacionado (feature #11): si viene relatedTicketId, validar que
+      // exista y pertenezca al MISMO cliente del user; si no, 400. Dentro de la tx
+      // para consistencia con la creación.
+      if (dto.relatedTicketId) {
+        const related = await tx.ticket.findFirst({
+          where: { id: dto.relatedTicketId, clientId: client.id },
+          select: { id: true },
+        });
+        if (!related) {
+          throw new AppException('Ticket relacionado inválido', 'INVALID_RELATED_TICKET', 400);
+        }
+      }
+
       // 1. Create the task in the project kanban
       const maxPosition = await tx.task.aggregate({
         where: { projectId },
@@ -492,6 +505,7 @@ export class PortalService {
           ...(criticality && { criticality: criticality as any }),
           ...(responseDeadline && { responseDeadline }),
           ...(resolutionDeadline && { resolutionDeadline }),
+          ...(dto.relatedTicketId && { relatedTicketId: dto.relatedTicketId }),
         },
         include: {
           project: { select: { id: true, name: true } },
@@ -501,6 +515,11 @@ export class PortalService {
       });
 
       // Outbox sync Onnix (feature #13): encolar en la MISMA tx (R1, R9).
+      // Sin gate por categoría: el portal SIEMPRE crea tickets SUPPORT_REQUEST
+      // (ver `category: 'SUPPORT_REQUEST'` arriba en el create), que es justo el
+      // scope de la integración Onnix → todos los tickets del portal se encolan.
+      // El gate por categoría solo aplica al admin (ticket.service.createTicket),
+      // que sí puede crear otras categorías.
       await this.outbox.enqueueTx(tx, {
         eventType: 'TICKET_CREATED',
         aggregateId: created.id,

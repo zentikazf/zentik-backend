@@ -36,4 +36,10 @@ export class CreateTicketDto {
   @IsOptional()
   @IsEnum(TicketPriorityDto, { message: 'La prioridad no es valida' })
   priority?: TicketPriorityDto;
+
+  @ApiPropertyOptional({ description: 'ID del ticket relacionado (follow-up de un ticket previo del mismo cliente)' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(30, { message: 'relatedTicketId inválido' })
+  relatedTicketId?: string;
 }
