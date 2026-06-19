@@ -49,7 +49,7 @@ export class TicketController {
   }
 
   @Get('organizations/:orgId/tickets')
-  @ApiOperation({ summary: 'Listar tickets de la organizacion (cursor pagination)' })
+  @ApiOperation({ summary: 'Listar tickets de la organizacion (paginacion offset: page/limit)' })
   getOrgTickets(
     @Param('orgId') orgId: string,
     @Query() query: ListTicketsQueryDto,

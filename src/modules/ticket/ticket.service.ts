@@ -275,10 +275,11 @@ export class TicketService {
    * Builder del where Prisma para el listing de tickets de la organizacion.
    * Reutilizado por getOrgTickets (paginado) y exportCsv (sin paginar).
    *
-   * Nota sobre overshootMinGte: NO se incluye aca porque Prisma no expone
-   * filtros aritmeticos entre dos columnas (resolvedAt - resolutionDeadline).
-   * Lo manejamos como post-filtro en memoria — aceptable porque solo aplica
-   * a tickets RESOLVED (volumen <500/mes por org segun spec feature #10).
+   * Overshoot (feature #12): el filtro usa la columna generada de Postgres
+   * overshoot_minutes (campo escalar overshootMinutes) directamente — Prisma
+   * filtra/ordena/cuenta nativo y el COUNT es exacto. Reemplaza el post-filtro
+   * en memoria (filterByOvershoot, eliminado). El bucket del frontend se traduce
+   * a [gte, lt) en el DTO (overshootMinGte/overshootMaxLt).
    */
   private buildOrgTicketsWhere(orgId: string, query: ListTicketsQueryDto): Prisma.TicketWhereInput {
     const where: Prisma.TicketWhereInput = {
@@ -345,15 +346,19 @@ export class TicketService {
       }
     }
 
+    // Overshoot (feature #12): filtro nativo sobre la columna generada
+    // overshoot_minutes. Es un campo escalar (AND implicito) → no pisa where.OR
+    // de slaOutcome/search ni where.status. NULL queda excluido por el gte.
+    if (query.overshootMinGte != null) {
+      where.overshootMinutes = {
+        gte: query.overshootMinGte,
+        ...(query.overshootMaxLt != null && { lt: query.overshootMaxLt }),
+      };
+    }
+
     return where;
   }
 
-  /**
-   * Aplica el post-filtro de overshootMinGte sobre un set de tickets ya cargados.
-   * overshootMin = (resolvedAt - resolutionDeadline) / 60000, redondeado al minuto.
-   * Devuelve solo los tickets con overshoot >= threshold. Tickets sin deadline o
-   * sin resolvedAt se descartan (no se pueden medir).
-   */
   /**
    * Helper para armar el orderBy del listing y export CSV segun los params
    * sortBy / sortOrder del DTO. Mantiene default historico (createdAt DESC + id DESC)
@@ -376,27 +381,17 @@ export class TicketService {
     if (sortBy === 'priority') {
       return [{ priority: direction }, { createdAt: 'desc' }, { id: 'desc' }];
     }
-    // overshoot: proxy con resolutionDeadline + resolvedAt. El filtro filterByOvershoot
-    // en memoria se encarga del calculo exacto; aqui ordenamos por deadline como aproximacion.
-    return [{ resolutionDeadline: { sort: direction, nulls: 'last' } }, { id: 'desc' }];
-  }
-
-  private filterByOvershoot<T extends { resolvedAt: Date | null; resolutionDeadline: Date | null }>(
-    tickets: T[],
-    overshootMinGte: number | undefined,
-  ): T[] {
-    if (overshootMinGte === undefined || overshootMinGte === null) return tickets;
-    return tickets.filter((t) => {
-      if (!t.resolvedAt || !t.resolutionDeadline) return false;
-      const diffMin = Math.floor((t.resolvedAt.getTime() - t.resolutionDeadline.getTime()) / 60000);
-      return diffMin >= overshootMinGte;
-    });
+    // overshoot (feature #12): orden nativo por la columna generada
+    // overshoot_minutes. nulls:'last' deja los tickets sin overshoot (no resueltos
+    // o sin deadline) al final. Antes era un proxy con resolutionDeadline.
+    return [{ overshootMinutes: { sort: direction, nulls: 'last' } }, { id: 'desc' }];
   }
 
   /**
    * Exporta tickets de la organizacion a CSV (UTF-8).
    * Reusa el where builder de getOrgTickets — SIN paginacion para entregar
-   * el set completo. Aplica el mismo post-filtro de overshootMinGte.
+   * el set completo. El filtro de overshoot ya va dentro del where (columna
+   * generada overshoot_minutes, feature #12); no se filtra en memoria.
    * 13 columnas en orden exacto (ver design.md feature #10 R24).
    *
    * Volumen objetivo: <500 tickets/mes/org. Carga en memoria OK.
@@ -424,8 +419,6 @@ export class TicketService {
       orderBy: this.buildOrderBy(query.sortBy ?? 'resolvedAt', query.sortOrder),
     });
 
-    const filtered = this.filterByOvershoot(rows, query.overshootMinGte);
-
     const headers = [
       'ticketNumber',
       'title',
@@ -444,7 +437,7 @@ export class TicketService {
 
     const lines: string[] = [headers.join(',')];
 
-    for (const t of filtered) {
+    for (const t of rows) {
       const responseOvershoot = t.firstResponseAt && t.responseDeadline
         ? Math.max(0, Math.floor((t.firstResponseAt.getTime() - t.responseDeadline.getTime()) / 60000))
         : '';
@@ -480,48 +473,52 @@ export class TicketService {
 
   async getOrgTickets(orgId: string, query: ListTicketsQueryDto) {
     const limit = Math.min(query.limit ?? 20, 50);
+    const page = Math.max(query.page ?? 1, 1);
     const where = this.buildOrgTicketsWhere(orgId, query);
 
-    const hasOvershootFilter = query.overshootMinGte !== undefined && query.overshootMinGte !== null;
+    // Paginacion offset (feature #12). El filtro de overshoot ya esta resuelto
+    // en el where (columna generada overshoot_minutes) → el COUNT es exacto y
+    // no hace falta el buffer ni el reslicing en memoria que usaba el cursor.
+    const skip = (page - 1) * limit;
+    const take = limit;
 
-    // Si hay filtro de overshoot, traemos un buffer mayor (limit * 3, max 150)
-    // y descartamos en memoria. Si el buffer no alcanza, hasNext queda en false
-    // (caller debe ajustar limit). Volumen <500/mes lo hace tolerable.
-    const fetchTake = hasOvershootFilter ? Math.min(limit * 3, 150) + 1 : limit + 1;
-
-    const items = await this.prisma.ticket.findMany({
-      where,
-      take: fetchTake,
-      ...(query.cursor && { cursor: { id: query.cursor }, skip: 1 }),
-      include: {
-        client: { select: { id: true, name: true, email: true } },
-        project: { select: { id: true, name: true, slug: true } },
-        task: {
-          select: {
-            id: true,
-            title: true,
-            status: true,
-            boardColumn: { select: { id: true, name: true, color: true, mappedStatus: true } },
-            assignments: {
-              include: { user: { select: { id: true, name: true, email: true, image: true } } },
+    const [items, total] = await Promise.all([
+      this.prisma.ticket.findMany({
+        where,
+        skip,
+        take,
+        include: {
+          client: { select: { id: true, name: true, email: true } },
+          project: { select: { id: true, name: true, slug: true } },
+          task: {
+            select: {
+              id: true,
+              title: true,
+              status: true,
+              boardColumn: { select: { id: true, name: true, color: true, mappedStatus: true } },
+              assignments: {
+                include: { user: { select: { id: true, name: true, email: true, image: true } } },
+              },
             },
           },
+          channel: { select: { id: true, name: true, _count: { select: { messages: true } } } },
+          categoryConfig: { select: { id: true, name: true, criticality: true } },
+          createdByUser: { select: { id: true, name: true } },
         },
-        channel: { select: { id: true, name: true, _count: { select: { messages: true } } } },
-        categoryConfig: { select: { id: true, name: true, criticality: true } },
-        createdByUser: { select: { id: true, name: true } },
-      },
-      orderBy: this.buildOrderBy(query.sortBy, query.sortOrder),
-    });
-
-    const filtered = this.filterByOvershoot(items, query.overshootMinGte);
-    const hasNext = filtered.length > limit;
-    const data = hasNext ? filtered.slice(0, limit) : filtered;
-    const nextCursor = hasNext ? data[data.length - 1].id : null;
+        orderBy: this.buildOrderBy(query.sortBy, query.sortOrder),
+      }),
+      this.prisma.ticket.count({ where }),
+    ]);
 
     return {
-      data,
-      meta: { nextCursor, limit, hasNext },
+      data: items,
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+        hasNextPage: page * limit < total,
+      },
     };
   }
 

@@ -1143,6 +1143,10 @@ model Ticket {
   resolutionDeadline    DateTime?          @map("resolution_deadline")
   firstResponseAt       DateTime?          @map("first_response_at")
   resolvedAt            DateTime?          @map("resolved_at")
+  /// Columna GENERATED ALWAYS AS (... (resolved_at - resolution_deadline)/60 ...) STORED en DB — read-only.
+  /// La calcula Postgres (feature #12, DDL T0 aplicado por el dev en Railway). NO escribir desde el dominio
+  /// ni incluir en ningún DTO de create/update. El índice parcial idx_tickets_org_overshoot se crea por SQL manual.
+  overshootMinutes      Int?               @map("overshoot_minutes")
   slaResponseBreached   Boolean            @default(false) @map("sla_response_breached")
   slaResolutionBreached Boolean            @default(false) @map("sla_resolution_breached")
   createdByUserId       String?            @map("created_by_user_id")

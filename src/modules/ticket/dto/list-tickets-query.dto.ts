@@ -4,7 +4,6 @@ import {
   IsEnum,
   IsIn,
   IsInt,
-  IsNumber,
   IsOptional,
   IsString,
   Max,
@@ -35,8 +34,8 @@ import { TicketStatusDto } from './update-ticket.dto';
  * - createdAt: default historico (fecha de creacion DESC).
  * - resolvedAt: usado en tab Resueltos para los mas recientes primero.
  * - priority: orden lexicografico del enum (HIGH antes que MEDIUM antes que LOW).
- * - overshoot: cuanto se paso del SLA — proxy con resolutionDeadline DESC + resolvedAt
- *   en el helper buildOrderBy del service.
+ * - overshoot: cuanto se paso del SLA — ordena por la columna generada
+ *   overshootMinutes (feature #12) directamente en buildOrderBy del service.
  */
 export enum TicketSortBy {
   CREATED_AT = 'createdAt',
@@ -44,6 +43,26 @@ export enum TicketSortBy {
   PRIORITY = 'priority',
   OVERSHOOT = 'overshoot',
 }
+
+/**
+ * Buckets de overshoot que el frontend envia (?overshootBucket=...). Se traducen
+ * a un rango [gte, lt) de minutos sobre la columna generada overshoot_minutes
+ * (feature #12). Reemplaza el filtro en memoria previo (filterByOvershoot).
+ */
+export enum OvershootBucket {
+  LT_1H = 'LT_1H',
+  BETWEEN_1_4H = 'BETWEEN_1_4H',
+  BETWEEN_4_24H = 'BETWEEN_4_24H',
+  GT_24H = 'GT_24H',
+}
+
+/** Rango [gte, lt?) en minutos asociado a cada bucket. */
+const OVERSHOOT_BUCKET_RANGES: Record<OvershootBucket, { gte: number; lt?: number }> = {
+  [OvershootBucket.LT_1H]: { gte: 0, lt: 60 },
+  [OvershootBucket.BETWEEN_1_4H]: { gte: 60, lt: 240 },
+  [OvershootBucket.BETWEEN_4_24H]: { gte: 240, lt: 1440 },
+  [OvershootBucket.GT_24H]: { gte: 1440 },
+};
 
 /**
  * Resultado SLA del ticket — usado para filtrar el listing en la vista
@@ -65,10 +84,16 @@ export class ListTicketsQueryDto {
   @IsEnum(TicketStatusDto, { message: 'El estado no es valido' })
   status?: TicketStatusDto;
 
-  @ApiPropertyOptional({ description: 'Cursor de paginacion (ID del ultimo ticket de la pagina anterior)' })
+  @ApiPropertyOptional({
+    default: 1,
+    minimum: 1,
+    description: 'Numero de pagina (paginacion offset, feature #12). 1-based.',
+  })
   @IsOptional()
-  @IsString()
-  cursor?: string;
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page?: number = 1;
 
   @ApiPropertyOptional({ default: 20, minimum: 1, maximum: 50 })
   @IsOptional()
@@ -121,12 +146,27 @@ export class ListTicketsQueryDto {
   @IsEnum(TicketCriticality, { each: true, message: 'criticality contiene un valor invalido' })
   criticality?: TicketCriticality[];
 
-  @ApiPropertyOptional({ description: 'Minutos minimos de overshoot (sobre resolutionDeadline)' })
+  /**
+   * Bucket de overshoot que envia el frontend (?overshootBucket=LT_1H...). Se
+   * traduce a un rango [gte, lt) de minutos sobre la columna generada
+   * overshoot_minutes (feature #12) via los getters overshootMinGte/overshootMaxLt
+   * que consume el service. Antes (feature #10) este filtro se ignoraba en backend
+   * y el calculo se hacia en memoria (filterByOvershoot, ya eliminado).
+   */
+  @ApiPropertyOptional({ enum: OvershootBucket, description: 'Filtrar por rango de overshoot' })
   @IsOptional()
-  @Type(() => Number)
-  @IsNumber()
-  @Min(0)
-  overshootMinGte?: number;
+  @IsEnum(OvershootBucket, { message: 'overshootBucket no es valido' })
+  overshootBucket?: OvershootBucket;
+
+  /** Minutos minimos de overshoot (inclusivo). Derivado de overshootBucket. */
+  get overshootMinGte(): number | undefined {
+    return this.overshootBucket ? OVERSHOOT_BUCKET_RANGES[this.overshootBucket].gte : undefined;
+  }
+
+  /** Cota superior exclusiva de overshoot en minutos. Derivado de overshootBucket. */
+  get overshootMaxLt(): number | undefined {
+    return this.overshootBucket ? OVERSHOOT_BUCKET_RANGES[this.overshootBucket].lt : undefined;
+  }
 
   @ApiPropertyOptional({ description: 'Fecha desde de resolucion (ISO)' })
   @IsOptional()
