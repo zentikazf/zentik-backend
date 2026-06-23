@@ -268,17 +268,24 @@ export class NotificationPushService implements OnModuleInit {
         );
       } catch (err: any) {
         const statusCode = err?.statusCode;
+        const endpoint = err?.endpoint ?? sub.endpoint;
         // 410 Gone o 404 Not Found -> endpoint invalido, borrarlo
         if (statusCode === 410 || statusCode === 404) {
           this.logger.warn(
-            `Push endpoint invalido (${statusCode}), borrando subscription ${sub.id}`,
+            `Push endpoint invalido (statusCode=${statusCode}), borrando subscription ${sub.id} (user ${userId})`,
           );
           await this.prisma.pushSubscription
             .delete({ where: { id: sub.id } })
             .catch(() => {});
-        } else {
+        } else if (statusCode === 401 || statusCode === 403) {
+          // VAPID invalido/desincronizado -> NO reintentar, NO borrar sub (las keys del servidor son el problema)
           this.logger.error(
-            `Error enviando push a user ${userId} (sub ${sub.id}): ${err?.message ?? err}`,
+            `Push VAPID invalido/desincronizado (statusCode=${statusCode}) — revisar VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY en el .env de prod. user=${userId} sub=${sub.id}`,
+          );
+        } else {
+          // Otros (500, timeout, etc.) -> loguear statusCode + endpoint + message para diagnostico
+          this.logger.error(
+            `Error enviando push a user ${userId} (sub ${sub.id}) statusCode=${statusCode ?? 'N/A'} endpoint=${endpoint ?? 'N/A'} msg=${err?.message ?? err}`,
           );
         }
       }
