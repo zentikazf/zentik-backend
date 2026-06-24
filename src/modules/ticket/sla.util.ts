@@ -17,6 +17,64 @@ function parseTime(time: string): { hours: number; minutes: number } {
   return { hours, minutes };
 }
 
+// Zona por defecto: el server corre en UTC (Railway), pero el negocio opera
+// en hora de Asunción. Se usa como fallback ante timezone vacío/inválido.
+const DEFAULT_TIMEZONE = 'America/Asuncion';
+
+/**
+ * Devuelve el offset (en minutos) del wall-clock de `timeZone` respecto a UTC
+ * para el instante `date`. Es negativo para zonas al oeste de UTC (ej. -240
+ * para UTC-4, la hora estándar de Paraguay).
+ *
+ * Implementación zero-dep con `Intl.DateTimeFormat` (nativo, soporta IANA + DST):
+ * formatea el instante en la zona, reconstruye ese wall-clock como si fuera UTC
+ * (`Date.UTC`) y le resta el instante real. La diferencia es exactamente el offset.
+ *
+ * Se usa para el truco convert-in/convert-out de `calculateBusinessDeadline`:
+ * `new Date(utc.getTime() + tzOffsetMinutes(utc, tz) * 60000)` produce un Date
+ * cuyo `getHours()` (que el server lee en UTC) devuelve la hora local de la zona.
+ *
+ * Guard: si `timeZone` es falsy o `Intl` tira `RangeError` (zona inválida),
+ * cae a `America/Asuncion` para no romper el cálculo del deadline.
+ */
+function tzOffsetMinutes(date: Date, timeZone: string): number {
+  const tz = timeZone || DEFAULT_TIMEZONE;
+  try {
+    return computeTzOffsetMinutes(date, tz);
+  } catch {
+    // Zona inválida (RangeError de Intl) → fallback seguro a la zona del negocio.
+    return computeTzOffsetMinutes(date, DEFAULT_TIMEZONE);
+  }
+}
+
+function computeTzOffsetMinutes(date: Date, timeZone: string): number {
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+  const p: Record<string, string> = {};
+  for (const part of dtf.formatToParts(date)) {
+    p[part.type] = part.value;
+  }
+  // hour12:false puede devolver "24" para medianoche en algunos engines → normalizar a 0.
+  const hour = Number(p.hour) === 24 ? 0 : Number(p.hour);
+  const asUTC = Date.UTC(
+    Number(p.year),
+    Number(p.month) - 1,
+    Number(p.day),
+    hour,
+    Number(p.minute),
+    Number(p.second),
+  );
+  return (asUTC - date.getTime()) / 60000;
+}
+
 function getBusinessMinutesInDay(config: BusinessHours): number {
   const start = parseTime(config.start);
   const end = parseTime(config.end);
@@ -24,6 +82,8 @@ function getBusinessMinutesInDay(config: BusinessHours): number {
 }
 
 function isBusinessDay(date: Date, config: BusinessHours, holidays?: Date[]): boolean {
+  // El `date` (cursor) ya viene en wall-clock local (convert-in de
+  // calculateBusinessDeadline): sus getDay/getDate ya están en la zona del negocio.
   // JS getDay: 0=Sun, convert to ISO: 1=Mon...7=Sun
   const jsDay = date.getDay();
   const isoDay = jsDay === 0 ? 7 : jsDay;
@@ -31,9 +91,16 @@ function isBusinessDay(date: Date, config: BusinessHours, holidays?: Date[]): bo
 
   // Check if date is a holiday
   if (holidays?.length) {
+    // El `date` (cursor) ya está en wall-clock local de la zona (convert-in), y el
+    // proceso corre en UTC (Railway) → getFullYear/getMonth/getDate leen ese
+    // wall-clock como fecha-calendario de la zona.
     const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
     return !holidays.some((h) => {
-      const hStr = `${h.getFullYear()}-${String(h.getMonth() + 1).padStart(2, '0')}-${String(h.getDate()).padStart(2, '0')}`;
+      // Holiday.date es @db.Date (fecha pura): Prisma la materializa a medianoche
+      // UTC (ej. 2026-06-17T00:00:00Z para el feriado del 17). Su fecha-calendario
+      // correcta se lee en UTC; convertirla a la zona la desfasaría un día
+      // (off-by-one). Se compara fecha-calendario vs fecha-calendario.
+      const hStr = `${h.getUTCFullYear()}-${String(h.getUTCMonth() + 1).padStart(2, '0')}-${String(h.getUTCDate()).padStart(2, '0')}`;
       return hStr === dateStr;
     });
   }
@@ -58,8 +125,16 @@ export function calculateBusinessDeadline(
   const endOfDayMinutes = endParsed.hours * 60 + endParsed.minutes;
   const dailyMinutes = getBusinessMinutesInDay(bh);
 
+  // Zona del negocio (guard contra timezone vacío/inválido en tzOffsetMinutes).
+  const tz = bh.timezone || DEFAULT_TIMEZONE;
+
   let remaining = totalMinutes;
-  const cursor = new Date(startTime);
+
+  // Convert-in: pasar el instante UTC al wall-clock de la zona del negocio.
+  // El `cursor` resultante, leído con getHours()/getDate() (que el server lee en
+  // UTC), devuelve la HORA LOCAL de la zona — así el algoritmo de abajo opera en
+  // wall-clock coherente con bh.start/bh.end ("08:30"-"17:30"), sin tocar su lógica.
+  const cursor = new Date(startTime.getTime() + tzOffsetMinutes(startTime, tz) * 60000);
 
   // If start is outside business hours, move to next business start
   const cursorMinutes = cursor.getHours() * 60 + cursor.getMinutes();
@@ -100,7 +175,12 @@ export function calculateBusinessDeadline(
     }
   }
 
-  return cursor;
+  // Convert-out: el cursor representa el wall-clock local de la zona (almacenado
+  // como-si-UTC). Se recupera el instante UTC real restando el offset. Se recalcula
+  // el offset sobre el cursor final porque puede diferir del inicial por DST si el
+  // deadline cae en otro huso horario estacional que el startTime.
+  const outOffset = tzOffsetMinutes(cursor, tz);
+  return new Date(cursor.getTime() - outOffset * 60000);
 }
 
 export function getSlaProgress(createdAt: Date, deadline: Date): number {

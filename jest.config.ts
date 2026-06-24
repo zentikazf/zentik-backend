@@ -14,6 +14,15 @@ import type { Config } from 'jest';
  * (jest-mock-extended) y el HTTP de Onnix. NUNCA tocan DATABASE_URL (prod). La
  * integracion real es opt-in via DATABASE_URL_TEST (describe.skip por default).
  */
+
+// Forzar la zona del proceso de test a UTC para replicar el entorno de produccion
+// (Railway corre en UTC). Se setea ANTES de forkear los workers (este archivo se
+// evalua en el proceso principal de jest), por lo que cada worker arranca su runtime
+// con TZ=UTC desde el inicio (cambiarlo en runtime via beforeAll NO reinicializa la
+// zona en V8). Critico para feature #17 (sla.util.spec): el convert-in/out de
+// calculateBusinessDeadline asume que getHours()/setHours() leen UTC, como en prod.
+// El resto de specs (modulo sync, etc.) mockean dependencias y son agnosticos a TZ.
+process.env.TZ = process.env.TZ || 'UTC';
 const config: Config = {
   preset: 'ts-jest',
   testEnvironment: 'node',
