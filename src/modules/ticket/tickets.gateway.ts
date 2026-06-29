@@ -359,4 +359,62 @@ export class TicketsGateway implements OnGatewayConnection, OnGatewayDisconnect 
       newAssigneeId: payload.newAssigneeId,
     });
   }
+
+  // ────────────────────────────────────────────────────────────
+  // Aprobaciones → senal fina de invalidacion del badge (#20)
+  // ────────────────────────────────────────────────────────────
+  //
+  // Patron: el backend NO empuja el numero, solo dice "refresca". El cliente
+  // refetchea el count() real (DB = fuente de verdad), inmune al desync +1/-1.
+  // Reusa la room por-org ya poblada (`org:{orgId}`) y el shape en pasado de los
+  // emit de ticket (`approvals:updated`, NO imperativo `:invalidate`).
+  //
+  // EventEmitterModule es global (app.module.ts) → este gateway escucha los
+  // eventos de dominio `task.approval.*` y `task.moved` SIN importar TaskModule
+  // ni BoardModule (igual que ticket-sync.listener.ts ya hace).
+  //
+  // `payload.organizationId` SIEMPRE viene del helper `domainEvent(...)` (spread
+  // en el emit). Leemos SOLO ese campo: `entityId` en la variante board es el
+  // `boardId`, no la org — usarlo seria un bug de scope.
+
+  /**
+   * Emite la senal de invalidacion de aprobaciones a la room de la org. Helper
+   * privado para no duplicar el guard + emit en cada listener.
+   */
+  private emitApprovalsUpdated(organizationId?: string): void {
+    if (!organizationId) return;
+    this.server
+      .to(`org:${organizationId}`)
+      .emit('approvals:updated', { orgId: organizationId });
+  }
+
+  /**
+   * Toda transicion del flujo de aprobacion (solicitud / aprobada / rechazada)
+   * cambia el count de pendientes → invalidamos el badge de los admins de la org.
+   */
+  @OnEvent('task.approval.requested')
+  @OnEvent('task.approval.approved')
+  @OnEvent('task.approval.rejected')
+  emitApprovalsUpdatedFromApproval(payload: { organizationId?: string }) {
+    this.emitApprovalsUpdated(payload.organizationId);
+  }
+
+  /**
+   * Salida/entrada de IN_REVIEW por drag&drop del kanban (`task.moved`) tambien
+   * cambia el count de aprobaciones, PERO `task.moved` se emite en CADA drag. Por
+   * eso gateamos adentro: solo invalidamos si el movimiento toca IN_REVIEW (entra
+   * o sale), para no disparar un refetch en cada movimiento de tarjeta.
+   */
+  @OnEvent('task.moved')
+  emitApprovalsUpdatedFromMove(payload: {
+    organizationId?: string;
+    previousStatus?: string;
+    newStatus?: string;
+  }) {
+    if (!payload.organizationId) return;
+    const touchesReview =
+      payload.previousStatus === 'IN_REVIEW' || payload.newStatus === 'IN_REVIEW';
+    if (!touchesReview) return;
+    this.emitApprovalsUpdated(payload.organizationId);
+  }
 }
