@@ -53,6 +53,11 @@ describe('MessageService — gate read-only chat en ticket RESOLVED (feature #11
 
   /** Configura el sender (clientId) y el status del ticket del canal. */
   function arrange(senderClientId: string | null, ticketStatus: string | null) {
+    // Por defecto el sender ES miembro del canal: el membership gate (feature #18)
+    // corre ANTES del gate RESOLVED. Estos tests verifican el gate RESOLVED, asi que
+    // necesitan pasar la barrera de membership. El caso "no miembro" se cubre aparte
+    // en chat-membership.spec.ts.
+    prisma.channelMember.findFirst.mockResolvedValue({ id: 'member-1' } as never);
     prisma.user.findUnique.mockResolvedValue(
       (senderClientId === undefined ? null : { clientId: senderClientId }) as never,
     );

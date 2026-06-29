@@ -97,7 +97,7 @@ export class TicketsGateway implements OnGatewayConnection, OnGatewayDisconnect 
     try {
       const session = await this.prisma.session.findFirst({
         where: { token: sessionToken, expiresAt: { gt: new Date() } },
-        select: { userId: true, user: { select: { id: true, name: true } } },
+        select: { id: true, userId: true, user: { select: { id: true, name: true } } },
       });
 
       if (!session) {
@@ -108,6 +108,12 @@ export class TicketsGateway implements OnGatewayConnection, OnGatewayDisconnect 
 
       (client as any).userId = session.userId;
       (client as any).userName = session.user.name;
+      // sessionId: necesario para el cierre por-sesion al logout (R4). Lo guardamos
+      // tambien en client.data porque fetchSockets() devuelve RemoteSocket donde solo
+      // .data esta garantizado (los campos sueltos en el socket no se serializan).
+      (client as any).sessionId = session.id;
+      client.data.sessionId = session.id;
+      client.data.userId = session.userId;
 
       // Room personal para mensajes dirigidos a este usuario
       client.join(`user:${session.userId}`);
@@ -121,6 +127,31 @@ export class TicketsGateway implements OnGatewayConnection, OnGatewayDisconnect 
 
   handleDisconnect(client: Socket) {
     this.logger.log(`Tickets WS desconectado: ${client.id}`);
+  }
+
+  /**
+   * Desconecta los sockets de un usuario (R4: zombie sessions al logout/revoke).
+   * - Con `sessionId`: solo el socket de ESA sesion (logout por-sesion / revoke puntual).
+   * - Sin `sessionId`: TODOS los sockets del user (revoke-all / cerrar todas las sesiones).
+   * Itera la room personal `user:{userId}`. Lee `sessionId` de `socket.data` porque
+   * fetchSockets() devuelve RemoteSocket donde solo `.data` esta garantizado.
+   */
+  async disconnectUserSockets(userId: string, sessionId?: string): Promise<void> {
+    const sockets = await this.server.in(`user:${userId}`).fetchSockets();
+    let count = 0;
+    for (const socket of sockets) {
+      if (sessionId && socket.data?.sessionId !== sessionId) {
+        continue;
+      }
+      socket.disconnect(true);
+      count++;
+    }
+    if (count > 0) {
+      this.logger.log(
+        `Tickets WS: desconectados ${count} socket(s) de user ${userId}` +
+          (sessionId ? ` (sessionId ${sessionId})` : ' (todas las sesiones)'),
+      );
+    }
   }
 
   /**

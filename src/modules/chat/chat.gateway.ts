@@ -16,8 +16,17 @@ import { PrismaService } from '../../database/prisma.service';
 @WebSocketGateway({
   cors: {
     origin: (origin: string, callback: (err: Error | null, allow?: boolean) => void) => {
-      // Allow all origins in development, or origins matching WEB_URL in production
-      callback(null, true);
+      // CORS estricto basado en WEB_URL (CSV). Mismo validador que tickets.gateway.ts.
+      // Allow-all era un agujero (ALTO-3): cualquier origen podia abrir el socket.
+      const allowed = (process.env.WEB_URL || 'http://localhost:3002')
+        .split(',')
+        .map((o) => o.trim())
+        .filter(Boolean);
+      if (!origin || allowed.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(null, false);
+      }
     },
     credentials: true,
   },
@@ -68,7 +77,7 @@ export class ChatGateway
     try {
       const session = await this.prisma.session.findFirst({
         where: { token: sessionToken, expiresAt: { gt: new Date() } },
-        select: { userId: true, user: { select: { id: true, name: true } } },
+        select: { id: true, userId: true, user: { select: { id: true, name: true } } },
       });
 
       if (!session) {
@@ -79,6 +88,12 @@ export class ChatGateway
 
       (client as any).userId = session.userId;
       (client as any).userName = session.user.name;
+      // sessionId: necesario para el cierre por-sesion al logout (R4). Lo guardamos
+      // tambien en client.data porque fetchSockets() devuelve RemoteSocket donde solo
+      // .data esta garantizado (los campos sueltos en el socket no se serializan).
+      (client as any).sessionId = session.id;
+      client.data.sessionId = session.id;
+      client.data.userId = session.userId;
 
       // Join personal room for real-time notifications
       client.join(`user:${session.userId}`);
@@ -92,6 +107,31 @@ export class ChatGateway
 
   handleDisconnect(client: Socket) {
     this.logger.log(`Cliente desconectado: ${client.id}`);
+  }
+
+  /**
+   * Desconecta los sockets de un usuario (R4: zombie sessions al logout/revoke).
+   * - Con `sessionId`: solo el socket de ESA sesion (logout por-sesion / revoke puntual).
+   * - Sin `sessionId`: TODOS los sockets del user (revoke-all / cerrar todas las sesiones).
+   * Itera la room personal `user:{userId}`. Lee `sessionId` de `socket.data` porque
+   * fetchSockets() devuelve RemoteSocket donde solo `.data` esta garantizado.
+   */
+  async disconnectUserSockets(userId: string, sessionId?: string): Promise<void> {
+    const sockets = await this.server.in(`user:${userId}`).fetchSockets();
+    let count = 0;
+    for (const socket of sockets) {
+      if (sessionId && socket.data?.sessionId !== sessionId) {
+        continue;
+      }
+      socket.disconnect(true);
+      count++;
+    }
+    if (count > 0) {
+      this.logger.log(
+        `Chat WS: desconectados ${count} socket(s) de user ${userId}` +
+          (sessionId ? ` (sessionId ${sessionId})` : ' (todas las sesiones)'),
+      );
+    }
   }
 
   @SubscribeMessage('message:send')
@@ -133,15 +173,40 @@ export class ChatGateway
     });
   }
 
+  /**
+   * Cliente solicita unirse a la room de un canal.
+   * VALIDA membership antes de unir — sin esto, cualquier user podia espiar
+   * mensajes en vivo de cualquier canal (CRITICO-1: eavesdropping multi-tenant).
+   * El userId se toma del SOCKET autenticado, NUNCA del payload del cliente.
+   * Espejo de tickets.gateway.ts handleJoinOrg.
+   */
   @SubscribeMessage('channel:join')
   async handleJoinChannel(
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { channelId: string },
   ) {
+    const userId = (client as any).userId as string | undefined;
+    if (!userId || !data?.channelId) {
+      return { success: false, error: 'Datos invalidos' };
+    }
+
+    const member = await this.prisma.channelMember.findFirst({
+      where: { channelId: data.channelId, userId },
+      select: { id: true },
+    });
+
+    if (!member) {
+      this.logger.warn(
+        `User ${userId} intento unirse al canal ${data.channelId} sin ser miembro`,
+      );
+      return { success: false, error: 'No sos miembro de este canal' };
+    }
+
     client.join(data.channelId);
     this.logger.log(
       `Cliente ${client.id} se unio al canal ${data.channelId}`,
     );
+    return { success: true };
   }
 
   @SubscribeMessage('channel:leave')

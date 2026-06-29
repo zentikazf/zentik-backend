@@ -20,6 +20,6 @@ import { OutboxModule } from '../sync/outbox.module';
     TicketsGateway,
     SlaCronService,
   ],
-  exports: [TicketService, TicketEventsService],
+  exports: [TicketService, TicketEventsService, TicketsGateway],
 })
 export class TicketModule {}
