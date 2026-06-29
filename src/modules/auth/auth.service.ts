@@ -449,6 +449,37 @@ export class AuthService {
       throw new UnauthorizedException('Usuario no encontrado');
     }
 
+    const organizations = user.organizationMembers.map((m) => {
+      let permissions = m.role.rolePermissions.map(
+        (rp) => `${rp.permission.action}:${rp.permission.resource}`,
+      );
+      // Owner always gets full access
+      if (m.role.name === 'Owner' && !permissions.includes('*:*')) {
+        permissions = ['*:*'];
+      }
+      return {
+        id: m.organization.id,
+        name: m.organization.name,
+        slug: m.organization.slug,
+        logo: m.organization.logo,
+        roleId: m.roleId,
+        roleName: m.role.name,
+        permissions,
+      };
+    });
+
+    // Feature #15 — Capa 1/2.
+    // - `organizationIds`: array plano de IDs (lo consume el MCP via introspect
+    //   /auth/me sin tener que recorrer el array `organizations` anidado).
+    // - `clientId`: id del client al que pertenece el user portal (null si no).
+    // - `permissions`: union de todos los permisos de todas las memberships
+    //   (el MCP arma scope per-org, pero necesita el set global para
+    //   capacity-checks rapidos del system prompt).
+    const organizationIds = user.organizationMembers.map((m) => m.organizationId);
+    const allPermissions = Array.from(
+      new Set(organizations.flatMap((o) => o.permissions)),
+    );
+
     return {
       user: {
         id: user.id,
@@ -471,24 +502,12 @@ export class AuthService {
             }
           : null,
       },
-      organizations: user.organizationMembers.map((m) => {
-        let permissions = m.role.rolePermissions.map(
-          (rp) => `${rp.permission.action}:${rp.permission.resource}`,
-        );
-        // Owner always gets full access
-        if (m.role.name === 'Owner' && !permissions.includes('*:*')) {
-          permissions = ['*:*'];
-        }
-        return {
-          id: m.organization.id,
-          name: m.organization.name,
-          slug: m.organization.slug,
-          logo: m.organization.logo,
-          roleId: m.roleId,
-          roleName: m.role.name,
-          permissions,
-        };
-      }),
+      organizations,
+      // Campos planos para consumidores que no quieren recorrer `organizations`.
+      // El MCP usa estos para construir AuthContext sin parser adicional.
+      organizationIds,
+      clientId: user.clientId ?? null,
+      permissions: allPermissions,
     };
   }
 

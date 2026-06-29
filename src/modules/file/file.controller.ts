@@ -31,7 +31,7 @@ import { FileService } from './file.service';
 import { FilePermissionsService } from './file.permissions';
 import { StorageService } from '../../infrastructure/storage/storage.service';
 import { PrismaService } from '../../database/prisma.service';
-import { AppException } from '../../common/filters/app-exception';
+import { AppException, UnauthorizedException } from '../../common/filters/app-exception';
 import { UpdateDocumentVisibilityDto } from './dto/update-document.dto';
 import { EditDocumentDto } from './dto/edit-document.dto';
 import { Request } from 'express';
@@ -98,11 +98,38 @@ export class FileController {
     });
   }
 
-  // PUBLIC — must be declared BEFORE files/:id to avoid route collision
+  // Servir bytes crudos de un archivo. Antes era publico sin auth — IDOR
+  // no autenticado total sobre el storage. Ahora:
+  //   - AVATAR: sigue publico (imagenes de perfil consumidas en <img src>).
+  //   - cualquier otra categoria: exige session valida + membership en la
+  //     org dueña del file; sino devuelve 404 para no leakear existencia.
+  // No usa @UseGuards(AuthGuard) porque el bypass de AVATAR requiere conocer
+  // la categoria del file ANTES de decidir si exigir auth, lo cual implica
+  // un lookup en DB que el guard no hace. La validacion de sesion se inlinea
+  // siguiendo el mismo patron de extraccion de token que AuthGuard.
+  // Debe declararse ANTES de files/:id para evitar colision de rutas.
   @Get('files/:id/raw')
-  @ApiOperation({ summary: 'Servir archivo por ID (publico, sin auth)' })
-  async serveFileById(@Param('id') id: string, @Res() res: Response) {
+  @ApiOperation({ summary: 'Servir archivo por ID (avatares publicos; resto requiere sesion + misma org)' })
+  async serveFileById(
+    @Param('id') id: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
     const file = await this.fileService.getById(id);
+
+    // Solo los avatares son accesibles sin autenticacion (UX de <img>).
+    // Para todo lo demas hace falta sesion valida + misma organizacion.
+    if (file.category !== 'AVATAR') {
+      const sessionUser = await this.resolveSessionUser(req);
+      if (!sessionUser) {
+        throw new UnauthorizedException('No se encontro un token de sesion valido');
+      }
+      if (file.organizationId !== sessionUser.organizationId) {
+        // 404 (no 403) para no leakear existencia de archivos de otras orgs.
+        throw new NotFoundException('Archivo no encontrado');
+      }
+    }
+
     const filePath = this.storage.getFilePath(file.key);
 
     try {
@@ -114,6 +141,52 @@ export class FileController {
     res.setHeader('Content-Type', file.mimeType || 'application/octet-stream');
     res.setHeader('Content-Disposition', `inline; filename="${file.originalName || 'file'}"`);
     res.sendFile(filePath);
+  }
+
+  /**
+   * Resuelve el usuario de sesion (cookie o Bearer header) sin invocar al
+   * AuthGuard global — necesario porque este endpoint tiene bypass condicional
+   * para avatares. Replica solo la extraccion de token + lookup de session,
+   * NO emite cookies ni hace sliding session (read path inocuo).
+   */
+  private async resolveSessionUser(req: Request): Promise<{ id: string; organizationId: string | null } | null> {
+    const token = this.extractSessionToken(req);
+    if (!token) return null;
+
+    const session = await this.prisma.session.findFirst({
+      where: { token, expiresAt: { gt: new Date() } },
+      select: {
+        user: {
+          select: {
+            id: true,
+            organizationMembers: {
+              select: { organizationId: true },
+              take: 1,
+            },
+          },
+        },
+      },
+    });
+
+    if (!session?.user) return null;
+
+    return {
+      id: session.user.id,
+      organizationId: session.user.organizationMembers[0]?.organizationId ?? null,
+    };
+  }
+
+  private extractSessionToken(req: Request): string | null {
+    const authHeader = req.headers.authorization;
+    if (authHeader?.startsWith('Bearer ')) {
+      return authHeader.slice(7);
+    }
+    const cookies = (req as Request & { cookies?: Record<string, string> }).cookies;
+    const sessionCookie =
+      cookies?.['zentik.session_token'] ||
+      cookies?.['better-auth.session_token'] ||
+      cookies?.['__Secure-better-auth.session_token'];
+    return sessionCookie ?? null;
   }
 
   @Get('files/:id/download')
