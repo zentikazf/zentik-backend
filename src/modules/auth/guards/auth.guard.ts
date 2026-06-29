@@ -53,6 +53,7 @@ export class AuthGuard implements CanActivate {
               email: true,
               name: true,
               emailVerified: true,
+              clientId: true,
               organizationMembers: {
                 select: {
                   organizationId: true,
@@ -70,7 +71,10 @@ export class AuthGuard implements CanActivate {
                     },
                   },
                 },
-                take: 1,
+                // Feature #15 — cargar TODAS las memberships (sin take:1) para
+                // poder exponer organizationIds[] al MCP y a cualquier modulo
+                // que necesite scoping multi-tenant. El "membership primario"
+                // (compat backwards) es el primer elemento.
               },
             },
           },
@@ -82,7 +86,11 @@ export class AuthGuard implements CanActivate {
       }
 
       const { user } = session;
+      // Primer membership = "primario" para campos legacy (organizationId,
+      // roleId, roleName, permissions). Se mantiene la semantica previa para
+      // backwards-compat con modulos que leen user.organizationId singular.
       const membership = user.organizationMembers[0];
+      const organizationIds = user.organizationMembers.map((m) => m.organizationId);
 
       let permissions = membership?.role?.rolePermissions?.map(
         (rp) => `${rp.permission.action}:${rp.permission.resource}`,
@@ -116,6 +124,8 @@ export class AuthGuard implements CanActivate {
         email: user.email,
         name: user.name,
         organizationId: membership?.organizationId,
+        organizationIds,
+        clientId: user.clientId ?? null,
         roleId: membership?.roleId,
         roleName: membership?.role?.name,
         permissions,

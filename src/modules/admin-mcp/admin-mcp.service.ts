@@ -12,6 +12,7 @@ import {
   ToolDefinition,
 } from './providers/llm-provider.interface';
 import { buildSystemPrompt } from './system-prompt';
+import { sanitizeToolArgs, summarizeToolArgsForLog } from './lib/sanitize-args';
 import {
   LlmProviderException,
   MaxIterationsException,
@@ -78,7 +79,14 @@ export class AdminMcpChatService {
 
     try {
       const tools = await this.getToolsList({ bearerToken, traceId });
-      const systemPrompt = buildSystemPrompt(tools);
+      // Feature #15 R8 — enriquecer el system prompt con user/org context.
+      // El AuthGuard del backend ya pobla `user.organizationIds` (sin
+      // take:1); aca lo propagamos al LLM como contexto explicito.
+      const systemPrompt = buildSystemPrompt(tools, {
+        userId: user.id,
+        orgIds: user.organizationIds ?? [],
+        clientId: user.clientId ?? null,
+      });
 
       // Historial mutable que se va enriqueciendo con tool_use / tool_result.
       const conversation: ChatMessage[] = input.messages.map((m) => ({
@@ -166,12 +174,17 @@ export class AdminMcpChatService {
         // Ejecutar cada tool secuencialmente y append tool messages.
         for (const tc of llmResp.toolCalls) {
           const toolStart = Date.now();
+          // Feature #15 R34 — NO loggear args crudo (puede contener PII).
+          // Solo keys top-level + sus tipos para auditabilidad estructural.
+          const argsSummary = summarizeToolArgsForLog(tc.args);
           this.logger.log({
             event: 'admin-mcp.tool.call.start',
             traceId,
             userId: user.id,
             iteration: iterations,
             tool: tc.name,
+            argsKeys: argsSummary.argsKeys,
+            argsTypes: argsSummary.argsTypes,
           });
 
           let toolOk = false;
@@ -215,13 +228,20 @@ export class AdminMcpChatService {
             userId: user.id,
             iteration: iterations,
             tool: tc.name,
+            // Misma redaccion estructural que el .start (R34).
+            argsKeys: argsSummary.argsKeys,
+            argsTypes: argsSummary.argsTypes,
             latencyMs,
             ok: toolOk,
           });
 
+          // Feature #15 R33 — sanitizar args antes de serializar al frontend.
+          // El frontend muestra el desglose de tool_calls; cualquier email/
+          // phone/token/secret que el LLM haya pasado se redacta a
+          // "[redacted]" preservando el shape del objeto.
           toolCallsSummary.push({
             tool: tc.name,
-            args: tc.args,
+            args: sanitizeToolArgs(tc.args),
             latencyMs,
             ok: toolOk,
           });

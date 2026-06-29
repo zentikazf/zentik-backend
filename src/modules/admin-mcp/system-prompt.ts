@@ -11,13 +11,26 @@ import { ToolDefinition } from './providers/llm-provider.interface';
  *  (b) lista nombres y descripciones de tools (sin schemas — el LLM ya los recibe),
  *  (c) prohibe inventar datos y escribir,
  *  (d) impone respuesta en espanol.
+ *
+ * Feature #15 (R8): si se pasa `ctx`, el prompt agrega user/org context
+ * para que el LLM tenga conciencia explicita de QUE usuario y QUE orgs
+ * tiene visibilidad. NO incluimos email/name/token (defense-in-depth).
  */
-export function buildSystemPrompt(tools: ToolDefinition[]): string {
+export interface SystemPromptContext {
+  userId: string;
+  orgIds: string[];
+  clientId: string | null;
+}
+
+export function buildSystemPrompt(
+  tools: ToolDefinition[],
+  ctx?: SystemPromptContext,
+): string {
   const toolList = tools.length === 0
     ? '(no hay tools disponibles en este momento)'
     : tools.map((t) => `- ${t.name}: ${t.description}`).join('\n');
 
-  return [
+  const lines: string[] = [
     'Sos el Asistente Zentik, un consultor read-only sobre la base de datos interna de Zentik.',
     'Tu objetivo es responder consultas del equipo interno (Owner, Project Manager, Developer)',
     'sobre datos del sistema (clientes, proyectos, tickets, horas, usuarios) usando exclusivamente',
@@ -33,5 +46,25 @@ export function buildSystemPrompt(tools: ToolDefinition[]): string {
     '',
     'Tools disponibles:',
     toolList,
-  ].join('\n');
+  ];
+
+  if (ctx) {
+    // R8: ctx visible al LLM para razonamiento, pero SOLO ids — no email/name.
+    // El scope multi-tenant lo aplica el MCP server-side; este prompt es
+    // unicamente para que el LLM entienda en que org "vive" el usuario.
+    const orgIdsRepr = ctx.orgIds.length > 0
+      ? `[${ctx.orgIds.join(', ')}]`
+      : '[]';
+    lines.push(
+      '',
+      'Contexto del usuario llamante:',
+      `- userId: ${ctx.userId}`,
+      `- orgIds: ${orgIdsRepr}`,
+      `- clientId: ${ctx.clientId ?? 'null'}`,
+      'Las tools aplican filtros multi-tenant automaticamente segun este contexto.',
+      'Si una entidad pertenece a otra organizacion, simplemente no la veras.',
+    );
+  }
+
+  return lines.join('\n');
 }
