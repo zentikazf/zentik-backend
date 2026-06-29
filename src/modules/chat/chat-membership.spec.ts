@@ -5,6 +5,7 @@ import { ChannelService, MessageService } from './chat.service';
 import { ChatGateway } from './chat.gateway';
 import { PrismaService } from '../../database/prisma.service';
 import { StorageService } from '../../infrastructure/storage/storage.service';
+import { SessionValidityService } from '../auth/session-validity.service';
 import { AppException } from '../../common/filters/app-exception';
 import { SendMessageDto } from './dto/send-message.dto';
 
@@ -28,6 +29,7 @@ describe('Chat — membership gate (feature #18)', () => {
   let prisma: DeepMockProxy<PrismaService>;
   let eventEmitter: DeepMockProxy<EventEmitter2>;
   let storage: DeepMockProxy<StorageService>;
+  let sessionValidity: DeepMockProxy<SessionValidityService>;
   let messageService: MessageService;
   let channelService: ChannelService;
   let gateway: ChatGateway;
@@ -43,10 +45,14 @@ describe('Chat — membership gate (feature #18)', () => {
     prisma = mockDeep<PrismaService>();
     eventEmitter = mockDeep<EventEmitter2>();
     storage = mockDeep<StorageService>();
+    sessionValidity = mockDeep<SessionValidityService>();
+    // Por default la sesion esta viva (el gate de membership es lo que se testea
+    // aca; la revalidacion de sesion #19 tiene su propio spec).
+    sessionValidity.isSessionLive.mockResolvedValue(true);
 
     messageService = new MessageService(prisma, eventEmitter, storage);
     channelService = new ChannelService(prisma, eventEmitter);
-    gateway = new ChatGateway(messageService, prisma);
+    gateway = new ChatGateway(messageService, prisma, sessionValidity);
 
     // Camino feliz de create (cuando el membership gate NO bloquea).
     prisma.user.findUnique.mockResolvedValue({ clientId: null } as never);
@@ -67,7 +73,12 @@ describe('Chat — membership gate (feature #18)', () => {
     it('(a) user NO miembro → join rechazado, NO se une a la room', async () => {
       setMembership(false);
       const join = jest.fn();
-      const client = { id: 'sock-1', userId: OUTSIDER_USER_ID, join } as unknown as Socket;
+      const client = {
+        id: 'sock-1',
+        userId: OUTSIDER_USER_ID,
+        join,
+        data: { sessionId: 'sess-1' },
+      } as unknown as Socket;
 
       const result = await gateway.handleJoinChannel(client, { channelId: CHANNEL_ID });
 
@@ -78,7 +89,12 @@ describe('Chat — membership gate (feature #18)', () => {
     it('(d) user miembro → join OK, se une a la room', async () => {
       setMembership(true);
       const join = jest.fn();
-      const client = { id: 'sock-2', userId: MEMBER_USER_ID, join } as unknown as Socket;
+      const client = {
+        id: 'sock-2',
+        userId: MEMBER_USER_ID,
+        join,
+        data: { sessionId: 'sess-2' },
+      } as unknown as Socket;
 
       const result = await gateway.handleJoinChannel(client, { channelId: CHANNEL_ID });
 
@@ -89,7 +105,12 @@ describe('Chat — membership gate (feature #18)', () => {
     it('usa el userId del SOCKET, no del payload (no se puede spoofear)', async () => {
       setMembership(false);
       const join = jest.fn();
-      const client = { id: 'sock-3', userId: OUTSIDER_USER_ID, join } as unknown as Socket;
+      const client = {
+        id: 'sock-3',
+        userId: OUTSIDER_USER_ID,
+        join,
+        data: { sessionId: 'sess-3' },
+      } as unknown as Socket;
 
       await gateway.handleJoinChannel(client, { channelId: CHANNEL_ID });
 

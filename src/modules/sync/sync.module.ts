@@ -18,9 +18,9 @@ import { SyncAdminController } from './sync-admin.controller';
  * - PrismaModule / RedisModule / AppConfigModule son @Global → no se importan.
  * - Importa AuthModule para reusar AuthGuard + RolesGuard (no duplicarlos), igual
  *   que admin-mcp.module (feature #8).
- * - `@Cron`/`@OnEvent` se descubren globalmente (ScheduleModule.forRoot ya está en
- *   ticket.module; EventEmitterModule.forRoot es global en app.module) — NO se
- *   re-registra `forRoot` aquí.
+ * - `@Cron`/`@OnEvent` se descubren globalmente (ScheduleModule.forRoot está en
+ *   app.module — único y global desde #19; EventEmitterModule.forRoot también es
+ *   global en app.module) — NO se re-registra `forRoot` aquí.
  */
 @Module({
   imports: [AuthModule, OutboxModule],

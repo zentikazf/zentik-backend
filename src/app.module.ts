@@ -2,6 +2,7 @@ import { Module, MiddlewareConsumer, NestModule } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
 import { EventEmitterModule } from '@nestjs/event-emitter';
+import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { CorrelationIdMiddleware } from './common/middleware';
 import { PrismaModule } from './database/prisma.module';
@@ -52,6 +53,13 @@ import { SyncModule } from './modules/sync/sync.module';
     }),
     AppConfigModule,
     EventEmitterModule.forRoot(),
+    // ScheduleModule.forRoot() UNICO y global (#19 ALTO-2): registra el unico
+    // explorer que descubre @Cron/@Interval de TODA la app (SlaCronService de
+    // ticket + los @Interval de session-revalidation de chat/tickets gateway).
+    // Movido aca desde ticket.module.ts: un segundo forRoot() registraria un
+    // segundo explorer y el re-registro del mismo nombre de interval lanzaria
+    // `Interval already exists`. Importar `ScheduleModule` a secas es no-op.
+    ScheduleModule.forRoot(),
     ThrottlerModule.forRoot([
       { name: 'short', ttl: 1000, limit: 3 },
       { name: 'medium', ttl: 10000, limit: 20 },

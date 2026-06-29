@@ -8,10 +8,16 @@ import {
   ConnectedSocket,
 } from '@nestjs/websockets';
 import { Logger } from '@nestjs/common';
+import { Interval } from '@nestjs/schedule';
 import { OnEvent } from '@nestjs/event-emitter';
 import { Server, Socket } from 'socket.io';
 import { MessageService } from './chat.service';
 import { PrismaService } from '../../database/prisma.service';
+import { SessionValidityService } from '../auth/session-validity.service';
+
+/** Codigos de rechazo de auth emitidos via `auth:error` (#19 BAJO-2). El frontend
+ * los consume tal cual como senal primaria para hacer logout. */
+type AuthErrorCode = 'NO_TOKEN' | 'INVALID_SESSION' | 'SERVER_ERROR';
 
 @WebSocketGateway({
   cors: {
@@ -43,6 +49,7 @@ export class ChatGateway
   constructor(
     private readonly messageService: MessageService,
     private readonly prisma: PrismaService,
+    private readonly sessionValidity: SessionValidityService,
   ) {}
 
   private extractTokenFromCookies(cookieHeader?: string): string | undefined {
@@ -58,6 +65,54 @@ export class ChatGateway
     return undefined;
   }
 
+  /**
+   * Extrae UA e IP del handshake (#19 MEDIO-1). UA del header `user-agent`; IP de
+   * X-Forwarded-For[0] con fallback a `handshake.address`. XFF[0] es spoofeable sin
+   * trust proxy → la IP NUNCA sube a hard-bind en este stack (solo soft-log).
+   */
+  private getClientContext(client: Socket): { ua?: string; ip?: string } {
+    const headers = client.handshake.headers || {};
+    const ua =
+      typeof headers['user-agent'] === 'string' ? headers['user-agent'] : undefined;
+    const xff = headers['x-forwarded-for'];
+    let ip: string | undefined;
+    if (typeof xff === 'string' && xff.length > 0) {
+      ip = xff.split(',')[0]?.trim();
+    } else if (Array.isArray(xff) && xff.length > 0) {
+      ip = xff[0]?.split(',')[0]?.trim();
+    }
+    if (!ip) ip = client.handshake.address;
+    return { ua, ip };
+  }
+
+  /**
+   * Rechaza un socket en el camino de auth (#19 BAJO-2). Emite `auth:error` con el
+   * code (senal primaria tipada que el frontend usa para logout) ANTES de
+   * `disconnect(true)`. El writeBuffer de socket.io se drena antes de cerrar el
+   * transporte, asi que el paquete llega; `'io server disconnect'` queda de respaldo.
+   */
+  private rejectAuth(client: Socket, code: AuthErrorCode): void {
+    client.emit('auth:error', { code });
+    client.disconnect(true);
+  }
+
+  /**
+   * Revalida la sesion del socket en el acto (#19 ALTO-2, capa 2b). Cierra la
+   * ventana de 60s del @Interval para acciones sensibles: si la sesion ya no esta
+   * viva, emite `session:expired`, desconecta y devuelve false para que el handler
+   * corte. FAIL-OPEN: una excepcion de DB en isSessionLive devuelve true (no corta).
+   */
+  private async assertLiveSession(client: Socket): Promise<boolean> {
+    const sessionId = client.data?.sessionId as string | undefined;
+    if (!sessionId) return false;
+    const live = await this.sessionValidity.isSessionLive(sessionId);
+    if (!live) {
+      client.emit('session:expired');
+      client.disconnect(true);
+    }
+    return live;
+  }
+
   async handleConnection(client: Socket) {
     const token =
       client.handshake.auth?.token ||
@@ -68,7 +123,7 @@ export class ChatGateway
       this.logger.warn(
         `Cliente ${client.id} rechazado: sin token de autenticacion`,
       );
-      client.disconnect();
+      this.rejectAuth(client, 'NO_TOKEN');
       return;
     }
 
@@ -77,13 +132,36 @@ export class ChatGateway
     try {
       const session = await this.prisma.session.findFirst({
         where: { token: sessionToken, expiresAt: { gt: new Date() } },
-        select: { id: true, userId: true, user: { select: { id: true, name: true } } },
+        select: {
+          id: true,
+          userId: true,
+          ipAddress: true,
+          userAgent: true,
+          user: { select: { id: true, name: true } },
+        },
       });
 
       if (!session) {
         this.logger.warn(`Cliente ${client.id} rechazado: session invalida`);
-        client.disconnect();
+        this.rejectAuth(client, 'INVALID_SESSION');
         return;
+      }
+
+      // Bind UA/IP del handshake vs la sesion (#19 MEDIO-1). SOFT-LOG en este
+      // deploy: si difieren se loguea pero NO se desconecta (Android System
+      // WebView se auto-actualiza → UA del handshake difiere del congelado en
+      // login = falso positivo). Guardas null (`session.x && y &&`) protegen
+      // sesiones legacy con campos null. El hard-reject queda detras de D1.
+      const { ua, ip } = this.getClientContext(client);
+      if (session.userAgent && ua && session.userAgent.trim() !== ua.trim()) {
+        this.logger.warn(
+          `Chat WS: UA mismatch user ${session.userId} (socket ${client.id}) — soft-log, no desconecta`,
+        );
+      }
+      if (session.ipAddress && ip && session.ipAddress.trim() !== ip.trim()) {
+        this.logger.warn(
+          `Chat WS: IP mismatch user ${session.userId} (socket ${client.id}) — soft-log, no desconecta`,
+        );
       }
 
       (client as any).userId = session.userId;
@@ -101,12 +179,41 @@ export class ChatGateway
       this.logger.log(`Cliente conectado: ${client.id} (user: ${session.userId})`);
     } catch (error) {
       this.logger.error(`Error validando session para ${client.id}`, error);
-      client.disconnect();
+      this.rejectAuth(client, 'SERVER_ERROR');
     }
   }
 
   handleDisconnect(client: Socket) {
     this.logger.log(`Cliente desconectado: ${client.id}`);
+  }
+
+  /**
+   * Heartbeat de revalidacion de sesion en vivo (#19 ALTO-2, capa 2a). Cada 60s
+   * barre TODO el namespace via fetchSockets() (devuelve RemoteSocket → solo
+   * `socket.data` esta garantizado, por eso leemos `data.sessionId`) y desconecta
+   * los sockets cuya sesion ya no esta viva (expiro por TTL o se revoco). Cubre
+   * sockets ociosos sin trafico. Nombre unico para no colisionar con tickets.
+   * El ciclo entero va en try/catch: un fallo global se saltea sin matar sockets.
+   */
+  @Interval('chat-session-revalidation', 60000)
+  async revalidateSessions(): Promise<void> {
+    try {
+      const sockets = await this.server.fetchSockets();
+      for (const socket of sockets) {
+        const sessionId = socket.data?.sessionId as string | undefined;
+        if (!sessionId) continue;
+        const live = await this.sessionValidity.isSessionLive(sessionId);
+        if (!live) {
+          socket.emit('session:expired');
+          socket.disconnect(true);
+          this.logger.log(
+            `Chat WS: socket ${socket.id} desconectado por sesion no viva (${sessionId})`,
+          );
+        }
+      }
+    } catch (error) {
+      this.logger.error('Chat WS: error en el ciclo de revalidacion de sesiones', error as Error);
+    }
   }
 
   /**
@@ -140,6 +247,12 @@ export class ChatGateway
     @MessageBody()
     data: { channelId: string; content: string; parentId?: string },
   ) {
+    // Revalida la sesion en el acto (#19 ALTO-2): un message:send con sesion ya
+    // revocada se rechaza al instante, sin esperar al heartbeat de 60s.
+    if (!(await this.assertLiveSession(client))) {
+      return { success: false, error: 'Sesión expirada' };
+    }
+
     try {
       const userId = (client as any).userId;
 
@@ -161,14 +274,29 @@ export class ChatGateway
     }
   }
 
+  /**
+   * Indicador de "escribiendo" (#19 MEDIO-2: typing no-spoofeable).
+   * - La identidad SIEMPRE proviene del socket autenticado (userId/userName),
+   *   NUNCA del payload del cliente (igual que handleMessage/handleJoinChannel).
+   *   El payload entrante solo aporta `channelId`.
+   * - Gate de membership zero-DB: `client.rooms.has(channelId)`. INVARIANTE: la
+   *   UNICA via de entrar a la room de un canal es `handleJoinChannel`, que ya
+   *   valido `ChannelMember`. Por eso estar en la room == ser miembro, sin query.
+   * - Reemite con `client.to(room)` para EXCLUIR al emisor.
+   */
   @SubscribeMessage('message:typing')
   async handleTyping(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { channelId: string; userId: string; userName: string },
+    @MessageBody() data: { channelId: string },
   ) {
+    const userId = (client as any).userId as string | undefined;
+    const userName = (client as any).userName as string | undefined;
+    if (!userId || !data?.channelId || !client.rooms.has(data.channelId)) {
+      return;
+    }
     client.to(data.channelId).emit('message:typing', {
-      userId: data.userId,
-      userName: data.userName,
+      userId,
+      userName,
       channelId: data.channelId,
     });
   }
@@ -185,6 +313,11 @@ export class ChatGateway
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { channelId: string },
   ) {
+    // Revalida la sesion en el acto (#19 ALTO-2) antes de exponer la room.
+    if (!(await this.assertLiveSession(client))) {
+      return { success: false, error: 'Sesión expirada' };
+    }
+
     const userId = (client as any).userId as string | undefined;
     if (!userId || !data?.channelId) {
       return { success: false, error: 'Datos invalidos' };
