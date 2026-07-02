@@ -8,10 +8,16 @@ import {
   ConnectedSocket,
 } from '@nestjs/websockets';
 import { Logger } from '@nestjs/common';
+import { Interval } from '@nestjs/schedule';
 import { OnEvent } from '@nestjs/event-emitter';
 import { Server, Socket } from 'socket.io';
 import { PrismaService } from '../../database/prisma.service';
 import { AppConfigService } from '../../config/app.config';
+import { SessionValidityService } from '../auth/session-validity.service';
+
+/** Codigos de rechazo de auth emitidos via `auth:error` (#19 BAJO-2). El frontend
+ * los consume tal cual como senal primaria para hacer logout. */
+type AuthErrorCode = 'NO_TOKEN' | 'INVALID_SESSION' | 'SERVER_ERROR';
 
 /**
  * TicketsGateway — WebSocket para sincronizacion bidireccional ticket↔kanban en tiempo real.
@@ -57,11 +63,58 @@ export class TicketsGateway implements OnGatewayConnection, OnGatewayDisconnect 
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: AppConfigService,
+    private readonly sessionValidity: SessionValidityService,
   ) {}
 
   // ────────────────────────────────────────────────────────────
   // Auth helpers (replican el patron de chat.gateway.ts)
   // ────────────────────────────────────────────────────────────
+
+  /**
+   * Extrae UA e IP del handshake (#19 MEDIO-1). UA del header `user-agent`; IP de
+   * X-Forwarded-For[0] con fallback a `handshake.address`. XFF[0] es spoofeable sin
+   * trust proxy → la IP NUNCA sube a hard-bind en este stack (solo soft-log).
+   */
+  private getClientContext(client: Socket): { ua?: string; ip?: string } {
+    const headers = client.handshake.headers || {};
+    const ua =
+      typeof headers['user-agent'] === 'string' ? headers['user-agent'] : undefined;
+    const xff = headers['x-forwarded-for'];
+    let ip: string | undefined;
+    if (typeof xff === 'string' && xff.length > 0) {
+      ip = xff.split(',')[0]?.trim();
+    } else if (Array.isArray(xff) && xff.length > 0) {
+      ip = xff[0]?.split(',')[0]?.trim();
+    }
+    if (!ip) ip = client.handshake.address;
+    return { ua, ip };
+  }
+
+  /**
+   * Rechaza un socket en el camino de auth (#19 BAJO-2). Emite `auth:error` con el
+   * code (senal primaria tipada que el frontend usa para logout) ANTES de
+   * `disconnect(true)`. `'io server disconnect'` queda de respaldo.
+   */
+  private rejectAuth(client: Socket, code: AuthErrorCode): void {
+    client.emit('auth:error', { code });
+    client.disconnect(true);
+  }
+
+  /**
+   * Revalida la sesion del socket en el acto (#19 ALTO-2, capa 2b). Si la sesion
+   * ya no esta viva, emite `session:expired`, desconecta y devuelve false. FAIL-OPEN:
+   * una excepcion de DB en isSessionLive devuelve true (no corta).
+   */
+  private async assertLiveSession(client: Socket): Promise<boolean> {
+    const sessionId = client.data?.sessionId as string | undefined;
+    if (!sessionId) return false;
+    const live = await this.sessionValidity.isSessionLive(sessionId);
+    if (!live) {
+      client.emit('session:expired');
+      client.disconnect(true);
+    }
+    return live;
+  }
 
   private extractTokenFromCookies(cookieHeader?: string): string | undefined {
     if (!cookieHeader) return undefined;
@@ -88,7 +141,7 @@ export class TicketsGateway implements OnGatewayConnection, OnGatewayDisconnect 
 
     if (!token) {
       this.logger.warn(`Cliente ${client.id} rechazado: sin token`);
-      client.disconnect();
+      this.rejectAuth(client, 'NO_TOKEN');
       return;
     }
 
@@ -97,17 +150,44 @@ export class TicketsGateway implements OnGatewayConnection, OnGatewayDisconnect 
     try {
       const session = await this.prisma.session.findFirst({
         where: { token: sessionToken, expiresAt: { gt: new Date() } },
-        select: { userId: true, user: { select: { id: true, name: true } } },
+        select: {
+          id: true,
+          userId: true,
+          ipAddress: true,
+          userAgent: true,
+          user: { select: { id: true, name: true } },
+        },
       });
 
       if (!session) {
         this.logger.warn(`Cliente ${client.id} rechazado: session invalida`);
-        client.disconnect();
+        this.rejectAuth(client, 'INVALID_SESSION');
         return;
+      }
+
+      // Bind UA/IP del handshake vs la sesion (#19 MEDIO-1). SOFT-LOG en este
+      // deploy: si difieren se loguea pero NO se desconecta (falsos positivos
+      // moviles). Guardas null protegen sesiones legacy. Hard-reject detras de D1.
+      const { ua, ip } = this.getClientContext(client);
+      if (session.userAgent && ua && session.userAgent.trim() !== ua.trim()) {
+        this.logger.warn(
+          `Tickets WS: UA mismatch user ${session.userId} (socket ${client.id}) — soft-log, no desconecta`,
+        );
+      }
+      if (session.ipAddress && ip && session.ipAddress.trim() !== ip.trim()) {
+        this.logger.warn(
+          `Tickets WS: IP mismatch user ${session.userId} (socket ${client.id}) — soft-log, no desconecta`,
+        );
       }
 
       (client as any).userId = session.userId;
       (client as any).userName = session.user.name;
+      // sessionId: necesario para el cierre por-sesion al logout (R4). Lo guardamos
+      // tambien en client.data porque fetchSockets() devuelve RemoteSocket donde solo
+      // .data esta garantizado (los campos sueltos en el socket no se serializan).
+      (client as any).sessionId = session.id;
+      client.data.sessionId = session.id;
+      client.data.userId = session.userId;
 
       // Room personal para mensajes dirigidos a este usuario
       client.join(`user:${session.userId}`);
@@ -115,12 +195,65 @@ export class TicketsGateway implements OnGatewayConnection, OnGatewayDisconnect 
       this.logger.log(`Tickets WS conectado: ${client.id} (user=${session.userId})`);
     } catch (error) {
       this.logger.error(`Error validando session para ${client.id}`, error as Error);
-      client.disconnect();
+      this.rejectAuth(client, 'SERVER_ERROR');
     }
   }
 
   handleDisconnect(client: Socket) {
     this.logger.log(`Tickets WS desconectado: ${client.id}`);
+  }
+
+  /**
+   * Heartbeat de revalidacion de sesion en vivo (#19 ALTO-2, capa 2a). Cada 60s
+   * barre TODO el namespace via fetchSockets() (RemoteSocket → solo `socket.data`
+   * garantizado) y desconecta los sockets cuya sesion ya no esta viva. Nombre unico
+   * (`tickets-session-revalidation`) para no colisionar con el de chat. El ciclo va
+   * en try/catch: un fallo global se saltea sin matar sockets.
+   */
+  @Interval('tickets-session-revalidation', 60000)
+  async revalidateSessions(): Promise<void> {
+    try {
+      const sockets = await this.server.fetchSockets();
+      for (const socket of sockets) {
+        const sessionId = socket.data?.sessionId as string | undefined;
+        if (!sessionId) continue;
+        const live = await this.sessionValidity.isSessionLive(sessionId);
+        if (!live) {
+          socket.emit('session:expired');
+          socket.disconnect(true);
+          this.logger.log(
+            `Tickets WS: socket ${socket.id} desconectado por sesion no viva (${sessionId})`,
+          );
+        }
+      }
+    } catch (error) {
+      this.logger.error('Tickets WS: error en el ciclo de revalidacion de sesiones', error as Error);
+    }
+  }
+
+  /**
+   * Desconecta los sockets de un usuario (R4: zombie sessions al logout/revoke).
+   * - Con `sessionId`: solo el socket de ESA sesion (logout por-sesion / revoke puntual).
+   * - Sin `sessionId`: TODOS los sockets del user (revoke-all / cerrar todas las sesiones).
+   * Itera la room personal `user:{userId}`. Lee `sessionId` de `socket.data` porque
+   * fetchSockets() devuelve RemoteSocket donde solo `.data` esta garantizado.
+   */
+  async disconnectUserSockets(userId: string, sessionId?: string): Promise<void> {
+    const sockets = await this.server.in(`user:${userId}`).fetchSockets();
+    let count = 0;
+    for (const socket of sockets) {
+      if (sessionId && socket.data?.sessionId !== sessionId) {
+        continue;
+      }
+      socket.disconnect(true);
+      count++;
+    }
+    if (count > 0) {
+      this.logger.log(
+        `Tickets WS: desconectados ${count} socket(s) de user ${userId}` +
+          (sessionId ? ` (sessionId ${sessionId})` : ' (todas las sesiones)'),
+      );
+    }
   }
 
   /**
@@ -133,6 +266,11 @@ export class TicketsGateway implements OnGatewayConnection, OnGatewayDisconnect 
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { orgId: string },
   ) {
+    // Revalida la sesion en el acto (#19 ALTO-2) antes de exponer la room de org.
+    if (!(await this.assertLiveSession(client))) {
+      return { success: false, error: 'Sesión expirada' };
+    }
+
     const userId = (client as any).userId as string | undefined;
     if (!userId || !data?.orgId) {
       return { success: false, error: 'Datos invalidos' };
@@ -220,5 +358,63 @@ export class TicketsGateway implements OnGatewayConnection, OnGatewayDisconnect 
       previousAssigneeId: payload.previousAssigneeId,
       newAssigneeId: payload.newAssigneeId,
     });
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // Aprobaciones → senal fina de invalidacion del badge (#20)
+  // ────────────────────────────────────────────────────────────
+  //
+  // Patron: el backend NO empuja el numero, solo dice "refresca". El cliente
+  // refetchea el count() real (DB = fuente de verdad), inmune al desync +1/-1.
+  // Reusa la room por-org ya poblada (`org:{orgId}`) y el shape en pasado de los
+  // emit de ticket (`approvals:updated`, NO imperativo `:invalidate`).
+  //
+  // EventEmitterModule es global (app.module.ts) → este gateway escucha los
+  // eventos de dominio `task.approval.*` y `task.moved` SIN importar TaskModule
+  // ni BoardModule (igual que ticket-sync.listener.ts ya hace).
+  //
+  // `payload.organizationId` SIEMPRE viene del helper `domainEvent(...)` (spread
+  // en el emit). Leemos SOLO ese campo: `entityId` en la variante board es el
+  // `boardId`, no la org — usarlo seria un bug de scope.
+
+  /**
+   * Emite la senal de invalidacion de aprobaciones a la room de la org. Helper
+   * privado para no duplicar el guard + emit en cada listener.
+   */
+  private emitApprovalsUpdated(organizationId?: string): void {
+    if (!organizationId) return;
+    this.server
+      .to(`org:${organizationId}`)
+      .emit('approvals:updated', { orgId: organizationId });
+  }
+
+  /**
+   * Toda transicion del flujo de aprobacion (solicitud / aprobada / rechazada)
+   * cambia el count de pendientes → invalidamos el badge de los admins de la org.
+   */
+  @OnEvent('task.approval.requested')
+  @OnEvent('task.approval.approved')
+  @OnEvent('task.approval.rejected')
+  emitApprovalsUpdatedFromApproval(payload: { organizationId?: string }) {
+    this.emitApprovalsUpdated(payload.organizationId);
+  }
+
+  /**
+   * Salida/entrada de IN_REVIEW por drag&drop del kanban (`task.moved`) tambien
+   * cambia el count de aprobaciones, PERO `task.moved` se emite en CADA drag. Por
+   * eso gateamos adentro: solo invalidamos si el movimiento toca IN_REVIEW (entra
+   * o sale), para no disparar un refetch en cada movimiento de tarjeta.
+   */
+  @OnEvent('task.moved')
+  emitApprovalsUpdatedFromMove(payload: {
+    organizationId?: string;
+    previousStatus?: string;
+    newStatus?: string;
+  }) {
+    if (!payload.organizationId) return;
+    const touchesReview =
+      payload.previousStatus === 'IN_REVIEW' || payload.newStatus === 'IN_REVIEW';
+    if (!touchesReview) return;
+    this.emitApprovalsUpdated(payload.organizationId);
   }
 }

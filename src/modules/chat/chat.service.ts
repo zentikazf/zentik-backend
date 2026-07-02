@@ -209,9 +209,24 @@ export class ChannelService {
   }
 
   /**
-   * Get channel members
+   * Get channel members.
+   * Membership gate (feature #18, R2): solo un miembro del canal puede listar a
+   * los miembros. Sin esto, cualquier user podia enumerar miembros de un canal ajeno.
    */
-  async getMembers(channelId: string) {
+  async getMembers(channelId: string, requesterId: string) {
+    const membership = await this.prisma.channelMember.findFirst({
+      where: { channelId, userId: requesterId },
+      select: { id: true },
+    });
+    if (!membership) {
+      throw new AppException(
+        'No tenés acceso a este canal',
+        'CHANNEL_FORBIDDEN',
+        403,
+        { channelId },
+      );
+    }
+
     return this.prisma.channelMember.findMany({
       where: { channelId },
       include: {
@@ -323,9 +338,26 @@ export class MessageService {
 
   async findByChannel(
     channelId: string,
+    requesterId: string,
     cursor?: string,
     limit: number = 50,
   ) {
+    // Membership gate (feature #18, R2): solo un miembro del canal puede leer sus
+    // mensajes via REST. Sin esto, GET /channels/:id/messages filtraba historial
+    // de cualquier canal a cualquier user autenticado (CRITICO-2: disclosure por HTTP).
+    const membership = await this.prisma.channelMember.findFirst({
+      where: { channelId, userId: requesterId },
+      select: { id: true },
+    });
+    if (!membership) {
+      throw new AppException(
+        'No tenés acceso a este canal',
+        'CHANNEL_FORBIDDEN',
+        403,
+        { channelId },
+      );
+    }
+
     const where: any = {
       channelId,
     };
@@ -357,6 +389,23 @@ export class MessageService {
     userId: string,
     dto: SendMessageDto,
   ) {
+    // Membership gate (feature #18, R3): validar que el sender sea miembro del
+    // canal ANTES de crear el mensaje. Cubre WS (message:send) y POST REST por un
+    // solo punto. Sin esto, cualquier user podia escribir en un canal ajeno (ALTO-1).
+    // El userId siempre proviene del request autenticado (socket/sesion), no del body.
+    const membership = await this.prisma.channelMember.findFirst({
+      where: { channelId, userId },
+      select: { id: true },
+    });
+    if (!membership) {
+      throw new AppException(
+        'No tenés acceso a este canal',
+        'CHANNEL_FORBIDDEN',
+        403,
+        { channelId },
+      );
+    }
+
     // Gate read-only (feature #11): si el canal pertenece a un ticket RESOLVED
     // (terminal) y el sender es cliente (User.clientId !== null), rechazar. El
     // staff (clientId === null) y los tickets en cualquier otro estado pasan sin

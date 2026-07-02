@@ -13,6 +13,7 @@ import {
 } from './providers/llm-provider.interface';
 import { buildSystemPrompt } from './system-prompt';
 import { sanitizeToolArgs, summarizeToolArgsForLog } from './lib/sanitize-args';
+import { sanitizeChatResponse } from './lib/sanitize-chat-response';
 import {
   LlmProviderException,
   MaxIterationsException,
@@ -152,8 +153,25 @@ export class AdminMcpChatService {
             iterations,
             toolCallsCount: toolCallsSummary.length,
           });
+
+          // Feature admin-mcp-chat-ux-hardening T4 — sanitizar reply final
+          // (CUIDs, nombres de tools, disclaimers scoping) ANTES de retornar.
+          // NO se aplica a iteraciones intermedias: el LLM necesita ver los
+          // CUIDs internamente para razonar y llamar tools correctamente.
+          const reply = llmResp.content || '';
+          const { sanitized, filtersApplied } = sanitizeChatResponse(reply);
+          if (filtersApplied.length > 0) {
+            this.logger.warn({
+              event: 'admin-mcp.chat.degraded',
+              traceId,
+              model: this.config.llmModel,
+              filtersCount: filtersApplied.length,
+              filterTypes: filtersApplied,
+            });
+          }
+
           return {
-            reply: llmResp.content || '',
+            reply: sanitized,
             toolCalls: toolCallsSummary,
             traceId,
             iterations,

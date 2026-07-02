@@ -70,8 +70,11 @@ export class ChatController {
 
   @Get('channels/:channelId/members')
   @ApiOperation({ summary: 'Listar miembros de un canal' })
-  async listMembers(@Param('channelId') channelId: string) {
-    return this.channelService.getMembers(channelId);
+  async listMembers(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('channelId') channelId: string,
+  ) {
+    return this.channelService.getMembers(channelId, user.id);
   }
 
   @Post('channels/:channelId/members')
@@ -102,12 +105,14 @@ export class ChatController {
   @ApiQuery({ name: 'cursor', required: false, description: 'ID del cursor para paginacion' })
   @ApiQuery({ name: 'limit', required: false, description: 'Cantidad de mensajes por pagina' })
   async listMessages(
+    @CurrentUser() user: AuthenticatedUser,
     @Param('channelId') channelId: string,
     @Query('cursor') cursor?: string,
     @Query('limit') limit?: string,
   ) {
     return this.messageService.findByChannel(
       channelId,
+      user.id,
       cursor,
       limit ? parseInt(limit, 10) : 50,
     );
