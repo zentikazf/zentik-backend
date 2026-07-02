@@ -146,6 +146,38 @@ describe('sanitizeChatResponse', () => {
       expect(filtersApplied).toEqual(['cuid']);
     });
 
+    it('14b. formato multi-línea "Tools:\\ncount_entity" (label solo + tool name en la siguiente línea) → eliminado completo', () => {
+      // Bug real observado en prod 2026-07-01: DeepSeek devuelve el bloque
+      // Tools en 2 líneas separadas en vez de "Tools: count_entity" inline.
+      const raw = 'Tenés 3 clientes activos. 😊\n\nTools:\ncount_entity';
+      const { sanitized, filtersApplied } = sanitizeChatResponse(raw);
+      expect(sanitized).toBe('Tenés 3 clientes activos. 😊');
+      expect(filtersApplied).toContain('tool_name');
+    });
+
+    it('14c. formato multi-línea con múltiples tool names debajo del label → todo el bloque eliminado', () => {
+      const raw =
+        'Aquí están los tickets:\n\n- "asfa" En progreso\n- "test" Abierto\n\nTools:\ncount_entity\nlist_entity.';
+      const { sanitized, filtersApplied } = sanitizeChatResponse(raw);
+      expect(sanitized).not.toMatch(/Tools:/);
+      expect(sanitized).not.toMatch(/count_entity/);
+      expect(sanitized).not.toMatch(/list_entity/);
+      expect(sanitized).toContain('Aquí están los tickets:');
+      expect(sanitized).toContain('"asfa" En progreso');
+      expect(filtersApplied).toContain('tool_name');
+    });
+
+    it('14d. bloque "Tools:\\nname" seguido de contenido de respuesta → solo elimina el bloque, preserva el resto', () => {
+      const raw =
+        'Hola, tenés 2 tickets.\n\nTools:\nlist_entity\n\n¿Necesitás más detalle?';
+      const { sanitized, filtersApplied } = sanitizeChatResponse(raw);
+      expect(sanitized).toContain('Hola, tenés 2 tickets.');
+      expect(sanitized).toContain('¿Necesitás más detalle?');
+      expect(sanitized).not.toMatch(/Tools:/);
+      expect(sanitized).not.toMatch(/list_entity/);
+      expect(filtersApplied).toContain('tool_name');
+    });
+
     it('15. multi-línea con CUID + disclaimer + tool_name → 3 filtros distintos aplicados', () => {
       const raw = [
         'Tenés 5 tickets. El ticket cm3a1abcdefghij1234567890 está abierto.',

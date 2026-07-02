@@ -43,7 +43,14 @@ const FILTERS: FilterRule[] = [
   },
   {
     name: 'tool_name',
-    pattern: /^\s*Tools?\s*:\s*.+$/gim,
+    // Cubre 3 formatos que devuelve el LLM:
+    //   (a) 'Tools: count_clients, list_tickets'  (una linea).
+    //   (b) 'Tool: get_user'                        (una linea, singular).
+    //   (c) 'Tools:\ncount_entity\nlist_entity'    (label solo + N lineas siguientes con nombres de tools).
+    // El grupo (?:\r?\n[ \t]*(?:count_|list_|get_)[a-z_]+\.?[ \t]*)* consume las lineas
+    // subsiguientes de tool names si estan pegadas al label.
+    pattern:
+      /^[ \t]*Tools?[ \t]*:[^\n]*(?:\r?\n[ \t]*(?:count_|list_|get_)[a-z_]+\.?[ \t]*)*/gim,
     replacement: '',
   },
   {
