@@ -120,7 +120,7 @@ export class ClientService {
           take: 10,
         },
         user: { select: { id: true, name: true, email: true } },
-        users: { select: { id: true, name: true, email: true, createdAt: true } },
+        users: { select: { id: true, name: true, email: true, emailVerified: true, createdAt: true } },
       },
     });
 
@@ -473,6 +473,63 @@ export class ClientService {
       resourceId: clientId,
       oldData: { userId, name: user.name, email: user.email },
     });
+  }
+
+  async resendActivation(orgId: string, clientId: string, userId: string) {
+    const user = await this.prisma.user.findFirst({
+      where: { id: userId, clientId },
+      select: { id: true, name: true, email: true, emailVerified: true },
+    });
+    if (!user) {
+      throw new AppException('Sub-usuario no encontrado', 'SUB_USER_NOT_FOUND', 404);
+    }
+
+    if (user.emailVerified) {
+      throw new AppException(
+        'Este usuario ya verificó su correo — no hace falta reenviar la activación',
+        'USER_ALREADY_VERIFIED',
+        409,
+      );
+    }
+
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { name: true },
+    });
+
+    // Invalidar links de activacion previos sin usar: al reenviar, solo el ultimo
+    // email debe funcionar (evita confusion de "cual link uso" y reduce superficie).
+    await this.prisma.userActivationToken.deleteMany({
+      where: { userId, usedAt: null },
+    });
+
+    const result = await this.onboardingService.createActivation({
+      userId: user.id,
+      userName: user.name,
+      userEmail: user.email,
+      organizationName: org?.name ?? null,
+    });
+
+    // createActivation cae a 'temp-password' si Resend esta caido o el envio fallo.
+    // Para un reenvio explicito de admin eso es un fallo real: no devolver 200 mintiendo.
+    if (result.mode !== 'email-sent') {
+      throw new AppException(
+        'No se pudo enviar el email de activación. El servicio de correo no está disponible en este momento.',
+        'EMAIL_SERVICE_UNAVAILABLE',
+        503,
+      );
+    }
+
+    this.logger.log(`Activation email resent: ${user.email} (client: ${clientId})`);
+    await this.auditService.create({
+      organizationId: orgId,
+      action: 'client.subuser.activation_resent',
+      resource: 'client',
+      resourceId: clientId,
+      newData: { userId: user.id, email: user.email },
+    });
+
+    return { message: 'Email de activación reenviado' };
   }
 
   // ── Horas contratadas ─────────────────────────────────
