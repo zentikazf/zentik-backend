@@ -12,6 +12,7 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { AuthGuard, PermissionsGuard } from '../auth/guards';
 import { Permissions } from '../../common/decorators/permissions.decorator';
 import { CurrentUser } from '../../common/decorators';
@@ -147,6 +148,18 @@ export class ClientController {
     @Param('userId') userId: string,
   ) {
     return this.clientService.deleteSubUser(orgId, clientId, userId);
+  }
+
+  @Post(':clientId/users/:userId/resend-activation')
+  @Throttle({ short: { ttl: 60_000, limit: 10 } })
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Reenviar email de activación a un sub-usuario sin verificar' })
+  resendActivation(
+    @Param('orgId') orgId: string,
+    @Param('clientId') clientId: string,
+    @Param('userId') userId: string,
+  ) {
+    return this.clientService.resendActivation(orgId, clientId, userId);
   }
 
   // ── Horas contratadas ─────────────────────────────────
