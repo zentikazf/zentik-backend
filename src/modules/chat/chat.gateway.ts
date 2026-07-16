@@ -159,7 +159,7 @@ export class ChatGateway
         );
       }
       if (session.ipAddress && ip && session.ipAddress.trim() !== ip.trim()) {
-        this.logger.warn(
+        this.logger.debug(
           `Chat WS: IP mismatch user ${session.userId} (socket ${client.id}) — soft-log, no desconecta`,
         );
       }

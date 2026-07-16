@@ -207,6 +207,10 @@ export class TicketService {
       if (targetStatus === 'DONE' && task.status !== 'DONE') {
         this.eventEmitter.emit('task.completed', {
           ...domainEvent('task.completed', 'task', task.id, organizationId, userId, { title: task.title, projectId: task.projectId }),
+          taskId: task.id,
+          taskTitle: task.title,
+          completedById: userId,
+          projectId: task.projectId,
           task: { ...updated, type: task.type, projectId: task.projectId, createdAt: task.createdAt, estimatedHours: task.estimatedHours },
         });
       }
@@ -714,6 +718,14 @@ export class TicketService {
           await tx.taskAssignment.create({
             data: { taskId: ticket.task.id, userId: dto.assigneeId },
           });
+          // Agregar asignado al canal del chat del ticket (idempotente)
+          if (ticket.channelId) {
+            await tx.channelMember.upsert({
+              where: { channelId_userId: { channelId: ticket.channelId, userId: dto.assigneeId } },
+              create: { channelId: ticket.channelId, userId: dto.assigneeId },
+              update: {},
+            });
+          }
         }
 
         await this.events.writeEventTx(tx, {
