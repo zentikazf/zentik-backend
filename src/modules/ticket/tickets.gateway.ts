@@ -175,7 +175,7 @@ export class TicketsGateway implements OnGatewayConnection, OnGatewayDisconnect 
         );
       }
       if (session.ipAddress && ip && session.ipAddress.trim() !== ip.trim()) {
-        this.logger.warn(
+        this.logger.debug(
           `Tickets WS: IP mismatch user ${session.userId} (socket ${client.id}) — soft-log, no desconecta`,
         );
       }

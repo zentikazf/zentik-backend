@@ -408,6 +408,10 @@ export class BoardService {
     if (targetColumn.mappedStatus === 'DONE' && previousStatus !== 'DONE') {
       this.eventEmitter.emit('task.completed', {
         ...domainEvent('task.completed', 'task', dto.taskId, task!.project.organizationId, userId, { title: updatedTask.title, projectId: updatedTask.projectId }),
+        taskId: dto.taskId,
+        taskTitle: updatedTask.title,
+        completedById: userId,
+        projectId: updatedTask.projectId,
         task: { ...updatedTask, type: (updatedTask as any).type, projectId: updatedTask.projectId },
       });
     }
