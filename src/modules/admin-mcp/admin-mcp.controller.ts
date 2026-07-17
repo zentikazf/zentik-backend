@@ -22,6 +22,7 @@ import { AdminMcpChatService } from './admin-mcp.service';
 import { ChatInputDto } from './dto/chat-input.dto';
 import { ChatOutputDto } from './dto/chat-output.dto';
 
+const SESSION_COOKIE_HOST = '__Host-zentik.session_token';
 const SESSION_COOKIE_PRIMARY = 'zentik.session_token';
 const SESSION_COOKIE_LEGACY_1 = 'better-auth.session_token';
 const SESSION_COOKIE_LEGACY_2 = '__Secure-better-auth.session_token';
@@ -117,6 +118,7 @@ export class AdminMcpController {
     }
     const cookies = (req as unknown as { cookies?: Record<string, string> }).cookies ?? {};
     return (
+      cookies[SESSION_COOKIE_HOST] ||
       cookies[SESSION_COOKIE_PRIMARY] ||
       cookies[SESSION_COOKIE_LEGACY_1] ||
       cookies[SESSION_COOKIE_LEGACY_2] ||

@@ -35,6 +35,10 @@ import { AuthenticatedUser, AuthenticatedRequest } from '../../common/interfaces
 import { AppConfigService } from '../../config/app.config';
 
 const SESSION_COOKIE = 'zentik.session_token';
+// Nombre con prefijo __Host- para el modo same-site (host-only: prohíbe atributo
+// Domain, exige Secure + path '/'). Solo se usa en prod con COOKIE_SAMESITE_LAX=true;
+// dev (http) cae al nombre plano porque el browser rechaza __Host- sin HTTPS.
+const SESSION_COOKIE_HOST = '__Host-zentik.session_token';
 const SESSION_MAX_AGE = 5 * 60 * 60 * 1000; // 5 hours
 
 @ApiTags('Auth')
@@ -260,6 +264,7 @@ export class AuthController {
     }
 
     return (
+      req.cookies?.[SESSION_COOKIE_HOST] ||
       req.cookies?.[SESSION_COOKIE] ||
       req.cookies?.['better-auth.session_token'] ||
       req.cookies?.['__Secure-better-auth.session_token'] ||
@@ -269,10 +274,15 @@ export class AuthController {
 
   private setSessionCookie(res: Response, token: string) {
     const isProduction = this.configService.isProduction;
-    res.cookie(SESSION_COOKIE, token, {
+    // Cutover same-site (flag COOKIE_SAMESITE_LAX): __Host- + SameSite=Lax cuando está
+    // on. Off (default) = comportamiento cross-site actual (cookie plana + None en prod).
+    const sameSiteLax = this.configService.cookieSameSiteLax;
+    const useHostPrefix = isProduction && sameSiteLax;
+    const sameSite: 'lax' | 'none' = !sameSiteLax && isProduction ? 'none' : 'lax';
+    res.cookie(useHostPrefix ? SESSION_COOKIE_HOST : SESSION_COOKIE, token, {
       httpOnly: true,
       secure: isProduction,
-      sameSite: isProduction ? 'none' : 'lax',
+      sameSite,
       maxAge: SESSION_MAX_AGE,
       path: '/',
     });
@@ -280,10 +290,14 @@ export class AuthController {
 
   private clearSessionCookie(res: Response) {
     const isProduction = this.configService.isProduction;
-    res.clearCookie(SESSION_COOKIE, {
+    // Debe espejar EXACTAMENTE el nombre/flags de setSessionCookie.
+    const sameSiteLax = this.configService.cookieSameSiteLax;
+    const useHostPrefix = isProduction && sameSiteLax;
+    const sameSite: 'lax' | 'none' = !sameSiteLax && isProduction ? 'none' : 'lax';
+    res.clearCookie(useHostPrefix ? SESSION_COOKIE_HOST : SESSION_COOKIE, {
       httpOnly: true,
       secure: isProduction,
-      sameSite: isProduction ? 'none' : 'lax',
+      sameSite,
       path: '/',
     });
   }

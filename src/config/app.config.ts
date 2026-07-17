@@ -13,6 +13,14 @@ export class AppConfigService {
   get isProduction(): boolean { return this.nodeEnv === 'production'; }
   get isDevelopment(): boolean { return this.nodeEnv === 'development'; }
 
+  // Cutover a cookie same-site (migración a subdominios app./api.). Con `true` la
+  // cookie de sesión usa prefijo __Host- + SameSite=Lax; con `false` (default)
+  // mantiene el comportamiento cross-site actual (plana + None en prod). Se flipea
+  // sin deploy. process.env siempre es string → comparamos contra 'true'.
+  get cookieSameSiteLax(): boolean {
+    return this.configService.get<string>('COOKIE_SAMESITE_LAX') === 'true';
+  }
+
   get databaseUrl(): string { return this.configService.getOrThrow<string>('DATABASE_URL'); }
   get redisUrl(): string { return this.configService.getOrThrow<string>('REDIS_URL'); }
 

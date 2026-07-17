@@ -10,6 +10,12 @@ export const envSchema = z.object({
   REDIS_URL: z.string().url(),
   BETTER_AUTH_SECRET: z.string().min(32),
   BETTER_AUTH_URL: z.string().url(),
+  // === Cookie de sesión same-site (migración a subdominios app./api.) ===
+  // Feature flag del cutover a cookie-only. `false` (default): comportamiento
+  // cross-site actual (cookie plana + SameSite=none en prod). `true` (post-migración
+  // same-site): prefijo __Host- + SameSite=Lax. Se flipea SIN deploy de código;
+  // rollback instantáneo volviéndolo a `false`.
+  COOKIE_SAMESITE_LAX: z.enum(['true', 'false']).default('false'),
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
   GITHUB_CLIENT_ID: z.string().optional(),

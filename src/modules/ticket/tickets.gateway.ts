@@ -121,6 +121,7 @@ export class TicketsGateway implements OnGatewayConnection, OnGatewayDisconnect 
     const cookies = cookieHeader.split(';').map((c) => c.trim());
     for (const cookie of cookies) {
       for (const name of [
+        '__Host-zentik.session_token',
         'zentik.session_token',
         'better-auth.session_token',
         '__Secure-better-auth.session_token',
