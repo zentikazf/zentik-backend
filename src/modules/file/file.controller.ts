@@ -183,6 +183,7 @@ export class FileController {
     }
     const cookies = (req as Request & { cookies?: Record<string, string> }).cookies;
     const sessionCookie =
+      cookies?.['__Host-zentik.session_token'] ||
       cookies?.['zentik.session_token'] ||
       cookies?.['better-auth.session_token'] ||
       cookies?.['__Secure-better-auth.session_token'];

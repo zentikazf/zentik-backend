@@ -13,6 +13,9 @@ import { AuthenticatedUser } from '../../../common/interfaces/request.interface'
 const SESSION_TTL_HOURS = 5;
 const SESSION_TTL_MS = SESSION_TTL_HOURS * 60 * 60 * 1000;
 const SESSION_COOKIE = 'zentik.session_token';
+// Nombre __Host- para el modo same-site (host-only). El re-set del sliding session
+// DEBE usar el mismo nombre/flags que AuthController.setSessionCookie.
+const SESSION_COOKIE_HOST = '__Host-zentik.session_token';
 
 // Endpoints permitidos para usuarios con emailVerified=false. El resto se
 // bloquea con 403 EMAIL_NOT_VERIFIED — el frontend redirige a /verify-pending.
@@ -158,10 +161,16 @@ export class AuthGuard implements CanActivate {
       }).catch((err) => this.logger.warn('Failed to extend session', err));
 
       const isProduction = this.configService.isProduction;
-      response.cookie(SESSION_COOKIE, session.token, {
+      // MISMO nombre y flags que AuthController.setSessionCookie (gated por
+      // COOKIE_SAMESITE_LAX). Si difieren, este re-set de cada request pisa la cookie
+      // del login con flags viejos y la sesión se corrompe de forma intermitente.
+      const sameSiteLax = this.configService.cookieSameSiteLax;
+      const useHostPrefix = isProduction && sameSiteLax;
+      const sameSite: 'lax' | 'none' = !sameSiteLax && isProduction ? 'none' : 'lax';
+      response.cookie(useHostPrefix ? SESSION_COOKIE_HOST : SESSION_COOKIE, session.token, {
         httpOnly: true,
         secure: isProduction,
-        sameSite: isProduction ? 'none' : 'lax',
+        sameSite,
         maxAge: SESSION_TTL_MS,
         path: '/',
       });
@@ -186,8 +195,9 @@ export class AuthGuard implements CanActivate {
       return authHeader.slice(7);
     }
 
-    // 2. Check session cookies
+    // 2. Check session cookies (__Host- primero para el modo same-site)
     const sessionCookie =
+      request.cookies?.[SESSION_COOKIE_HOST] ||
       request.cookies?.['zentik.session_token'] ||
       request.cookies?.['better-auth.session_token'] ||
       request.cookies?.['__Secure-better-auth.session_token'];

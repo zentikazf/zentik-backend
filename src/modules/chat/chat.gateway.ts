@@ -56,7 +56,7 @@ export class ChatGateway
     if (!cookieHeader) return undefined;
     const cookies = cookieHeader.split(';').map((c) => c.trim());
     for (const cookie of cookies) {
-      for (const name of ['zentik.session_token', 'better-auth.session_token', '__Secure-better-auth.session_token']) {
+      for (const name of ['__Host-zentik.session_token', 'zentik.session_token', 'better-auth.session_token', '__Secure-better-auth.session_token']) {
         if (cookie.startsWith(`${name}=`)) {
           return cookie.slice(name.length + 1);
         }
