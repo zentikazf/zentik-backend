@@ -7,16 +7,14 @@ import {
   Body,
   Query,
   UseGuards,
-  HttpCode,
   HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { AuthGuard, PermissionsGuard } from '../auth/guards';
-import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Permissions } from '../../common/decorators/permissions.decorator';
-import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { InvoiceService } from './billing.service';
-import { CreateInvoiceDto, UpdateInvoiceDto } from './dto';
+import { UpdateInvoiceDto } from './dto';
+import { AppException } from '../../common/filters/app-exception';
 
 @ApiTags('Billing')
 @ApiBearerAuth()
@@ -25,16 +23,20 @@ import { CreateInvoiceDto, UpdateInvoiceDto } from './dto';
 export class BillingController {
   constructor(private readonly invoiceService: InvoiceService) {}
 
+  // DEPRECATED — feature #27 reemplaza la facturación por proyecto por el cierre de ciclo por cliente.
+  // El handler se mantiene como tombstone 410 (no 404) para cortar deep-links/bookmarks que intenten
+  // generar. NO se elimina el histórico Invoice/InvoiceItem (KEEP-DATA); los readers siguen leyéndolo.
   @Post('projects/:projectId/invoices')
-  @Permissions('read:billing')
-  @ApiOperation({ summary: 'Generar factura para un proyecto' })
-  @HttpCode(HttpStatus.CREATED)
-  async generate(
-    @Param('projectId') projectId: string,
-    @CurrentUser() user: AuthenticatedUser,
-    @Body() dto: CreateInvoiceDto,
-  ) {
-    return this.invoiceService.generate(projectId, user.id, dto);
+  @ApiOperation({
+    summary: 'DEPRECATED — devuelve 410 Gone. Facturación por proyecto reemplazada por cierre de ciclo por cliente',
+    deprecated: true,
+  })
+  generate(): never {
+    throw new AppException(
+      'La facturación por proyecto fue deprecada. Usá el cierre de ciclo por cliente.',
+      'PROJECT_INVOICING_DEPRECATED',
+      HttpStatus.GONE,
+    );
   }
 
   @Get('projects/:projectId/invoices')
