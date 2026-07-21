@@ -14,5 +14,10 @@ coverage/
 npm-debug.log*
 pnpm-debug.log*
 .sentryclirc
-prisma/migrations/**/migration_lock.toml
 uploads/
+
+# Tooling de desarrollo local (Postgres + Redis) — no se versiona
+docker-compose.yml
+
+# Archivo local de las 39 migrations pre-baseline (2026-07-20) — no se versiona
+prisma/_baseline_archive_2026-07-20/

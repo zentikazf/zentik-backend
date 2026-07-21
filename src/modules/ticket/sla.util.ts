@@ -37,7 +37,7 @@ const DEFAULT_TIMEZONE = 'America/Asuncion';
  * Guard: si `timeZone` es falsy o `Intl` tira `RangeError` (zona inválida),
  * cae a `America/Asuncion` para no romper el cálculo del deadline.
  */
-function tzOffsetMinutes(date: Date, timeZone: string): number {
+export function tzOffsetMinutes(date: Date, timeZone: string): number {
   const tz = timeZone || DEFAULT_TIMEZONE;
   try {
     return computeTzOffsetMinutes(date, tz);
