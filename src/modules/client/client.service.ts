@@ -12,6 +12,14 @@ import { AuditService } from '../audit/audit.service';
 import { EmailInvitationService } from '../../infrastructure/email/email-invitation.service';
 import { OnboardingService } from '../auth/onboarding/onboarding.service';
 
+// Buckets de movimiento del ledger de horas (String libre en el schema).
+// Filtro opcional de `getHoursSummary`: ausente ⇒ todos los tipos (incl. INTERNAL);
+// al elegir un bucket, INTERNAL queda fuera naturalmente por no pertenecer a ninguno.
+const MOVEMENT_BUCKETS: Record<string, string[]> = {
+  ACUMULADAS: ['PURCHASE', 'REFUND'],
+  DESCUENTO: ['USAGE', 'LOAN'],
+};
+
 @Injectable()
 export class ClientService {
   private readonly logger = new Logger(ClientService.name);
@@ -534,7 +542,7 @@ export class ClientService {
 
   // ── Horas contratadas ─────────────────────────────────
 
-  async getHoursSummary(orgId: string, clientId: string, page = 1, limit = 20) {
+  async getHoursSummary(orgId: string, clientId: string, page = 1, limit = 20, movement?: string) {
     const client = await this.findById(orgId, clientId);
     const available = Math.max(client.contractedHours - client.usedHours - client.loanedHours, 0);
 
@@ -543,6 +551,14 @@ export class ClientService {
     const skip = (safePage - 1) * safeLimit;
 
     const where: Prisma.HoursTransactionWhereInput = { clientId, deletedAt: null };
+
+    if (movement !== undefined) {
+      const bucket = MOVEMENT_BUCKETS[movement];
+      if (!bucket) {
+        throw new AppException('Filtro de movimiento inválido', 'INVALID_MOVEMENT_FILTER', 400);
+      }
+      where.type = { in: bucket };
+    }
 
     const [transactions, total, billableAggregate] = await this.prisma.$transaction([
       this.prisma.hoursTransaction.findMany({
