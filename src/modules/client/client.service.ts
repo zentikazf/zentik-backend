@@ -622,6 +622,18 @@ export class ClientService {
       throw new AppException('Transacción no encontrada', 'TRANSACTION_NOT_FOUND', 404);
     }
 
+    // R9 (#25): un movimiento ya facturado es inmutable. Reabrir el ciclo lo libera.
+    // Guard check-then-act (§1.7 fallback aceptado): la ventana close-vs-delete del
+    // mismo cliente es ínfima (ambas son acciones manuales del admin).
+    if (tx.billedCycleId) {
+      throw new AppException(
+        'El movimiento ya fue facturado. Reabrí el ciclo para editarlo o eliminarlo.',
+        'TRANSACTION_BILLED',
+        409,
+        { transactionId, billedCycleId: tx.billedCycleId },
+      );
+    }
+
     await this.prisma.$transaction(async (prisma) => {
       // Soft-delete the transaction
       await prisma.hoursTransaction.update({
@@ -687,6 +699,17 @@ export class ClientService {
         'Transaccion no encontrada o ya eliminada',
         'TRANSACTION_NOT_FOUND',
         404,
+      );
+    }
+
+    // R9 (#25): un movimiento ya facturado es inmutable (horas/tarifa congeladas en el
+    // snapshot del ciclo). Reabrir el ciclo lo libera. Guard check-then-act (§1.7 fallback).
+    if (tx.billedCycleId) {
+      throw new AppException(
+        'El movimiento ya fue facturado. Reabrí el ciclo para editarlo.',
+        'TRANSACTION_BILLED',
+        409,
+        { transactionId, billedCycleId: tx.billedCycleId },
       );
     }
 

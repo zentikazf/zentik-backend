@@ -35,6 +35,7 @@ import { HealthModule } from './modules/health/health.module';
 import { SubscriptionModule } from './modules/subscription/subscription.module';
 import { CommentModule } from './modules/comment/comment.module';
 import { ClientModule } from './modules/client/client.module';
+import { ClientBillingModule } from './modules/client-billing/client-billing.module';
 import { PortalModule } from './modules/portal/portal.module';
 import { LabelModule } from './modules/label/label.module';
 import { MeetingModule } from './modules/meeting/meeting.module';
@@ -94,6 +95,7 @@ import { SyncModule } from './modules/sync/sync.module';
     SubscriptionModule,
     CommentModule,
     ClientModule,
+    ClientBillingModule,
     PortalModule,
     LabelModule,
     MeetingModule,

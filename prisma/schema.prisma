@@ -272,6 +272,7 @@ model User {
   closedTickets       Ticket[]             @relation("TicketCloser")
   ticketEvents        TicketEvent[]        @relation("TicketEventActor")
   deletedHoursTransactions HoursTransaction[] @relation("HoursDeletedBy")
+  closedBillingCycles      ClientBillingCycle[]         @relation("CycleClosedBy")
   pushSubscriptions        PushSubscription[]
   notificationPreferences  UserNotificationPreference[]
   deletedFiles             File[]                       @relation("FileDeletedBy")
@@ -1042,6 +1043,7 @@ model Client {
   suggestions       Suggestion[]
   tickets           Ticket[]
   hoursTransactions HoursTransaction[]
+  billingCycles     ClientBillingCycle[]
   files             File[]             @relation("ClientFiles")
 
   @@index([organizationId])
@@ -1302,15 +1304,56 @@ model HoursTransaction {
   deletedById  String?   @map("deleted_by_id")
   deleteReason String?   @map("delete_reason")
 
-  client    Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  task      Task?  @relation(fields: [taskId], references: [id], onDelete: SetNull)
-  deletedBy User?  @relation("HoursDeletedBy", fields: [deletedById], references: [id], onDelete: SetNull)
+  // Estampado de facturación por ciclos (feature #25): nullable/default NULL para
+  // no romper filas históricas. Una fila pertenece a lo sumo a un ciclo → idempotencia.
+  billedCycleId String? @map("billed_cycle_id")
+
+  client      Client              @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  task        Task?               @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  deletedBy   User?               @relation("HoursDeletedBy", fields: [deletedById], references: [id], onDelete: SetNull)
+  billedCycle ClientBillingCycle? @relation("BilledCycle", fields: [billedCycleId], references: [id], onDelete: SetNull)
 
   @@index([clientId])
   @@index([taskId])
   @@index([type])
   @@index([createdAt])
+  @@index([billedCycleId])
+  @@index([clientId, billedCycleId])
   @@map("hours_transactions")
+}
+
+// ============================================================================
+// CLIENT BILLING CYCLES (Cierre de ciclo de facturación por cliente — feature #25)
+// ============================================================================
+
+model ClientBillingCycle {
+  id             String    @id @default(cuid())
+  organizationId String    @map("organization_id") // denormalizado: scope + espejo MCP futuro
+  clientId       String    @map("client_id")
+  periodStart    DateTime  @map("period_start") // 1º del mes 00:00 (America/Asuncion → instante UTC)
+  periodEnd      DateTime  @map("period_end") // último día 23:59:59.999 (America/Asuncion → instante UTC)
+  status         String    @default("DRAFT") // DRAFT | SENT | PAID | CANCELLED
+  invoiceNumber  String    @map("invoice_number") // FAC-YYYY-NNNNN (secuencia POR-ORG, §6.1)
+  totalHours     Float     @default(0) @map("total_hours")
+  totalAmount    Decimal   @default(0) @map("total_amount") @db.Decimal(15, 2)
+  currency       String
+  notes          String?
+  closedAt       DateTime? @map("closed_at")
+  closedById     String?   @map("closed_by_id")
+  sentAt         DateTime? @map("sent_at")
+  paidAt         DateTime? @map("paid_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  client             Client             @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  closedBy           User?              @relation("CycleClosedBy", fields: [closedById], references: [id], onDelete: SetNull)
+  billedTransactions HoursTransaction[] @relation("BilledCycle")
+
+  // Numeración POR-ORG (§6.1): sin @unique inline sobre invoice_number; secuencia por org.
+  @@unique([organizationId, invoiceNumber])
+  @@index([organizationId])
+  @@index([clientId, periodStart])
+  @@map("client_billing_cycles")
 }
 
 // ============================================================================

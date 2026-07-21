@@ -21,6 +21,7 @@ async function main() {
     { action: 'read', resource: 'sprints', description: 'Read sprints' },
     { action: 'read', resource: 'boards', description: 'Read boards' },
     { action: 'read', resource: 'billing', description: 'Read billing' },
+    { action: 'manage', resource: 'billing', description: 'Manage billing' },
     { action: 'read', resource: 'audit', description: 'Read audit logs' },
     { action: 'read', resource: 'chat', description: 'Read chat' },
   ];
@@ -58,7 +59,7 @@ async function main() {
       isSystem: true,
       perms: [
         'manage:projects', 'manage:tasks', 'manage:members',
-        'manage:sprints', 'manage:boards', 'read:billing', 'read:audit',
+        'manage:sprints', 'manage:boards', 'manage:billing', 'read:audit',
       ],
     },
     {
@@ -67,7 +68,7 @@ async function main() {
       isSystem: true,
       perms: [
         'manage:projects', 'manage:tasks', 'manage:sprints',
-        'manage:boards', 'read:members',
+        'manage:boards', 'manage:billing', 'read:members',
       ],
     },
     {
@@ -173,7 +174,7 @@ async function main() {
       name: 'Zentik Platform',
       description: 'Main development project for the Zentik platform',
       slug: 'zentik-platform',
-      status: 'ACTIVE',
+      status: 'DEVELOPMENT',
       organizationId: org.id,
       createdById: user.id,
     },
