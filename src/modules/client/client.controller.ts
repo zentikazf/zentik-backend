@@ -171,12 +171,14 @@ export class ClientController {
     @Param('clientId') clientId: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
+    @Query('movement') movement?: string,
   ) {
     return this.clientService.getHoursSummary(
       orgId,
       clientId,
       page ? parseInt(page, 10) : undefined,
       limit ? parseInt(limit, 10) : undefined,
+      movement,
     );
   }
 
