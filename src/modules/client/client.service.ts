@@ -832,7 +832,16 @@ export class ClientService {
     return { success: true, transactionId };
   }
 
-  async recordHoursUsage(taskId: string, durationMinutes: number) {
+  async recordHoursUsage(
+    taskId: string,
+    durationMinutes: number,
+    opts?: { timeEntryId?: string; entryVersion?: number },
+  ) {
+    // H2: clave de idempotencia del ledger. El único parcial (time_entry_id, entry_version) impide
+    // que un MISMO time_entry.confirmed cree dos cobros (doble evento, retry de job, doble click).
+    // Es opcional: el caller inalcanzable syncMissedHours no la pasa → esas filas quedan fuera del índice.
+    const timeEntryId = opts?.timeEntryId ?? null;
+    const entryVersion = opts?.entryVersion ?? null;
     const task = await this.prisma.task.findUnique({
       where: { id: taskId },
       select: {
@@ -852,8 +861,17 @@ export class ClientService {
       return;
     }
 
-    // Fase B: ambos tipos (SUPPORT y PROJECT) descuentan del cupo del cliente.
-    // El descuento se dispara desde HoursListener al recibir time_entry.confirmed.
+    // H1 OBJ-1 (candado de emergencia): SOLO las tareas SUPPORT descuentan el cupo del cliente.
+    // Las tareas PROJECT NO crean ninguna HoursTransaction (ni USAGE/LOAN ni INTERNAL), no tocan
+    // usedHours/loanedHours y no dejan rastro en el libro mayor por ahora. El valor/tarifa de las
+    // horas de proyecto se persistirá en el TimeEntry en H4; por eso la rama developmentHourlyRate
+    // (más abajo) queda VIVA como gancho futuro, pero acá cortamos ANTES de llegar a ella.
+    // El descuento de SUPPORT se dispara desde HoursListener al recibir time_entry.confirmed.
+    if (task.type === 'PROJECT') {
+      this.logger.log(`recordHoursUsage: task ${taskId} es PROJECT — H1 OBJ-1: no consume cupo, sin transacción. Skip.`);
+      return;
+    }
+
     const clientId = task.project.clientId;
     const hours = parseFloat((durationMinutes / 60).toFixed(4));
 
@@ -863,15 +881,26 @@ export class ClientService {
     // Tarea no facturable (trabajo interno): registramos la transaccion como INTERNAL
     // para trazabilidad, pero NO incrementamos usedHours ni guardamos precio.
     if (!task.billable) {
-      await this.prisma.hoursTransaction.create({
-        data: {
-          clientId,
-          type: 'INTERNAL',
-          hours,
-          taskId,
-          note: `Tiempo interno (no facturable): ${task.title}`,
-        },
-      });
+      try {
+        await this.prisma.hoursTransaction.create({
+          data: {
+            clientId,
+            type: 'INTERNAL',
+            hours,
+            taskId,
+            note: `Tiempo interno (no facturable): ${task.title}`,
+            timeEntryId,
+            entryVersion,
+          },
+        });
+      } catch (e) {
+        // H2: mismo time_entry.confirmed disparado dos veces → el único parcial lo rebota. Idempotente.
+        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+          this.logger.log(`recordHoursUsage: INTERNAL idempotente (timeEntry ${timeEntryId} v${entryVersion} ya registrado). Skip.`);
+          return;
+        }
+        throw e;
+      }
       this.logger.log(`Recorded ${hours}h INTERNAL (no descuenta) for task ${taskId}, client ${clientId}`);
       await this.auditService.create({
         organizationId: task.project.organizationId,
@@ -891,7 +920,10 @@ export class ClientService {
       if (task.type === 'SUPPORT' && client.supportHourlyRate) {
         return parseFloat(client.supportHourlyRate.toString());
       }
-      if (task.type === 'PROJECT' && client.developmentHourlyRate) {
+      // H1: tras el guard PROJECT (arriba) TS estrecha task.type a 'SUPPORT', pero dejamos esta
+      // rama VIVA como gancho de H4 (tarifa de proyecto en el TimeEntry). Cast puntual a string para
+      // no romper el narrowing sin usar `any`; comportamiento idéntico (rama inalcanzable para SUPPORT).
+      if ((task.type as string) === 'PROJECT' && client.developmentHourlyRate) {
         return parseFloat(client.developmentHourlyRate.toString());
       }
       return null;
@@ -904,32 +936,45 @@ export class ClientService {
     const available = client.contractedHours - client.usedHours;
     const isLoan = available <= 0;
 
-    await this.prisma.$transaction(async (tx) => {
-      await tx.hoursTransaction.create({
-        data: {
-          clientId,
-          type: isLoan ? 'LOAN' : 'USAGE',
-          hours,
-          taskId,
-          note: `Tiempo registrado en: ${task.title}`,
-          priceAmount,
-          priceRate: resolvedRate,
-          priceCurrency: priceAmount !== null ? client.currency : null,
-        },
-      });
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.hoursTransaction.create({
+          data: {
+            clientId,
+            type: isLoan ? 'LOAN' : 'USAGE',
+            hours,
+            taskId,
+            note: `Tiempo registrado en: ${task.title}`,
+            priceAmount,
+            priceRate: resolvedRate,
+            priceCurrency: priceAmount !== null ? client.currency : null,
+            timeEntryId,
+            entryVersion,
+          },
+        });
 
-      if (isLoan) {
-        await tx.client.update({
-          where: { id: clientId },
-          data: { loanedHours: { increment: hours } },
-        });
-      } else {
-        await tx.client.update({
-          where: { id: clientId },
-          data: { usedHours: { increment: hours } },
-        });
+        if (isLoan) {
+          await tx.client.update({
+            where: { id: clientId },
+            data: { loanedHours: { increment: hours } },
+          });
+        } else {
+          await tx.client.update({
+            where: { id: clientId },
+            data: { usedHours: { increment: hours } },
+          });
+        }
+      });
+    } catch (e) {
+      // H2: idempotencia. Si el único parcial (time_entry_id, entry_version) rebota el insert (P2002),
+      // toda la $transaction hace rollback (no crea la 2da transacción NI incrementa el contador).
+      // Es el mismo time_entry.confirmed disparado dos veces → doble cobro evitado.
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        this.logger.log(`recordHoursUsage: USAGE/LOAN idempotente (timeEntry ${timeEntryId} v${entryVersion} ya cobrado). Skip.`);
+        return;
       }
-    });
+      throw e;
+    }
 
     this.logger.log(
       `Recorded ${hours}h ${isLoan ? '(loan)' : '(usage)'} for client ${clientId} ` +

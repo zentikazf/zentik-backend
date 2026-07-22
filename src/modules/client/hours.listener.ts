@@ -11,7 +11,7 @@ import { ClientService } from './client.service';
  * - Ahora escucha time_entry.confirmed → descuenta del cupo del cliente
  *   usando TimeEntry.duration (en segundos).
  * - Ahora escucha time_entry.reverted → revierte el descuento via REFUND.
- * - Aplica a tareas SUPPORT y PROJECT (ambos descuentan ahora).
+ * - Aplica SOLO a tareas SUPPORT (H1: PROJECT no descuenta; el guard vive en recordHoursUsage).
  *
  * Salvaguardas:
  * 1. legacyMigration=true → SKIP (descuento ya estaba hecho con la logica vieja).
@@ -33,9 +33,10 @@ export class HoursListener {
     taskId: string;
     duration: number; // segundos
     legacyMigration: boolean;
+    version?: number; // H2: ciclo de confirm (clave de idempotencia). Opcional por compat de eventos viejos.
   }) {
     try {
-      const { timeEntryId, taskId, duration, legacyMigration } = event;
+      const { timeEntryId, taskId, duration, legacyMigration, version } = event;
 
       // Salvaguarda 1: legacy migration → no descontar (descuento ya hecho con logica vieja)
       if (legacyMigration) {
@@ -55,7 +56,12 @@ export class HoursListener {
         `time_entry.confirmed → descontando ${minutes} min (${(minutes / 60).toFixed(2)}h) para task ${taskId}`,
       );
 
-      await this.clientService.recordHoursUsage(taskId, minutes);
+      // H2: forwardear timeEntryId + version → recordHoursUsage los graba y el único parcial impide
+      // el doble cobro si este mismo confirm se procesara dos veces.
+      await this.clientService.recordHoursUsage(taskId, minutes, {
+        timeEntryId,
+        entryVersion: version ?? 1,
+      });
     } catch (err) {
       this.logger.error('Error descontando horas tras time_entry.confirmed', err);
     }

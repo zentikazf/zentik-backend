@@ -103,4 +103,27 @@ export class TimeEntryListener {
       this.logger.error(`Error en onTaskAssigned`, err);
     }
   }
+
+  /**
+   * Reabrir una tarea DONE por CUALQUIER camino (board, task.service, ticket.service) emite
+   * `task.reopened`. Antes NADIE lo escuchaba → el cobro de horas de la aprobación quedaba y una
+   * re-aprobación creaba un SEGUNDO cobro (doble cobro por una sola tarea). Este listener reembolsa
+   * al reabrir, exactamente como hace el botón "Rechazar" (rejectTask → revertConfirmation).
+   * revertConfirmation es idempotente (solo actúa sobre un CONFIRMED de aprobación, excluye MANUAL)
+   * → nunca reembolsa de más aunque otro camino también dispare la reversión.
+   */
+  @OnEvent('task.reopened')
+  async onTaskReopened(event: { taskId?: string; entityId?: string; userId?: string }) {
+    try {
+      const taskId = event.taskId ?? event.entityId;
+      const userId = event.userId ?? 'system';
+      if (!taskId) return;
+      const reverted = await this.timeEntryService.revertConfirmation(taskId, userId);
+      if (reverted) {
+        this.logger.log(`task.reopened → cobro de horas revertido para task ${taskId} (entry ${reverted.id})`);
+      }
+    } catch (err) {
+      this.logger.error('Error revirtiendo cobro tras task.reopened', err);
+    }
+  }
 }

@@ -1,13 +1,15 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { TimeEntryStatus } from '@prisma/client';
+import { TimeEntryStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
 import { RedisService } from '../../infrastructure/redis/redis.service';
 import { CreateTimeEntryDto } from './dto/create-time-entry.dto';
+import { CreateManualTimeEntryDto } from './dto/create-manual-time-entry.dto';
 import { UpdateTimeEntryDto } from './dto/update-time-entry.dto';
 import { TimeReportFilterDto } from './dto/time-report-filter.dto';
 import { AppException } from '../../common/filters/app-exception';
 import { domainEvent } from '../../common/events/domain-event.helper';
+import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 
 // ============================================
 // TimeEntryService — CRUD de entradas de tiempo
@@ -45,13 +47,18 @@ export class TimeEntryService {
 
     const organizationId = timeEntry.task.project.organizationId;
 
-    this.eventEmitter.emit('time_entry.created', {
-      ...domainEvent('time_entry.created', 'time_entry', timeEntry.id, organizationId, userId),
-      timeEntryId: timeEntry.id,
-      userId,
-      taskId: dto.taskId,
-      duration,
-    });
+    // H4 (T14): evento bien formado — payload dentro del arg `data`, entity='task' → cae en /tasks/:id/activity.
+    this.eventEmitter.emit(
+      'time_entry.created',
+      domainEvent(
+        'time_entry.created',
+        'task',
+        dto.taskId,
+        organizationId,
+        userId,
+        { timeEntryId: timeEntry.id, taskId: dto.taskId, duration },
+      ),
+    );
 
     this.logger.log(
       `Entrada de tiempo creada: ${timeEntry.id} por usuario ${userId}`,
@@ -64,7 +71,7 @@ export class TimeEntryService {
     userId: string,
     filters?: { startDate?: string; endDate?: string; projectId?: string },
   ) {
-    const where: any = { userId };
+    const where: any = { userId, deletedAt: null }; // H4: excluir soft-deleted
 
     if (filters?.startDate || filters?.endDate) {
       where.startTime = {};
@@ -88,18 +95,158 @@ export class TimeEntryService {
   }
 
   async findById(id: string) {
-    return this.prisma.timeEntry.findUnique({
-      where: { id },
+    return this.prisma.timeEntry.findFirst({
+      where: { id, deletedAt: null }, // H4: excluir soft-deleted
       include: { task: true },
     });
   }
 
-  async update(id: string, userId: string, dto: UpdateTimeEntryDto) {
-    const existing = await this.prisma.timeEntry.findUnique({
-      where: { id },
+  // ============================================
+  // H4 — Carga manual: la hora nace de una DECLARACIÓN HUMANA con fecha (workedOn)
+  // ============================================
+
+  async createManual(
+    actor: AuthenticatedUser,
+    taskId: string,
+    dto: CreateManualTimeEntryDto,
+  ) {
+    // 1) Cargar la tarea con lo necesario para autorizar + validar + heredar billable.
+    const task = await this.prisma.task.findUnique({
+      where: { id: taskId },
+      select: {
+        billable: true,
+        createdAt: true,
+        assignments: { select: { userId: true } },
+        project: { select: { organizationId: true, clientId: true } },
+      },
+    });
+    if (!task) {
+      throw new AppException('La tarea no existe', 'TASK_NOT_FOUND', 404);
+    }
+
+    // 2) Org-scoping (defense in depth: cierra de paso el hueco multi-tenant del create legacy).
+    //    Solo si conocemos las orgs del actor; nunca revela cross-org (404, no 403).
+    if (
+      actor.organizationIds?.length &&
+      !actor.organizationIds.includes(task.project.organizationId)
+    ) {
+      throw new AppException('La tarea no existe', 'TASK_NOT_FOUND', 404);
+    }
+
+    // 3) A quién se imputan las horas + permisos.
+    const canManage = this.canManageTimeEntries(actor);
+    const targetUserId = dto.userId ?? actor.id;
+    if (dto.userId && dto.userId !== actor.id && !canManage) {
+      throw new AppException(
+        'No podés cargar horas en nombre de otra persona',
+        'FORBIDDEN',
+        403,
+      );
+    }
+    const isAssigned = task.assignments.some((a) => a.userId === actor.id);
+    if (!isAssigned && !canManage) {
+      throw new AppException(
+        'No estás asignado a esta tarea',
+        'FORBIDDEN',
+        403,
+      );
+    }
+
+    // 4) Validaciones de workedOn (no futuro, no antes de la tarea, no mes ya facturado).
+    this.assertWorkedOnValid(dto.workedOn, task.createdAt);
+    await this.assertWorkedOnNotBilled(task.project.clientId, dto.workedOn);
+    const workedOn = this.parseWorkedOn(dto.workedOn);
+
+    // 5) Una entrada por (tarea, usuario, día) viva (chequeo de app; el índice único parcial es el backstop).
+    const existingDay = await this.prisma.timeEntry.findFirst({
+      where: { taskId, userId: targetUserId, workedOn, deletedAt: null },
+      select: { id: true },
+    });
+    if (existingDay) {
+      throw new AppException(
+        'Ya cargaste horas para esta tarea en esa fecha. Editá la entrada existente.',
+        'TIME_ENTRY_DAY_EXISTS',
+        409,
+      );
+    }
+
+    // 6) Crear. billable SE HEREDA de la task; startTime (NOT NULL legacy) = workedOn (ancla neutra);
+    //    duration = minutes*60 deja coherentes los reportes que suman segundos; status CONFIRMED mantiene
+    //    la entrada fuera del picker DRAFT del timer SIN cobrar (el cobro lo dispara time_entry.confirmed, que NO se emite).
+    const minutes = dto.minutes;
+    let entry;
+    try {
+      entry = await this.prisma.timeEntry.create({
+        data: {
+          taskId,
+          userId: targetUserId,
+          createdById: actor.id,
+          minutes,
+          workedOn,
+          origin: 'MANUAL',
+          description: dto.note ?? null,
+          billable: task.billable,
+          startTime: workedOn,
+          duration: minutes * 60,
+          status: TimeEntryStatus.CONFIRMED,
+        },
+        include: { user: { select: { id: true, name: true, image: true } } },
+      });
+    } catch (e) {
+      if (
+        e instanceof Prisma.PrismaClientKnownRequestError &&
+        e.code === 'P2002'
+      ) {
+        throw new AppException(
+          'Ya cargaste horas para esta tarea en esa fecha. Editá la entrada existente.',
+          'TIME_ENTRY_DAY_EXISTS',
+          409,
+        );
+      }
+      throw e;
+    }
+
+    // 7) Traza: evento bien formado (payload en `data`, entity='task' → GET /tasks/:id/activity).
+    this.eventEmitter.emit(
+      'time_entry.created',
+      domainEvent(
+        'time_entry.created',
+        'task',
+        taskId,
+        task.project.organizationId,
+        actor.id,
+        {
+          timeEntryId: entry.id,
+          minutes,
+          workedOn: dto.workedOn,
+          forUserId: targetUserId,
+          origin: 'MANUAL',
+        },
+      ),
+    );
+
+    this.logger.log(
+      `Carga manual ${entry.id}: ${minutes}min en task ${taskId} (workedOn ${dto.workedOn}) por ${actor.id} → user ${targetUserId}`,
+    );
+    return entry;
+  }
+
+  async update(id: string, actor: AuthenticatedUser, dto: UpdateTimeEntryDto) {
+    const existing = await this.prisma.timeEntry.findFirst({
+      where: { id, deletedAt: null }, // soft-deleted = no existe
+      include: {
+        task: {
+          include: {
+            project: { select: { organizationId: true, clientId: true } },
+          },
+        },
+      },
     });
 
-    if (!existing || existing.userId !== userId) {
+    const isOwner = existing?.userId === actor.id;
+    const canManage = this.canManageTimeEntries(actor);
+    if (!existing || (!isOwner && !canManage)) {
+      // 404 (no 403) preserva el shape actual y no filtra existencia de entradas ajenas.
       throw new AppException(
         'La entrada de tiempo no existe o no te pertenece',
         'TIME_ENTRY_NOT_FOUND',
@@ -107,31 +254,109 @@ export class TimeEntryService {
       );
     }
 
-    const data: any = { ...dto };
-    if (dto.startTime) data.startTime = new Date(dto.startTime);
-    if (dto.endTime) data.endTime = new Date(dto.endTime);
+    const isManualCorrection =
+      dto.minutes !== undefined ||
+      dto.workedOn !== undefined ||
+      dto.note !== undefined;
 
-    if (dto.startTime && dto.endTime && !dto.duration) {
-      data.duration = Math.floor(
-        (new Date(dto.endTime).getTime() -
-          new Date(dto.startTime).getTime()) /
-          1000,
-      );
+    const data: any = {};
+
+    if (isManualCorrection) {
+      if (dto.workedOn !== undefined) {
+        this.assertWorkedOnValid(dto.workedOn, existing.task.createdAt);
+        await this.assertWorkedOnNotBilled(
+          existing.task.project.clientId,
+          dto.workedOn,
+        );
+        data.workedOn = this.parseWorkedOn(dto.workedOn);
+      }
+      if (dto.minutes !== undefined && dto.minutes !== existing.minutes) {
+        // Snapshot del valor anterior (badge O(1)); tolera corregir una entry legacy (minutes NULL → duration/60).
+        data.previousMinutes =
+          existing.minutes ??
+          (existing.duration != null
+            ? Math.round(existing.duration / 60)
+            : null);
+        data.minutes = dto.minutes;
+        data.duration = dto.minutes * 60; // sombra legacy coherente (R30)
+      }
+      if (dto.note !== undefined) {
+        data.description = dto.note;
+        data.correctionNote = dto.note;
+      }
+      data.correctedById = actor.id;
+      data.correctedAt = new Date();
+    } else {
+      // Vía legacy (timer): startTime/endTime/duration — se conserva el comportamiento previo.
+      if (dto.description !== undefined) data.description = dto.description;
+      if (dto.billable !== undefined) data.billable = dto.billable;
+      if (dto.startTime) data.startTime = new Date(dto.startTime);
+      if (dto.endTime) data.endTime = new Date(dto.endTime);
+      if (dto.duration !== undefined) data.duration = dto.duration;
+      if (dto.startTime && dto.endTime && dto.duration === undefined) {
+        data.duration = Math.floor(
+          (new Date(dto.endTime).getTime() -
+            new Date(dto.startTime).getTime()) /
+            1000,
+        );
+      }
     }
 
-    return this.prisma.timeEntry.update({
-      where: { id },
-      data,
-      include: { task: true },
-    });
+    let updated;
+    try {
+      updated = await this.prisma.timeEntry.update({
+        where: { id },
+        data,
+        include: { user: { select: { id: true, name: true, image: true } } },
+      });
+    } catch (e) {
+      if (
+        e instanceof Prisma.PrismaClientKnownRequestError &&
+        e.code === 'P2002'
+      ) {
+        throw new AppException(
+          'Ya existe una carga para esa tarea en esa fecha',
+          'TIME_ENTRY_DAY_EXISTS',
+          409,
+        );
+      }
+      throw e;
+    }
+
+    if (isManualCorrection) {
+      this.eventEmitter.emit(
+        'time_entry.corrected',
+        domainEvent(
+          'time_entry.corrected',
+          'task',
+          existing.taskId,
+          existing.task.project.organizationId,
+          actor.id,
+          {
+            timeEntryId: id,
+            minutes: updated.minutes,
+            correctedFor: existing.userId,
+          },
+          { minutes: existing.minutes, workedOn: existing.workedOn },
+        ),
+      );
+    }
+    return updated;
   }
 
-  async delete(id: string, userId: string) {
-    const existing = await this.prisma.timeEntry.findUnique({
-      where: { id },
+  async delete(id: string, actor: AuthenticatedUser, reason?: string) {
+    const existing = await this.prisma.timeEntry.findFirst({
+      where: { id, deletedAt: null }, // ya borrada = 404 (idempotente)
+      include: {
+        task: {
+          include: { project: { select: { organizationId: true } } },
+        },
+      },
     });
 
-    if (!existing || existing.userId !== userId) {
+    const isOwner = existing?.userId === actor.id;
+    const canManage = this.canManageTimeEntries(actor);
+    if (!existing || (!isOwner && !canManage)) {
       throw new AppException(
         'La entrada de tiempo no existe o no te pertenece',
         'TIME_ENTRY_NOT_FOUND',
@@ -139,7 +364,96 @@ export class TimeEntryService {
       );
     }
 
-    return this.prisma.timeEntry.delete({ where: { id } });
+    // Soft delete: UPDATE, no DELETE. Libera el slot del único parcial (deleted_at IS NULL).
+    const deleted = await this.prisma.timeEntry.update({
+      where: { id },
+      data: {
+        deletedAt: new Date(),
+        deletedById: actor.id,
+        deleteReason: reason ?? null,
+      },
+    });
+
+    this.eventEmitter.emit(
+      'time_entry.deleted',
+      domainEvent(
+        'time_entry.deleted',
+        'task',
+        existing.taskId,
+        existing.task.project.organizationId,
+        actor.id,
+        { timeEntryId: id, deletedFor: existing.userId, reason: reason ?? null },
+        { minutes: existing.minutes, workedOn: existing.workedOn },
+      ),
+    );
+    return deleted;
+  }
+
+  // ── H4: helpers de autorización y validación de workedOn ──
+
+  private canManageTimeEntries(actor: AuthenticatedUser): boolean {
+    return !!actor.permissions?.some(
+      (p) => p === 'manage:time-entries' || p === '*:*',
+    );
+  }
+
+  private parseWorkedOn(input: string): Date {
+    // 'YYYY-MM-DD' (o ISO) → Date date-only a medianoche UTC. Se guarda en @db.Date (PG ignora la hora).
+    return new Date(`${input.slice(0, 10)}T00:00:00.000Z`);
+  }
+
+  private dayInAsuncion(d: Date): string {
+    // 'YYYY-MM-DD' del instante `d` en America/Asuncion (es-PY), no en UTC crudo.
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Asuncion',
+    }).format(d);
+  }
+
+  private assertWorkedOnValid(workedOnInput: string, taskCreatedAt: Date) {
+    const workedOnDay = workedOnInput.slice(0, 10); // 'YYYY-MM-DD'
+    const todayDay = this.dayInAsuncion(new Date()); // hoy en Asunción
+    // Comparación lexicográfica de fechas ISO 'YYYY-MM-DD' = comparación cronológica.
+    if (workedOnDay > todayDay) {
+      throw new AppException(
+        'No podés cargar horas en una fecha futura',
+        'WORKED_ON_IN_FUTURE',
+        400,
+      );
+    }
+    const taskDay = this.dayInAsuncion(taskCreatedAt);
+    if (workedOnDay < taskDay) {
+      throw new AppException(
+        'No podés cargar horas antes de que existiera la tarea',
+        'WORKED_ON_BEFORE_TASK',
+        400,
+      );
+    }
+  }
+
+  private async assertWorkedOnNotBilled(
+    clientId: string | null,
+    workedOnInput: string,
+  ) {
+    if (!clientId) return; // proyecto sin cliente → no aplica el candado de facturación
+    // Mediodía UTC del día trabajado: queda lejos de los bordes medianoche/fin-de-mes de Asunción
+    // con que ClientBillingCycle guarda periodStart/periodEnd (evita el drift de zona horaria).
+    const checkInstant = new Date(`${workedOnInput.slice(0, 10)}T12:00:00.000Z`);
+    const billed = await this.prisma.clientBillingCycle.findFirst({
+      where: {
+        clientId,
+        status: { not: 'CANCELLED' }, // DRAFT|SENT|PAID = mes cerrado/facturado; CANCELLED = reabierto
+        periodStart: { lte: checkInstant },
+        periodEnd: { gte: checkInstant },
+      },
+      select: { id: true },
+    });
+    if (billed) {
+      throw new AppException(
+        'Ese mes ya fue facturado; no se puede cargar horas en un período cerrado',
+        'WORKED_ON_MONTH_BILLED',
+        409,
+      );
+    }
   }
 
   // ============================================
@@ -155,7 +469,7 @@ export class TimeEntryService {
     const durationSeconds = Math.round(estimatedHours * 3600);
 
     const existing = await this.prisma.timeEntry.findFirst({
-      where: { taskId, userId, status: TimeEntryStatus.DRAFT },
+      where: { taskId, userId, status: TimeEntryStatus.DRAFT, deletedAt: null },
     });
 
     if (existing) {
@@ -183,8 +497,14 @@ export class TimeEntryService {
    * (que el HoursListener escucha para descontar al cliente).
    */
   async confirmFromApproval(taskId: string, finalDurationSeconds: number, userId: string) {
+    // Defensa en profundidad (invariante "a lo sumo un cobro de aprobación por tarea"): si quedó
+    // colgado un CONFIRMED de aprobación (p. ej. una reapertura por un camino que no reembolsó),
+    // revertirlo ANTES de confirmar evita apilar un segundo cobro. En el flujo normal (sin CONFIRMED
+    // previo) es un no-op. No toca las cargas manuales — revertConfirmation ya las excluye.
+    await this.revertConfirmation(taskId, userId);
+
     const draft = await this.prisma.timeEntry.findFirst({
-      where: { taskId, status: TimeEntryStatus.DRAFT },
+      where: { taskId, status: TimeEntryStatus.DRAFT, deletedAt: null },
       include: { task: { include: { project: { select: { organizationId: true, clientId: true } } } } },
     });
 
@@ -229,6 +549,7 @@ export class TimeEntryService {
       taskId,
       duration: finalDurationSeconds,
       legacyMigration: false,
+      version: confirmed.version, // H2: identifica este ciclo de confirm (clave de idempotencia del ledger)
     });
 
     this.logger.log(`TimeEntry ${confirmed.id} CONFIRMED para task ${taskId} con ${finalDurationSeconds}s`);
@@ -241,7 +562,16 @@ export class TimeEntryService {
    */
   async revertConfirmation(taskId: string, userId: string) {
     const confirmed = await this.prisma.timeEntry.findFirst({
-      where: { taskId, status: TimeEntryStatus.CONFIRMED, legacyMigration: false },
+      // Solo entradas de APROBACIÓN. Las cargas manuales H4 son CONFIRMED pero NUNCA cobraron
+      // (no emiten time_entry.confirmed), así que jamás deben revertirse ni reembolsarse.
+      // (OR explícito porque en SQL `origin <> 'MANUAL'` excluye los NULL de las entradas de aprobación.)
+      where: {
+        taskId,
+        status: TimeEntryStatus.CONFIRMED,
+        legacyMigration: false,
+        deletedAt: null,
+        OR: [{ origin: null }, { origin: { not: 'MANUAL' } }],
+      },
       include: { task: { include: { project: { select: { organizationId: true } } } } },
     });
 
@@ -249,7 +579,10 @@ export class TimeEntryService {
 
     const reverted = await this.prisma.timeEntry.update({
       where: { id: confirmed.id },
-      data: { status: TimeEntryStatus.DRAFT, endTime: null },
+      // H2: bump de version → el próximo confirm usa una entry_version distinta y NO choca el único
+      //     parcial. Así rechazar y re-aprobar cobra de nuevo (legítimo), mientras que el MISMO
+      //     confirm disparado dos veces (misma version) sí choca y se ignora (idempotente).
+      data: { status: TimeEntryStatus.DRAFT, endTime: null, version: { increment: 1 } },
       include: { task: { include: { project: { select: { organizationId: true } } } } },
     });
 
@@ -339,7 +672,7 @@ export class TimerService {
 
     // Si ya existe un DRAFT para (taskId, userId) → sumar duracion. Si no → crear nuevo DRAFT.
     const draft = await this.prisma.timeEntry.findFirst({
-      where: { taskId, userId, status: TimeEntryStatus.DRAFT },
+      where: { taskId, userId, status: TimeEntryStatus.DRAFT, deletedAt: null },
     });
 
     let timeEntry;
@@ -418,6 +751,7 @@ export class TimeReportService {
   async getProjectReport(projectId: string, filters: TimeReportFilterDto) {
     const where: any = {
       task: { projectId },
+      deletedAt: null, // H4: excluir soft-deleted del reporte
     };
 
     if (filters.startDate || filters.endDate) {
@@ -485,7 +819,7 @@ export class TimeReportService {
   }
 
   async getUserReport(userId: string, filters: TimeReportFilterDto) {
-    const where: any = { userId };
+    const where: any = { userId, deletedAt: null }; // H4: excluir soft-deleted del reporte
 
     if (filters.startDate || filters.endDate) {
       where.startTime = {};
