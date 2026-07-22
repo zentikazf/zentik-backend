@@ -21,6 +21,7 @@ import { ClientService } from './client.service';
 import { CreateClientDto, UpdateClientDto } from './dto';
 import { CreateClientUserDto } from './dto/create-client-user.dto';
 import { EditHoursTransactionDto } from './dto/edit-hours-transaction.dto';
+import { AppException } from '../../common/filters/app-exception';
 
 @ApiTags('Clients')
 @ApiBearerAuth()
@@ -219,12 +220,22 @@ export class ClientController {
     return this.clientService.editHoursTransaction(orgId, clientId, transactionId, dto, user.id);
   }
 
+  // DEPRECATED — H1 OBJ-2 (candado de emergencia). syncMissedHours inventaba horas fantasma:
+  // usaba estimatedHours*60 o, sin estimación, la ANTIGÜEDAD de la tarea en minutos
+  // (Date.now()-createdAt, client.service.ts:996), pudiendo generar cientos de horas falsas.
+  // Se congela como tombstone 410 (no 404) para cortar deep-links/curl/Postman. NO se elimina el
+  // cuerpo de syncMissedHours (KEEP-CODE); el motor de horas correcto se rediseña en H2..H9.
   @Post(':clientId/hours/sync')
-  @ApiOperation({ summary: 'Sincronizar horas de tareas SUPPORT completadas no procesadas' })
-  syncHours(
-    @Param('orgId') orgId: string,
-    @Param('clientId') clientId: string,
-  ) {
-    return this.clientService.syncMissedHours(orgId, clientId);
+  @ApiOperation({
+    summary: 'DEPRECATED — devuelve 410 Gone. El sync de horas fue congelado (H1): inventaba horas fantasma.',
+    deprecated: true,
+  })
+  syncHours(): never {
+    throw new AppException(
+      'El sync de horas fue deshabilitado: generaba horas inexactas. El descuento correcto ocurre al confirmar tiempo (time_entry.confirmed).',
+      'HOURS_SYNC_DEPRECATED',
+      HttpStatus.GONE,
+      { replacement: 'timer + time_entry.confirmed (motor de horas H2..H9)' },
+    );
   }
 }
