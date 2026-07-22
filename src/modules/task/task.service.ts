@@ -305,7 +305,8 @@ export class TaskService {
           take: 50,
         },
         timeEntries: {
-          select: { id: true, startTime: true, endTime: true, duration: true, description: true, status: true, billable: true, legacyMigration: true, user: { select: { id: true, name: true, image: true } } },
+          where: { deletedAt: null }, // H4: soft delete — las borradas no se listan ni suman al total
+          select: { id: true, startTime: true, endTime: true, duration: true, description: true, status: true, billable: true, legacyMigration: true, minutes: true, workedOn: true, origin: true, createdById: true, correctedById: true, correctedAt: true, previousMinutes: true, correctionNote: true, deletedAt: true, user: { select: { id: true, name: true, image: true } } },
           orderBy: { startTime: 'desc' },
           take: 50,
         },

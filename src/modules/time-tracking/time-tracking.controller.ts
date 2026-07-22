@@ -18,7 +18,9 @@ import { Permissions } from '../../common/decorators/permissions.decorator';
 import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { TimeEntryService, TimerService, TimeReportService } from './time-tracking.service';
 import { CreateTimeEntryDto } from './dto/create-time-entry.dto';
+import { CreateManualTimeEntryDto } from './dto/create-manual-time-entry.dto';
 import { UpdateTimeEntryDto } from './dto/update-time-entry.dto';
+import { DeleteTimeEntryDto } from './dto/delete-time-entry.dto';
 import { StartTimerDto } from './dto/start-timer.dto';
 import { TimeReportFilterDto } from './dto/time-report-filter.dto';
 
@@ -48,6 +50,20 @@ export class TimeTrackingController {
     return this.timeEntryService.create(user.id, dto);
   }
 
+  @Post('tasks/:taskId/time-entries')
+  @ApiOperation({
+    summary: 'Cargar horas manualmente en una tarea (declaración humana con fecha de trabajo)',
+  })
+  @HttpCode(HttpStatus.CREATED)
+  async createManualTimeEntry(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('taskId') taskId: string,
+    @Body() dto: CreateManualTimeEntryDto,
+  ) {
+    // Pasa el actor COMPLETO (id + permissions): el service resuelve asignado-vs-PM.
+    return this.timeEntryService.createManual(user, taskId, dto);
+  }
+
   @Get('time-entries')
   @ApiOperation({ summary: 'Listar mis entradas de tiempo' })
   async listTimeEntries(
@@ -70,17 +86,19 @@ export class TimeTrackingController {
     @Param('id') id: string,
     @Body() dto: UpdateTimeEntryDto,
   ) {
-    return this.timeEntryService.update(id, user.id, dto);
+    // Actor completo: habilita al PM (manage:time-entries) a corregir entradas ajenas con traza.
+    return this.timeEntryService.update(id, user, dto);
   }
 
   @Delete('time-entries/:id')
-  @ApiOperation({ summary: 'Eliminar entrada de tiempo' })
+  @ApiOperation({ summary: 'Eliminar entrada de tiempo (soft delete)' })
   @HttpCode(HttpStatus.NO_CONTENT)
   async deleteTimeEntry(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id') id: string,
+    @Body() dto: DeleteTimeEntryDto,
   ) {
-    return this.timeEntryService.delete(id, user.id);
+    return this.timeEntryService.delete(id, user, dto?.reason);
   }
 
   // ============================================

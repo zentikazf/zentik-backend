@@ -224,6 +224,13 @@ enum TimeEntryStatus {
   CONFIRMED
 }
 
+// H4: procedencia de una entrada de tiempo. NULL en filas legacy (sin default de DB → no reinterpreta datos viejos).
+enum TimeEntryOrigin {
+  MANUAL // carga manual declarada por una persona (H4)
+  TIMER // cronómetro (TimerService) — legacy hasta H5
+  SEED // sembrado por scripts / estimación / import
+}
+
 // ============================================================================
 // AUTH MODELS (Better Auth managed)
 // ============================================================================
@@ -724,6 +731,22 @@ model TimeEntry {
   status          TimeEntryStatus @default(DRAFT)
   legacyMigration Boolean         @default(false) @map("legacy_migration")
   version         Int             @default(1) // H2: incrementa en cada revert; distingue confirm#1 de confirm#2
+
+  // --- H4: la hora nace de una declaración humana (aditivas, nullable — EXPAND puro) ---
+  workedOn        DateTime?        @map("worked_on") @db.Date // fecha REAL de trabajo (date-only, sin hora ni TZ)
+  minutes         Int? // horas reales EN MINUTOS (la declaración humana; fuente de verdad del "cuánto")
+  origin          TimeEntryOrigin? // MANUAL | TIMER | SEED. NULL = legacy/desconocido (sin default de DB)
+  // --- H4: traza de auditoría en columna (estado O(1), sin depender del audit best-effort) ---
+  createdById     String?          @map("created_by_id") // quién CARGÓ (≠ userId = a quién se imputan las horas)
+  correctedById   String?          @map("corrected_by_id") // quién corrigió por última vez
+  correctedAt     DateTime?        @map("corrected_at")
+  correctionNote  String?          @map("correction_note")
+  previousMinutes Int?             @map("previous_minutes") // valor ANTES de la última corrección (badge O(1))
+  // --- H4: soft delete (reemplaza el hard delete de time-tracking.service.ts:142) ---
+  deletedAt       DateTime?        @map("deleted_at")
+  deletedById     String?          @map("deleted_by_id")
+  deleteReason    String?          @map("delete_reason")
+
   createdAt       DateTime        @default(now()) @map("created_at")
   updatedAt       DateTime        @updatedAt @map("updated_at")
 
@@ -735,6 +758,10 @@ model TimeEntry {
   @@index([startTime])
   @@index([billable])
   @@index([status])
+  @@index([workedOn]) // H4: filtrar/ordenar por fecha de trabajo
+  @@index([deletedAt]) // H4: soporta el filtro `deletedAt IS NULL` de toda lectura
+  // ⚠️ El @@unique parcial (task,user,workedOn) WHERE worked_on IS NOT NULL AND deleted_at IS NULL
+  //    NO se declara acá: Prisma 5.x no expresa el predicado WHERE → va como SQL raw en el migration.sql (igual que H2).
   @@map("time_entries")
 }
 
