@@ -11,7 +11,7 @@ import { ClientService } from './client.service';
  * - Ahora escucha time_entry.confirmed → descuenta del cupo del cliente
  *   usando TimeEntry.duration (en segundos).
  * - Ahora escucha time_entry.reverted → revierte el descuento via REFUND.
- * - Aplica a tareas SUPPORT y PROJECT (ambos descuentan ahora).
+ * - Aplica SOLO a tareas SUPPORT (H1: PROJECT no descuenta; el guard vive en recordHoursUsage).
  *
  * Salvaguardas:
  * 1. legacyMigration=true → SKIP (descuento ya estaba hecho con la logica vieja).

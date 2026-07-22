@@ -852,8 +852,17 @@ export class ClientService {
       return;
     }
 
-    // Fase B: ambos tipos (SUPPORT y PROJECT) descuentan del cupo del cliente.
-    // El descuento se dispara desde HoursListener al recibir time_entry.confirmed.
+    // H1 OBJ-1 (candado de emergencia): SOLO las tareas SUPPORT descuentan el cupo del cliente.
+    // Las tareas PROJECT NO crean ninguna HoursTransaction (ni USAGE/LOAN ni INTERNAL), no tocan
+    // usedHours/loanedHours y no dejan rastro en el libro mayor por ahora. El valor/tarifa de las
+    // horas de proyecto se persistirá en el TimeEntry en H4; por eso la rama developmentHourlyRate
+    // (más abajo) queda VIVA como gancho futuro, pero acá cortamos ANTES de llegar a ella.
+    // El descuento de SUPPORT se dispara desde HoursListener al recibir time_entry.confirmed.
+    if (task.type === 'PROJECT') {
+      this.logger.log(`recordHoursUsage: task ${taskId} es PROJECT — H1 OBJ-1: no consume cupo, sin transacción. Skip.`);
+      return;
+    }
+
     const clientId = task.project.clientId;
     const hours = parseFloat((durationMinutes / 60).toFixed(4));
 
@@ -891,7 +900,10 @@ export class ClientService {
       if (task.type === 'SUPPORT' && client.supportHourlyRate) {
         return parseFloat(client.supportHourlyRate.toString());
       }
-      if (task.type === 'PROJECT' && client.developmentHourlyRate) {
+      // H1: tras el guard PROJECT (arriba) TS estrecha task.type a 'SUPPORT', pero dejamos esta
+      // rama VIVA como gancho de H4 (tarifa de proyecto en el TimeEntry). Cast puntual a string para
+      // no romper el narrowing sin usar `any`; comportamiento idéntico (rama inalcanzable para SUPPORT).
+      if ((task.type as string) === 'PROJECT' && client.developmentHourlyRate) {
         return parseFloat(client.developmentHourlyRate.toString());
       }
       return null;

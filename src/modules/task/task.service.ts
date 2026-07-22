@@ -11,6 +11,7 @@ import {
   CreateTaskDto,
   UpdateTaskDto,
   TaskFilterDto,
+  TaskTypeDto,
 } from './dto';
 
 @Injectable()
@@ -74,13 +75,11 @@ export class TaskService {
       throw new AppException('El proyecto no existe', 'PROJECT_NOT_FOUND', 404, { projectId });
     }
 
-    // Validate SUPPORT hours availability before creating
-    if (dto.estimatedHours) {
-      // Check if task will be SUPPORT type (set by ticket creation or explicitly)
-      const isSupportProject = await this.prisma.task.count({
-        where: { projectId, type: 'SUPPORT' },
-      });
-      // For now, validate on all tasks with estimatedHours — the hours listener only deducts SUPPORT
+    // Validar disponibilidad de cupo SOLO para tareas SUPPORT (H1 OBJ-1): PROJECT ya no consume
+    // cupo, así que no tiene sentido bloquear su creación por falta de horas. Simetría con updateTask
+    // (:354, que ya filtra por SUPPORT). Task.type tiene @default(PROJECT): si dto.type es undefined
+    // la tarea nace PROJECT y no se valida cupo (los tickets crean SUPPORT explícito).
+    if (dto.estimatedHours && dto.type === TaskTypeDto.SUPPORT) {
       await this.assertSupportHoursAvailable(projectId, dto.estimatedHours);
     }
 
