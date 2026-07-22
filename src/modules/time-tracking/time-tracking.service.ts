@@ -229,6 +229,7 @@ export class TimeEntryService {
       taskId,
       duration: finalDurationSeconds,
       legacyMigration: false,
+      version: confirmed.version, // H2: identifica este ciclo de confirm (clave de idempotencia del ledger)
     });
 
     this.logger.log(`TimeEntry ${confirmed.id} CONFIRMED para task ${taskId} con ${finalDurationSeconds}s`);
@@ -249,7 +250,10 @@ export class TimeEntryService {
 
     const reverted = await this.prisma.timeEntry.update({
       where: { id: confirmed.id },
-      data: { status: TimeEntryStatus.DRAFT, endTime: null },
+      // H2: bump de version → el próximo confirm usa una entry_version distinta y NO choca el único
+      //     parcial. Así rechazar y re-aprobar cobra de nuevo (legítimo), mientras que el MISMO
+      //     confirm disparado dos veces (misma version) sí choca y se ignora (idempotente).
+      data: { status: TimeEntryStatus.DRAFT, endTime: null, version: { increment: 1 } },
       include: { task: { include: { project: { select: { organizationId: true } } } } },
     });
 

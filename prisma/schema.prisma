@@ -723,6 +723,7 @@ model TimeEntry {
   billable        Boolean         @default(true)
   status          TimeEntryStatus @default(DRAFT)
   legacyMigration Boolean         @default(false) @map("legacy_migration")
+  version         Int             @default(1) // H2: incrementa en cada revert; distingue confirm#1 de confirm#2
   createdAt       DateTime        @default(now()) @map("created_at")
   updatedAt       DateTime        @updatedAt @map("updated_at")
 
@@ -1293,6 +1294,12 @@ model HoursTransaction {
   hours        Float
   taskId       String?   @map("task_id")
   note         String?
+
+  // ── H2: clave de idempotencia del ledger (aditivas, nullable) ──
+  // El único parcial (WHERE time_entry_id IS NOT NULL) va a mano en el migration.sql:
+  // Prisma 5.x no expresa índices parciales. NO declarar @@unique acá.
+  timeEntryId  String?   @map("time_entry_id")
+  entryVersion Int?      @map("entry_version")
 
   // Snapshot de precio al momento del descuento (Fase Precio Hora)
   priceAmount   Decimal? @map("price_amount")   @db.Decimal(15, 2)
