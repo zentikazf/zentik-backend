@@ -115,6 +115,7 @@ export class TimeEntryService {
       select: {
         billable: true,
         createdAt: true,
+        status: true,
         assignments: { select: { userId: true } },
         project: { select: { organizationId: true, clientId: true } },
       },
@@ -130,6 +131,17 @@ export class TimeEntryService {
       !actor.organizationIds.includes(task.project.organizationId)
     ) {
       throw new AppException('La tarea no existe', 'TASK_NOT_FOUND', 404);
+    }
+
+    // 2-bis) H7 (GATE-5, defensa en profundidad): no cargar horas en tareas ya cerradas.
+    // El cobro se consolida al aprobar (→DONE); cargar después crearía horas que nunca se
+    // cobran (no hay quién dispare time_entry.confirmed). Para ajustar, reabrí la tarea.
+    if (task.status === 'DONE') {
+      throw new AppException(
+        'La tarea ya fue aprobada y cerrada; no se pueden cargar más horas. Reabrí la tarea para ajustar.',
+        'TASK_ALREADY_DONE',
+        409,
+      );
     }
 
     // 3) A quién se imputan las horas + permisos.
@@ -385,6 +397,34 @@ export class TimeEntryService {
         { minutes: existing.minutes, workedOn: existing.workedOn },
       ),
     );
+
+    // H7: si la carga MANUAL borrada tenía cobro VIVO (aprobación previa), devolver ese cupo.
+    // Sin esto el borrado dejaría usedHours consumido para siempre: el reverso de reapertura
+    // (revertManualCharges) salta las soft-deleted, así que hay que soltarlo acá, en el borrado.
+    // Reusa el evento keyed → onTimeEntryReverted refunda el cobro exacto (id, version). No bump
+    // de version: la entrada queda borrada y confirmFromApproval ya no la re-cobra (deletedAt).
+    if (existing.origin === 'MANUAL') {
+      const liveCharge = await this.prisma.hoursTransaction.findFirst({
+        where: {
+          taskId: existing.taskId,
+          timeEntryId: id,
+          entryVersion: existing.version,
+          type: { in: ['USAGE', 'LOAN'] },
+          deletedAt: null,
+        },
+        select: { id: true },
+      });
+      if (liveCharge) {
+        this.eventEmitter.emit('time_entry.reverted', {
+          ...domainEvent('time_entry.reverted', 'time_entry', id, existing.task.project.organizationId, actor.id),
+          timeEntryId: id,
+          taskId: existing.taskId,
+          duration: existing.duration,
+          entryVersion: existing.version,
+        });
+        this.logger.log(`Carga MANUAL ${id} borrada con cobro vivo → cupo devuelto (v${existing.version})`);
+      }
+    }
     return deleted;
   }
 
@@ -456,68 +496,56 @@ export class TimeEntryService {
   }
 
   /**
-   * Confirma el TimeEntry DRAFT al aprobar la tarea (modal OTP).
-   * Marca status=CONFIRMED, setea endTime y dispara time_entry.confirmed
-   * (que el HoursListener escucha para descontar al cliente).
+   * H7 — Cobra las horas MANUALES reales al aprobar la tarea. Emite un
+   * time_entry.confirmed por cada carga origin='MANUAL' viva (deletedAt=null,
+   * minutes>0), con duration=minutes*60 y su version → el HoursListener descuenta
+   * cupo por cada una. Idempotencia H2 por (timeEntryId, entryVersion): re-emitir
+   * la misma carga a la misma version rebota con P2002 (sin doble cobro). NO crea
+   * entradas sintéticas ni cobra la estimación. Devuelve el total cobrado (segundos).
    */
-  async confirmFromApproval(taskId: string, finalDurationSeconds: number, userId: string) {
-    // Defensa en profundidad (invariante "a lo sumo un cobro de aprobación por tarea"): si quedó
-    // colgado un CONFIRMED de aprobación (p. ej. una reapertura por un camino que no reembolsó),
-    // revertirlo ANTES de confirmar evita apilar un segundo cobro. En el flujo normal (sin CONFIRMED
-    // previo) es un no-op. No toca las cargas manuales — revertConfirmation ya las excluye.
+  async confirmFromApproval(taskId: string, userId: string): Promise<number> {
+    // Defensa en profundidad: revierte cualquier CONFIRMED de APROBACIÓN colgado (carrier
+    // legacy pre-H7). NO toca las cargas MANUAL (revertConfirmation las excluye) → preserva
+    // la idempotencia por (timeEntryId, entryVersion) del cobro por-carga de H7.
     await this.revertConfirmation(taskId, userId);
 
-    const draft = await this.prisma.timeEntry.findFirst({
-      where: { taskId, status: TimeEntryStatus.DRAFT, deletedAt: null },
-      include: { task: { include: { project: { select: { organizationId: true, clientId: true } } } } },
+    const task = await this.prisma.task.findUnique({
+      where: { id: taskId },
+      select: { project: { select: { organizationId: true } } },
+    });
+    if (!task) {
+      throw new AppException('La tarea no existe', 'TASK_NOT_FOUND', 404);
+    }
+
+    const manuals = await this.prisma.timeEntry.findMany({
+      where: { taskId, origin: 'MANUAL', deletedAt: null, minutes: { gt: 0 } },
+      select: { id: true, minutes: true, version: true },
     });
 
-    let confirmed;
-    if (draft) {
-      confirmed = await this.prisma.timeEntry.update({
-        where: { id: draft.id },
-        data: {
-          duration: finalDurationSeconds,
-          status: TimeEntryStatus.CONFIRMED,
-          endTime: new Date(),
-        },
-        include: { task: { include: { project: { select: { organizationId: true, clientId: true } } } } },
-      });
-    } else {
-      // Caso raro: aprobacion sin DRAFT previo (tarea sin estimacion). Crear CONFIRMED directo.
-      const task = await this.prisma.task.findUnique({
-        where: { id: taskId },
-        include: { assignments: { select: { userId: true } }, project: { select: { organizationId: true, clientId: true } } },
-      });
-      if (!task) {
-        throw new AppException('La tarea no existe', 'TASK_NOT_FOUND', 404);
-      }
-      const assigneeId = task.assignments[0]?.userId ?? userId;
-      confirmed = await this.prisma.timeEntry.create({
-        data: {
-          taskId,
-          userId: assigneeId,
-          duration: finalDurationSeconds,
-          startTime: new Date(),
-          endTime: new Date(),
-          status: TimeEntryStatus.CONFIRMED,
-          billable: true,
-        },
-        include: { task: { include: { project: { select: { organizationId: true, clientId: true } } } } },
+    // Escape H6 (0 h) o tarea sin cargas reales → nada que cobrar (no-op, coherente con approveTask).
+    if (manuals.length === 0) {
+      this.logger.log(`Aprobación task ${taskId}: sin cargas MANUAL vivas — no descuenta cupo`);
+      return 0;
+    }
+
+    let totalSeconds = 0;
+    for (const m of manuals) {
+      const durationSeconds = (m.minutes ?? 0) * 60;
+      totalSeconds += durationSeconds;
+      this.eventEmitter.emit('time_entry.confirmed', {
+        ...domainEvent('time_entry.confirmed', 'time_entry', m.id, task.project.organizationId, userId),
+        timeEntryId: m.id,
+        taskId,
+        duration: durationSeconds,
+        legacyMigration: false,
+        version: m.version, // H2: clave de idempotencia (id, version) por carga
       });
     }
 
-    this.eventEmitter.emit('time_entry.confirmed', {
-      ...domainEvent('time_entry.confirmed', 'time_entry', confirmed.id, confirmed.task.project.organizationId, userId),
-      timeEntryId: confirmed.id,
-      taskId,
-      duration: finalDurationSeconds,
-      legacyMigration: false,
-      version: confirmed.version, // H2: identifica este ciclo de confirm (clave de idempotencia del ledger)
-    });
-
-    this.logger.log(`TimeEntry ${confirmed.id} CONFIRMED para task ${taskId} con ${finalDurationSeconds}s`);
-    return confirmed;
+    this.logger.log(
+      `Aprobación task ${taskId}: cobradas ${manuals.length} carga(s) MANUAL = ${totalSeconds}s (${(totalSeconds / 3600).toFixed(2)}h)`,
+    );
+    return totalSeconds;
   }
 
   /**
@@ -559,6 +587,68 @@ export class TimeEntryService {
 
     this.logger.log(`TimeEntry ${reverted.id} revertido a DRAFT para task ${taskId}`);
     return reverted;
+  }
+
+  /**
+   * H7 — Reverso de CUPO de las cargas MANUAL cobradas por una aprobación. Se usa al
+   * RECHAZAR/REABRIR una tarea que ya cobró (el cobro nace al aprobar; reabrir una tarea
+   * DONE es el caso real). Por cada carga MANUAL con cobro VIVO a su version actual (existe
+   * una HoursTransaction USAGE/LOAN con timeEntryId+entryVersion), sube la version (habilita
+   * re-cobro limpio al re-aprobar) y emite time_entry.reverted con la version VIEJA como
+   * clave → onTimeEntryReverted reembolsa ESE cobro exacto. Idempotente: tras revertir, la
+   * carga queda a v+1 sin cobro vivo → un 2º llamado es no-op.
+   *
+   * ALCANCE H7 = SOLO cupo (horas). El reverso del MONTO/plata (REFUND con priceAmount
+   * negativo, nota de crédito, no re-facturar) es H9.
+   */
+  async revertManualCharges(taskId: string, userId: string): Promise<number> {
+    const manuals = await this.prisma.timeEntry.findMany({
+      where: { taskId, origin: 'MANUAL', deletedAt: null },
+      select: {
+        id: true,
+        version: true,
+        duration: true,
+        task: { include: { project: { select: { organizationId: true } } } },
+      },
+    });
+
+    let revertedCount = 0;
+    for (const m of manuals) {
+      // ¿Tiene cobro VIVO a su version actual? Si no, ya fue revertida o nunca cobró → skip.
+      const liveCharge = await this.prisma.hoursTransaction.findFirst({
+        where: {
+          taskId,
+          timeEntryId: m.id,
+          entryVersion: m.version,
+          type: { in: ['USAGE', 'LOAN'] },
+          deletedAt: null,
+        },
+        select: { id: true },
+      });
+      if (!liveCharge) continue;
+
+      const oldVersion = m.version;
+      await this.prisma.timeEntry.update({
+        where: { id: m.id },
+        // La carga MANUAL NO vuelve a DRAFT (no es un draft): solo bump de version para que un
+        // re-approve cobre con clave nueva (id, v+1) sin chocar el único parcial de la vieja.
+        data: { version: { increment: 1 } },
+      });
+
+      this.eventEmitter.emit('time_entry.reverted', {
+        ...domainEvent('time_entry.reverted', 'time_entry', m.id, m.task.project.organizationId, userId),
+        timeEntryId: m.id,
+        taskId,
+        duration: m.duration,
+        entryVersion: oldVersion, // H7: keyea el refund al cobro EXACTO (id, version vieja)
+      });
+      revertedCount++;
+    }
+
+    if (revertedCount > 0) {
+      this.logger.log(`Revertidas ${revertedCount} carga(s) MANUAL cobrada(s) para task ${taskId} (cupo devuelto)`);
+    }
+    return revertedCount;
   }
 }
 

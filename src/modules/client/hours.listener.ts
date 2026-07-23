@@ -72,18 +72,26 @@ export class HoursListener {
     timeEntryId: string;
     taskId: string;
     duration: number;
+    entryVersion?: number; // H7: si viene, keyea el refund al cobro EXACTO de esta carga.
   }) {
     try {
-      const { timeEntryId, taskId } = event;
+      const { timeEntryId, taskId, entryVersion } = event;
 
-      // Buscar la transaccion USAGE/LOAN mas reciente para esta tarea y revertirla con REFUND
+      // H7: con (timeEntryId, entryVersion) reembolsamos el cobro EXACTO de esta carga MANUAL,
+      // no "el más reciente" (que sub-reembolsaría cuando una tarea tiene N cargas). Sin version
+      // (carrier legacy pre-H7) caemos al comportamiento anterior: la USAGE/LOAN más reciente.
+      const keyed = !!timeEntryId && entryVersion != null;
       const txn = await this.prisma.hoursTransaction.findFirst({
-        where: { taskId, type: { in: ['USAGE', 'LOAN'] } },
+        where: {
+          taskId,
+          type: { in: ['USAGE', 'LOAN'] },
+          ...(keyed ? { timeEntryId, entryVersion } : {}),
+        },
         orderBy: { createdAt: 'desc' },
       });
 
       if (!txn) {
-        this.logger.log(`TimeEntry ${timeEntryId}: no se encontro transaccion previa para task ${taskId} — nada que revertir`);
+        this.logger.log(`TimeEntry ${timeEntryId}: no se encontro cobro para task ${taskId} (keyed=${keyed}) — nada que revertir`);
         return;
       }
 
@@ -94,7 +102,7 @@ export class HoursListener {
             type: 'REFUND',
             hours: txn.hours,
             taskId,
-            note: `Reversion: TimeEntry vuelto a DRAFT (rechazo/reapertura)`,
+            note: `Reversion de cupo por rechazo/reapertura (H7)`,
           },
         });
 

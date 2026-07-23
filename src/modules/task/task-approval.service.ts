@@ -1,6 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { TimeEntryStatus } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
 import { AppException, TaskNotFoundException } from '../../common/filters/app-exception';
 import { domainEvent } from '../../common/events/domain-event.helper';
@@ -22,10 +21,14 @@ export class TaskApprovalService {
   ) {}
 
   /**
-   * Devuelve los datos para el modal OTP antes de aprobar:
-   * - originalEstimate (lo que se estimo, inmutable)
-   * - currentDraftHours (lo que esta cargado actualmente, en horas con 1 decimal)
-   * - hasDraft (true si hay TimeEntry DRAFT preexistente)
+   * H7 — Datos para el modal de aprobación. La fuente de verdad son las cargas
+   * MANUALES vivas (origin='MANUAL', deletedAt=null, minutes>0):
+   * - realHours / realMinutes: suma real cargada (lo que se va a cobrar).
+   * - entries: desglose read-only (una fila por carga: minutos · fecha · usuario).
+   * - hasManualHours: hay al menos una carga real.
+   * - originalEstimate: SOLO referencia informativa (varianza), NUNCA el monto.
+   * - closedWithoutHours (AJ-3): si la tarea llegó a IN_REVIEW por el escape H6
+   *   (cerrada sin horas), el motivo/actor leídos del AuditLog ya persistido.
    */
   async getApprovalPreview(taskId: string) {
     const task = await this.prisma.task.findUnique({
@@ -33,6 +36,7 @@ export class TaskApprovalService {
       select: {
         id: true,
         title: true,
+        projectId: true,
         estimatedHours: true,
         originalEstimate: true,
       },
@@ -41,29 +45,62 @@ export class TaskApprovalService {
       throw new TaskNotFoundException(taskId);
     }
 
-    const draft = await this.prisma.timeEntry.findFirst({
-      where: { taskId, status: TimeEntryStatus.DRAFT },
-      select: { id: true, duration: true },
+    // NÚCLEO H7: horas reales = suma de las cargas MANUAL vivas (no la estimación).
+    const manuals = await this.prisma.timeEntry.findMany({
+      where: { taskId, origin: 'MANUAL', deletedAt: null, minutes: { gt: 0 } },
+      select: {
+        id: true,
+        minutes: true,
+        workedOn: true,
+        user: { select: { id: true, name: true } },
+      },
+      orderBy: { workedOn: 'asc' },
+    });
+    const realMinutes = manuals.reduce((sum, e) => sum + (e.minutes ?? 0), 0);
+    const realHours = Math.round((realMinutes / 60) * 10) / 10; // 1 decimal
+
+    // AJ-3: cierre-sin-horas ya auditado por H6 (task-hours-guard.service.ts). Solo lo leemos.
+    const closedLog = await this.prisma.auditLog.findFirst({
+      where: { resource: 'task', resourceId: taskId, action: 'task.closed_without_hours' },
+      orderBy: { createdAt: 'desc' },
+      include: { user: { select: { name: true, email: true } } },
     });
 
-    const draftSeconds = draft?.duration ?? 0;
     return {
-      task: { id: task.id, title: task.title },
+      task: { id: task.id, title: task.title, projectId: task.projectId },
       originalEstimate: task.originalEstimate ?? task.estimatedHours ?? 0,
-      currentDraftHours: Math.round((draftSeconds / 3600) * 10) / 10, // 1 decimal
-      hasDraft: !!draft,
+      realHours,
+      realMinutes,
+      hasManualHours: manuals.length > 0,
+      entries: manuals.map((e) => ({
+        minutes: e.minutes ?? 0,
+        workedOn: e.workedOn,
+        userId: e.user?.id ?? null,
+        userName: e.user?.name ?? null,
+      })),
+      // AJ-3 SOLO si no hay horas reales: si se cargaron horas después del cierre-sin-horas
+      // (reabrir → cargar → volver a IN_REVIEW), el aviso quedó obsoleto y se aprueba con las
+      // horas reales, no 0 h. Evita mostrar dato contradictorio (banner + desglose a la vez).
+      closedWithoutHours:
+        closedLog && manuals.length === 0
+          ? {
+              by: closedLog.user?.name ?? closedLog.user?.email ?? 'un usuario',
+              reason: (closedLog.newData as any)?.reason ?? null,
+              at: closedLog.createdAt,
+            }
+          : null,
     };
   }
 
   /**
-   * Aprueba la tarea moviendola a DONE y confirma el TimeEntry DRAFT con las horas
-   * confirmadas en el modal OTP. Si no se pasa confirmedHours, se usa la duracion
-   * actual del DRAFT (o estimatedHours como fallback).
+   * H7 — Aprueba la tarea (→DONE) y cobra las horas MANUALES reales cargadas.
+   * confirmFromApproval barre las cargas origin='MANUAL' vivas y descuenta cupo con
+   * ESE total (sin entradas sintéticas ni estimación). Si es escape H6
+   * (closeWithoutHours) no cobra nada (0 h). El modal ya NO manda confirmedHours.
    */
   async approveTask(
     taskId: string,
     userId: string,
-    confirmedHours?: number,
     opts?: {
       closeWithoutHours?: boolean;
       closeWithoutHoursReason?: string;
@@ -98,22 +135,11 @@ export class TaskApprovalService {
       orderBy: { position: 'asc' },
     });
 
-    // Resolver duracion final a confirmar:
-    // 1. Si el cliente paso confirmedHours en el modal OTP → usar eso.
-    // 2. Si no, usar la duracion del DRAFT actual.
-    // 3. Si no hay DRAFT, usar estimatedHours como fallback.
-    let finalDurationSeconds: number;
-    if (confirmedHours !== undefined && confirmedHours !== null) {
-      finalDurationSeconds = Math.round(confirmedHours * 3600);
-    } else {
-      const draft = await this.prisma.timeEntry.findFirst({
-        where: { taskId, status: TimeEntryStatus.DRAFT },
-        select: { duration: true },
-      });
-      finalDurationSeconds = draft?.duration ?? Math.round((task.estimatedHours ?? 0) * 3600);
-    }
-
+    // H7: el monto a cobrar NO viene del modal ni de la estimación — sale de las
+    // cargas MANUAL reales (confirmFromApproval las suma). El total efectivamente
+    // cobrado se captura abajo para el evento task.approval.approved.
     let escaped = false;
+    let confirmedSeconds = 0;
     const updated = await this.prisma.$transaction(async (tx) => {
       // H6: gate de horas — no aprobar (→DONE) sin horas reales, salvo escape auditado
       // (asignado o manage:projects + motivo). Defensa en profundidad: la task pudo
@@ -144,11 +170,12 @@ export class TaskApprovalService {
       return result;
     });
 
-    // Confirmar el TimeEntry DRAFT (dispara time_entry.confirmed → HoursListener descuenta
-    // cliente). SOLO si NO fue escape: cerrar-sin-horas es 0 h reales → no confirma ni
-    // descuenta cupo (CA-22). El resto del flujo H7 (confirmFromApproval) queda intacto.
+    // H7: cobrar las horas MANUALES reales (un time_entry.confirmed por carga viva →
+    // HoursListener descuenta cupo con el total real). SOLO si NO fue escape:
+    // cerrar-sin-horas es 0 h → no cobra (CA-6/CA-22). confirmFromApproval devuelve el
+    // total en segundos efectivamente cobrado.
     if (!escaped) {
-      await this.timeEntryService.confirmFromApproval(taskId, finalDurationSeconds, userId);
+      confirmedSeconds = await this.timeEntryService.confirmFromApproval(taskId, userId);
     }
 
     this.eventEmitter.emit('task.approval.approved', {
@@ -159,14 +186,14 @@ export class TaskApprovalService {
       projectName: task.project.name,
       approvedById: userId,
       assigneeIds: task.assignments.map((a: { userId: string }) => a.userId),
-      confirmedDurationSeconds: escaped ? 0 : finalDurationSeconds,
+      confirmedDurationSeconds: confirmedSeconds,
       closedWithoutHours: escaped,
     });
 
     this.logger.log(
       escaped
         ? `Task ${taskId} aprobada SIN horas (cerrada sin horas por ${userId})`
-        : `Task ${taskId} aprobada con ${finalDurationSeconds}s confirmados (${(finalDurationSeconds / 3600).toFixed(2)}h)`,
+        : `Task ${taskId} aprobada con ${confirmedSeconds}s reales cobrados (${(confirmedSeconds / 3600).toFixed(2)}h)`,
     );
 
     return updated;
@@ -210,8 +237,11 @@ export class TaskApprovalService {
       },
     });
 
-    // Si la tarea tenia TimeEntry CONFIRMED (puede pasar si rechazo viene tras una aprobacion previa) → revertir
+    // Si la tarea tenía cobro vivo (puede pasar si el rechazo viene tras una aprobación
+    // previa que la devolvió a IN_REVIEW): revertir el carrier legacy Y las cargas MANUAL
+    // cobradas en H7. Ambas son no-op si no hay cobro vivo (rechazo normal, aún sin cobrar).
     await this.timeEntryService.revertConfirmation(taskId, userId);
+    await this.timeEntryService.revertManualCharges(taskId, userId);
 
     // Create system comment with rejection reason
     await this.prisma.comment.create({

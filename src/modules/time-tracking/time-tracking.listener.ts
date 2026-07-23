@@ -23,11 +23,11 @@ export class TimeEntryListener {
 
   /**
    * Reabrir una tarea DONE por CUALQUIER camino (board, task.service, ticket.service) emite
-   * `task.reopened`. Antes NADIE lo escuchaba → el cobro de horas de la aprobación quedaba y una
-   * re-aprobación creaba un SEGUNDO cobro (doble cobro por una sola tarea). Este listener reembolsa
-   * al reabrir, exactamente como hace el botón "Rechazar" (rejectTask → revertConfirmation).
-   * revertConfirmation es idempotente (solo actúa sobre un CONFIRMED de aprobación, excluye MANUAL)
-   * → nunca reembolsa de más aunque otro camino también dispare la reversión.
+   * `task.reopened`. Como venía de DONE, YA cobró → hay que devolver el cupo, igual que el botón
+   * "Rechazar". H7: se revierten dos fuentes de cobro, ambas idempotentes / no-op si no hay cobro
+   * vivo, así que aunque otro camino también dispare la reversión nunca reembolsa de más:
+   *  - revertConfirmation → carrier de aprobación legacy pre-H7 (excluye MANUAL).
+   *  - revertManualCharges → las cargas MANUAL cobradas por H7 (bump version + refund keyed).
    */
   @OnEvent('task.reopened')
   async onTaskReopened(event: { taskId?: string; entityId?: string; userId?: string }) {
@@ -36,8 +36,11 @@ export class TimeEntryListener {
       const userId = event.userId ?? 'system';
       if (!taskId) return;
       const reverted = await this.timeEntryService.revertConfirmation(taskId, userId);
-      if (reverted) {
-        this.logger.log(`task.reopened → cobro de horas revertido para task ${taskId} (entry ${reverted.id})`);
+      const revertedManuals = await this.timeEntryService.revertManualCharges(taskId, userId);
+      if (reverted || revertedManuals > 0) {
+        this.logger.log(
+          `task.reopened → cupo revertido para task ${taskId} (carrier: ${reverted ? reverted.id : 'no'}, cargas MANUAL: ${revertedManuals})`,
+        );
       }
     } catch (err) {
       this.logger.error('Error revirtiendo cobro tras task.reopened', err);
