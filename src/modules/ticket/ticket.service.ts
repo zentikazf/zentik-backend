@@ -20,6 +20,10 @@ import { calculateBusinessDeadline, parseBusinessDays } from './sla.util';
 import { TicketEventsService } from './ticket-events.service';
 import { AppConfigService } from '../../config/app.config';
 import { OutboxService } from '../sync/outbox.service';
+import {
+  TaskHoursGuardService,
+  HoursGateActorContext,
+} from '../task/task-hours-guard.service';
 
 /**
  * Generates a sequential ticket number per org: YYYYMMDD-NNN
@@ -98,7 +102,11 @@ function mapTicketStatusToTaskStatus(
     case 'IN_REVIEW':
       return 'IN_REVIEW';
     case 'RESOLVED':
-      return 'DONE';
+      // H6/AJ-2: resolver un ticket lleva la task a REVISIÓN, nunca directo a
+      // completado. El gate de horas aplica antes de IN_REVIEW (resolver exige
+      // horas o el escape); el cobro se consolida recién en la aprobación
+      // (IN_REVIEW→DONE), no al resolver. Antes esto mapeaba a DONE.
+      return 'IN_REVIEW';
     case 'CLOSED':
       return 'DONE';
   }
@@ -114,6 +122,7 @@ export class TicketService {
     private readonly events: TicketEventsService,
     private readonly config: AppConfigService,
     private readonly outbox: OutboxService,
+    private readonly hoursGuard: TaskHoursGuardService,
   ) {}
 
   // ────────────────────────────────────────────────────────────
@@ -144,6 +153,7 @@ export class TicketService {
     targetStatus: TaskStatus,
     userId: string,
     organizationId: string,
+    actorPermissions?: string[],
   ) {
     const task = await tx.task.findUnique({
       where: { id: taskId },
@@ -163,6 +173,22 @@ export class TicketService {
     if (!task) return null;
 
     if (task.status === targetStatus) return task;
+
+    // H6: gate de horas — sincronizar el ticket a IN_REVIEW/DONE exige horas reales
+    // en la task. Gate DURO: el ticket no expone el escape (Soporte carga horas al
+    // resolver, o el 0h legítimo lo cierra el asignado/PM desde el detalle de la
+    // tarea). Corre dentro de la MISMA tx: si lanza, se revierte también el cambio
+    // de estado del ticket (RF-3). Este es el path más evasivo (escribe status crudo
+    // y el TicketController no tiene PermissionsGuard) → el gate en service es imprescindible.
+    if (this.hoursGuard.isGatedStatus(targetStatus)) {
+      await this.hoursGuard.assertHasWorkedHours(
+        task.id,
+        targetStatus as string,
+        { id: userId, permissions: actorPermissions },
+        tx,
+        task.status,
+      );
+    }
 
     const targetColumn = await tx.boardColumn.findFirst({
       where: {
@@ -595,7 +621,7 @@ export class TicketService {
   // Update (status + asignación + sync con kanban)
   // ────────────────────────────────────────────────────────────
 
-  async updateTicket(ticketId: string, dto: UpdateTicketDto, userId: string) {
+  async updateTicket(ticketId: string, dto: UpdateTicketDto, userId: string, actor?: HoursGateActorContext) {
     const ticket = await this.prisma.ticket.findUnique({
       where: { id: ticketId },
       include: {
@@ -795,6 +821,7 @@ export class TicketService {
           targetTaskStatus,
           userId,
           ticket.organizationId,
+          actor?.permissions,
         );
       }
 

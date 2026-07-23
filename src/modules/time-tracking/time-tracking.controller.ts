@@ -16,12 +16,11 @@ import { AuthGuard, PermissionsGuard } from '../auth/guards';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Permissions } from '../../common/decorators/permissions.decorator';
 import { AuthenticatedUser } from '../../common/interfaces/request.interface';
-import { TimeEntryService, TimerService, TimeReportService } from './time-tracking.service';
+import { TimeEntryService, TimeReportService } from './time-tracking.service';
 import { CreateTimeEntryDto } from './dto/create-time-entry.dto';
 import { CreateManualTimeEntryDto } from './dto/create-manual-time-entry.dto';
 import { UpdateTimeEntryDto } from './dto/update-time-entry.dto';
 import { DeleteTimeEntryDto } from './dto/delete-time-entry.dto';
-import { StartTimerDto } from './dto/start-timer.dto';
 import { TimeReportFilterDto } from './dto/time-report-filter.dto';
 
 @ApiTags('Time Tracking')
@@ -32,7 +31,6 @@ import { TimeReportFilterDto } from './dto/time-report-filter.dto';
 export class TimeTrackingController {
   constructor(
     private readonly timeEntryService: TimeEntryService,
-    private readonly timerService: TimerService,
     private readonly timeReportService: TimeReportService,
   ) {}
 
@@ -99,31 +97,6 @@ export class TimeTrackingController {
     @Body() dto: DeleteTimeEntryDto,
   ) {
     return this.timeEntryService.delete(id, user, dto?.reason);
-  }
-
-  // ============================================
-  // Timer — Temporizadores en tiempo real
-  // ============================================
-
-  @Post('time-entries/start')
-  @ApiOperation({ summary: 'Iniciar temporizador en una tarea' })
-  async startTimer(
-    @CurrentUser() user: AuthenticatedUser,
-    @Body() dto: StartTimerDto,
-  ) {
-    return this.timerService.start(user.id, dto.taskId);
-  }
-
-  @Post('time-entries/stop')
-  @ApiOperation({ summary: 'Detener temporizador activo' })
-  async stopTimer(@CurrentUser() user: AuthenticatedUser) {
-    return this.timerService.stop(user.id);
-  }
-
-  @Get('time-entries/active')
-  @ApiOperation({ summary: 'Obtener temporizador activo' })
-  async getActiveTimer(@CurrentUser() user: AuthenticatedUser) {
-    return this.timerService.getActive(user.id);
   }
 
   // ============================================

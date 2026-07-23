@@ -122,7 +122,11 @@ export class TicketController {
     @Body() dto: UpdateTicketDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.ticketService.updateTicket(ticketId, dto, user.id);
+    return this.ticketService.updateTicket(ticketId, dto, user.id, {
+      name: user.name,
+      email: user.email,
+      permissions: user.permissions,
+    });
   }
 
   // DEPRECATED — feature #10 elimina el estado CLOSED del modelo.

@@ -42,6 +42,11 @@ export class TaskController {
     private readonly clientService: ClientService,
   ) {}
 
+  /** Contexto del actor para el gate de horas H6 (nombre/email para el audit, permisos para el escape). */
+  private actorCtx(user: AuthenticatedUser) {
+    return { name: user.name, email: user.email, permissions: user.permissions };
+  }
+
   @Get('projects/:projectId/available-hours')
   @Permissions('view:tasks')
   @ApiOperation({ summary: 'Consultar horas disponibles del cliente vinculado al proyecto' })
@@ -63,7 +68,7 @@ export class TaskController {
     @Body() dto: CreateTaskDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.taskService.createTask(projectId, dto, user.id);
+    return this.taskService.createTask(projectId, dto, user.id, this.actorCtx(user));
   }
 
   @Get('projects/:projectId/tasks')
@@ -102,7 +107,7 @@ export class TaskController {
     @Body() dto: UpdateTaskDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.taskService.updateTask(taskId, dto, user.id, user.organizationId);
+    return this.taskService.updateTask(taskId, dto, user.id, user.organizationId, this.actorCtx(user));
   }
 
   @Delete('tasks/:taskId')
@@ -130,7 +135,7 @@ export class TaskController {
     @Body() dto: CreateTaskDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.taskService.createSubtask(taskId, dto, user.id);
+    return this.taskService.createSubtask(taskId, dto, user.id, this.actorCtx(user));
   }
 
   @Get('tasks/:taskId/subtasks')
@@ -211,7 +216,7 @@ export class TaskController {
     @Body() dto: BulkUpdateTaskDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.taskRelationService.bulkUpdate(projectId, dto, user.id);
+    return this.taskRelationService.bulkUpdate(projectId, dto, user.id, this.actorCtx(user));
   }
 
   // ============================================
@@ -234,7 +239,11 @@ export class TaskController {
     @Body() dto: ApproveTaskDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.taskApprovalService.approveTask(taskId, user.id, dto?.confirmedHours);
+    return this.taskApprovalService.approveTask(taskId, user.id, dto?.confirmedHours, {
+      closeWithoutHours: dto?.closeWithoutHours,
+      closeWithoutHoursReason: dto?.closeWithoutHoursReason,
+      actor: this.actorCtx(user),
+    });
   }
 
   @Post('tasks/:taskId/reject')

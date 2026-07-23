@@ -12,6 +12,10 @@ import {
 } from './dto';
 import { TaskStatus } from '@prisma/client';
 import { domainEvent } from '../../common/events/domain-event.helper';
+import {
+  TaskHoursGuardService,
+  HoursGateActorContext,
+} from '../task/task-hours-guard.service';
 
 @Injectable()
 export class BoardService {
@@ -20,6 +24,7 @@ export class BoardService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly eventEmitter: EventEmitter2,
+    private readonly hoursGuard: TaskHoursGuardService,
   ) {}
 
   async createBoard(projectId: string, dto: CreateBoardDto, userId: string) {
@@ -294,7 +299,7 @@ export class BoardService {
     });
   }
 
-  async moveTask(boardId: string, dto: MoveTaskDto, userId: string) {
+  async moveTask(boardId: string, dto: MoveTaskDto, userId: string, actor?: HoursGateActorContext) {
     const targetColumn = await this.prisma.boardColumn.findFirst({
       where: { id: dto.targetColumnId, boardId },
       select: { id: true, mappedStatus: true },
@@ -336,6 +341,22 @@ export class BoardService {
         'APPROVAL_REQUIRED',
         400,
         { currentStatus: task.status, targetColumn: targetColumn.mappedStatus },
+      );
+    }
+
+    // H6: gate de horas — mover a una columna IN_REVIEW/DONE exige horas reales.
+    // Corre DESPUÉS del guard de aprobación (DONE ya queda bloqueado ahí: no se
+    // arrastra a DONE), así que en la práctica cubre IN_REVIEW. El board es un gate
+    // DURO (RF-13): no expone el escape (no hay dónde pedir el motivo en un drag&drop);
+    // el 0h legítimo se cierra desde el detalle/aprobación. `details.canCloseWithoutHours`
+    // viaja para que el front sepa si ofrecer el atajo (que reenvía por PATCH /tasks/:id).
+    if (this.hoursGuard.isGatedStatus(targetColumn.mappedStatus)) {
+      await this.hoursGuard.assertHasWorkedHours(
+        dto.taskId,
+        targetColumn.mappedStatus as string,
+        { id: userId, ...actor },
+        this.prisma,
+        task.status,
       );
     }
 
