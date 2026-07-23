@@ -5,6 +5,10 @@ import { PrismaService } from '../../database/prisma.service';
 import { AppException, TaskNotFoundException } from '../../common/filters/app-exception';
 import { domainEvent } from '../../common/events/domain-event.helper';
 import { TimeEntryService } from '../time-tracking/time-tracking.service';
+import {
+  TaskHoursGuardService,
+  HoursGateActorContext,
+} from './task-hours-guard.service';
 
 @Injectable()
 export class TaskApprovalService {
@@ -14,6 +18,7 @@ export class TaskApprovalService {
     private readonly prisma: PrismaService,
     private readonly eventEmitter: EventEmitter2,
     private readonly timeEntryService: TimeEntryService,
+    private readonly hoursGuard: TaskHoursGuardService,
   ) {}
 
   /**
@@ -55,7 +60,16 @@ export class TaskApprovalService {
    * confirmadas en el modal OTP. Si no se pasa confirmedHours, se usa la duracion
    * actual del DRAFT (o estimatedHours como fallback).
    */
-  async approveTask(taskId: string, userId: string, confirmedHours?: number) {
+  async approveTask(
+    taskId: string,
+    userId: string,
+    confirmedHours?: number,
+    opts?: {
+      closeWithoutHours?: boolean;
+      closeWithoutHoursReason?: string;
+      actor?: HoursGateActorContext;
+    },
+  ) {
     const task = await this.prisma.task.findUnique({
       where: { id: taskId },
       include: {
@@ -99,7 +113,26 @@ export class TaskApprovalService {
       finalDurationSeconds = draft?.duration ?? Math.round((task.estimatedHours ?? 0) * 3600);
     }
 
+    let escaped = false;
     const updated = await this.prisma.$transaction(async (tx) => {
+      // H6: gate de horas — no aprobar (→DONE) sin horas reales, salvo escape auditado
+      // (asignado o manage:projects + motivo). Defensa en profundidad: la task pudo
+      // llegar a IN_REVIEW por un camino previo a H6 o que lo evadió.
+      const gate = await this.hoursGuard.enforce({
+        task: {
+          id: taskId,
+          status: task.status,
+          title: task.title,
+          organizationId: task.project.organizationId,
+        },
+        targetStatus: 'DONE',
+        actor: { id: userId, ...opts?.actor },
+        closeWithoutHours: opts?.closeWithoutHours,
+        closeWithoutHoursReason: opts?.closeWithoutHoursReason,
+        tx,
+      });
+      escaped = gate.escaped;
+
       const result = await tx.task.update({
         where: { id: taskId },
         data: {
@@ -111,8 +144,12 @@ export class TaskApprovalService {
       return result;
     });
 
-    // Confirmar el TimeEntry DRAFT (dispara time_entry.confirmed → HoursListener descuenta cliente)
-    await this.timeEntryService.confirmFromApproval(taskId, finalDurationSeconds, userId);
+    // Confirmar el TimeEntry DRAFT (dispara time_entry.confirmed → HoursListener descuenta
+    // cliente). SOLO si NO fue escape: cerrar-sin-horas es 0 h reales → no confirma ni
+    // descuenta cupo (CA-22). El resto del flujo H7 (confirmFromApproval) queda intacto.
+    if (!escaped) {
+      await this.timeEntryService.confirmFromApproval(taskId, finalDurationSeconds, userId);
+    }
 
     this.eventEmitter.emit('task.approval.approved', {
       ...domainEvent('task.approval.approved', 'task', task.id, task.project.organizationId, userId, { taskTitle: task.title, projectId: task.projectId, projectName: task.project.name }),
@@ -122,11 +159,14 @@ export class TaskApprovalService {
       projectName: task.project.name,
       approvedById: userId,
       assigneeIds: task.assignments.map((a: { userId: string }) => a.userId),
-      confirmedDurationSeconds: finalDurationSeconds,
+      confirmedDurationSeconds: escaped ? 0 : finalDurationSeconds,
+      closedWithoutHours: escaped,
     });
 
     this.logger.log(
-      `Task ${taskId} aprobada con ${finalDurationSeconds}s confirmados (${(finalDurationSeconds / 3600).toFixed(2)}h)`,
+      escaped
+        ? `Task ${taskId} aprobada SIN horas (cerrada sin horas por ${userId})`
+        : `Task ${taskId} aprobada con ${finalDurationSeconds}s confirmados (${(finalDurationSeconds / 3600).toFixed(2)}h)`,
     );
 
     return updated;

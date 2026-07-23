@@ -151,6 +151,10 @@ export class BoardController {
     @Body() dto: MoveTaskDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.boardService.moveTask(boardId, dto, user.id);
+    return this.boardService.moveTask(boardId, dto, user.id, {
+      name: user.name,
+      email: user.email,
+      permissions: user.permissions,
+    });
   }
 }

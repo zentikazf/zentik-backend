@@ -9,6 +9,7 @@ import { TicketsGateway } from './tickets.gateway';
 import { SlaCronService } from './sla-cron.service';
 import { OutboxModule } from '../sync/outbox.module';
 import { SessionValidityModule } from '../auth/session-validity.module';
+import { TaskHoursGuardModule } from '../task/task-hours-guard.module';
 
 @Module({
   // ScheduleModule.forRoot() se movio a AppModule (#19 ALTO-2): debe ser unico y
@@ -16,7 +17,7 @@ import { SessionValidityModule } from '../auth/session-validity.module';
   // interval. SlaCronService (@Cron) y los @Interval de los gateways se
   // descubren igual desde el forRoot global.
   // SessionValidityModule (#19 ALTO-2): TicketsGateway revalida la sesion en vivo.
-  imports: [PrismaModule, AppConfigModule, OutboxModule, SessionValidityModule],
+  imports: [PrismaModule, AppConfigModule, OutboxModule, SessionValidityModule, TaskHoursGuardModule],
   controllers: [TicketController],
   providers: [
     TicketService,

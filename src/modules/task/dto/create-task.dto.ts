@@ -129,4 +129,24 @@ export class CreateTaskDto {
   @IsOptional()
   @IsBoolean({ message: 'billable debe ser un booleano' })
   billable?: boolean;
+
+  // ── H6: escape "cerrar sin horas" ──────────────────────────────────────────
+  @ApiPropertyOptional({
+    example: false,
+    description:
+      'H6: pasar/crear en IN_REVIEW/DONE sin horas reales. Requiere ser asignado o tener manage:projects, más closeWithoutHoursReason. Queda auditado.',
+  })
+  @IsOptional()
+  @IsBoolean({ message: 'closeWithoutHours debe ser un booleano' })
+  closeWithoutHours?: boolean;
+
+  @ApiPropertyOptional({
+    example: 'Falso positivo, ya resuelto sin trabajo.',
+    description: 'Motivo obligatorio cuando closeWithoutHours=true (se valida en el service).',
+    maxLength: 500,
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500, { message: 'El motivo no puede exceder 500 caracteres' })
+  closeWithoutHoursReason?: string;
 }

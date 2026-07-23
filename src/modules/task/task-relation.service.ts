@@ -3,6 +3,10 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { PrismaService } from '../../database/prisma.service';
 import { AppException, TaskNotFoundException } from '../../common/filters/app-exception';
 import { domainEvent } from '../../common/events/domain-event.helper';
+import {
+  TaskHoursGuardService,
+  HoursGateActorContext,
+} from './task-hours-guard.service';
 import { BulkUpdateTaskDto } from './dto';
 
 @Injectable()
@@ -12,6 +16,7 @@ export class TaskRelationService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly eventEmitter: EventEmitter2,
+    private readonly hoursGuard: TaskHoursGuardService,
   ) {}
 
   // ============================================
@@ -139,12 +144,21 @@ export class TaskRelationService {
   // BULK OPERATIONS
   // ============================================
 
-  async bulkUpdate(projectId: string, dto: BulkUpdateTaskDto, userId: string) {
+  async bulkUpdate(projectId: string, dto: BulkUpdateTaskDto, userId: string, actor?: HoursGateActorContext) {
     const project = await this.prisma.project.findUnique({ where: { id: projectId }, select: { organizationId: true } });
-    const results = await this.prisma.$transaction(
-      dto.operations.map((op) =>
-        this.prisma.task.update({
-          where: { id: op.taskId },
+    const gateActor = { id: userId, ...actor };
+    // Callback tx (antes era un array de promesas): permite correr el gate de horas
+    // ANTES de cada update, dentro de la misma transacción, y cerrar la fuga de
+    // tenancy añadiendo projectId al `where` (antes where:{id} permitía tocar tasks
+    // de otro proyecto/org). El bulk NO expone escape → gate duro por cada op gated.
+    const results = await this.prisma.$transaction(async (tx) => {
+      const out = [];
+      for (const op of dto.operations) {
+        if (this.hoursGuard.isGatedStatus(op.status)) {
+          await this.hoursGuard.assertHasWorkedHours(op.taskId, op.status as string, gateActor, tx);
+        }
+        const updated = await tx.task.update({
+          where: { id: op.taskId, projectId },
           data: {
             ...(op.status && { status: op.status }),
             ...(op.priority && { priority: op.priority }),
@@ -154,9 +168,11 @@ export class TaskRelationService {
             assignments: { include: { user: { select: { id: true, name: true, email: true, image: true } } } },
             taskLabels: { include: { label: true } },
           },
-        }),
-      ),
-    );
+        });
+        out.push(updated);
+      }
+      return out;
+    });
 
     this.eventEmitter.emit('tasks.bulk.updated', {
       ...domainEvent('tasks.bulk.updated', 'task', projectId, project?.organizationId || '', userId, { count: results.length, projectId }),

@@ -8,6 +8,10 @@ import { domainEvent } from '../../common/events/domain-event.helper';
 import { ProjectService } from '../project/project.service';
 import { ClientService } from '../client/client.service';
 import {
+  TaskHoursGuardService,
+  HoursGateActorContext,
+} from './task-hours-guard.service';
+import {
   CreateTaskDto,
   UpdateTaskDto,
   TaskFilterDto,
@@ -23,6 +27,7 @@ export class TaskService {
     private readonly eventEmitter: EventEmitter2,
     private readonly projectService: ProjectService,
     private readonly clientService: ClientService,
+    private readonly hoursGuard: TaskHoursGuardService,
   ) {}
 
   /**
@@ -64,7 +69,7 @@ export class TaskService {
     }
   }
 
-  async createTask(projectId: string, dto: CreateTaskDto, userId: string) {
+  async createTask(projectId: string, dto: CreateTaskDto, userId: string, actor?: HoursGateActorContext) {
     await this.projectService.assertProjectNotFrozen(projectId);
 
     const project = await this.prisma.project.findUnique({
@@ -151,6 +156,26 @@ export class TaskService {
             labelId,
           })),
           skipDuplicates: true,
+        });
+      }
+
+      // H6: gate — una tarea nueva nunca tiene horas → bloquear nacer en IN_REVIEW/DONE
+      // salvo escape auditado (manage:projects o auto-asignarse) + motivo. Corre tras crear
+      // task+assignments para que el chequeo de "asignado" del escape vea las asignaciones;
+      // si lanza, la tx entera se revierte y la tarea no queda creada.
+      if (this.hoursGuard.isGatedStatus(created.status)) {
+        await this.hoursGuard.enforce({
+          task: {
+            id: created.id,
+            status: created.status,
+            title: created.title,
+            organizationId: project.organizationId,
+          },
+          targetStatus: created.status,
+          actor: { id: userId, ...actor },
+          closeWithoutHours: dto.closeWithoutHours,
+          closeWithoutHoursReason: dto.closeWithoutHoursReason,
+          tx,
         });
       }
 
@@ -320,7 +345,7 @@ export class TaskService {
     return { ...task, totalDuration };
   }
 
-  async updateTask(taskId: string, dto: UpdateTaskDto, userId: string, organizationId?: string) {
+  async updateTask(taskId: string, dto: UpdateTaskDto, userId: string, organizationId?: string, actor?: HoursGateActorContext) {
     const taskForFreeze = await this.prisma.task.findFirst({
       where: { id: taskId },
       select: { projectId: true },
@@ -395,6 +420,24 @@ export class TaskService {
             400,
             { currentStatus: task.status, targetStatus: dto.status },
           );
+        }
+
+        // H6: gate de horas — no pasar a IN_REVIEW/DONE sin horas reales, salvo escape
+        // auditado (asignado o manage:projects + motivo). Corre dentro de la misma tx.
+        if (this.hoursGuard.isGatedStatus(dto.status)) {
+          await this.hoursGuard.enforce({
+            task: {
+              id: taskId,
+              status: task.status,
+              title: task.title,
+              organizationId: task.project.organizationId,
+            },
+            targetStatus: dto.status,
+            actor: { id: userId, ...actor },
+            closeWithoutHours: dto.closeWithoutHours,
+            closeWithoutHoursReason: dto.closeWithoutHoursReason,
+            tx,
+          });
         }
 
         // Auto-set startDate al pasar a IN_PROGRESS (si no tenía valor manual)
@@ -596,7 +639,7 @@ export class TaskService {
   // SUBTASKS
   // ============================================
 
-  async createSubtask(parentTaskId: string, dto: CreateTaskDto, userId: string) {
+  async createSubtask(parentTaskId: string, dto: CreateTaskDto, userId: string, actor?: HoursGateActorContext) {
     const parentTask = await this.prisma.task.findUnique({
       where: { id: parentTaskId },
       include: { project: { select: { organizationId: true } } },
@@ -606,28 +649,49 @@ export class TaskService {
       throw new TaskNotFoundException(parentTaskId);
     }
 
-    const subtask = await this.prisma.task.create({
-      data: {
-        projectId: parentTask.projectId,
-        parentTaskId,
-        title: dto.title,
-        description: dto.description,
-        status: dto.status,
-        priority: dto.priority ?? parentTask.priority,
-        storyPoints: dto.storyPoints,
-        dueDate: dto.dueDate ? new Date(dto.dueDate) : undefined,
-        estimatedHours: dto.estimatedHours,
-        hourlyRate: dto.hourlyRate,
-        boardColumnId: dto.boardColumnId ?? parentTask.boardColumnId,
-        sprintId: dto.sprintId ?? parentTask.sprintId,
-        position: 0,
-        createdById: userId,
-      },
-      include: {
-        assignments: { include: { user: { select: { id: true, name: true, email: true, image: true } } } },
-        taskLabels: { include: { label: true } },
-        createdBy: { select: { id: true, name: true, email: true, image: true } },
-      },
+    const subtask = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.task.create({
+        data: {
+          projectId: parentTask.projectId,
+          parentTaskId,
+          title: dto.title,
+          description: dto.description,
+          status: dto.status,
+          priority: dto.priority ?? parentTask.priority,
+          storyPoints: dto.storyPoints,
+          dueDate: dto.dueDate ? new Date(dto.dueDate) : undefined,
+          estimatedHours: dto.estimatedHours,
+          hourlyRate: dto.hourlyRate,
+          boardColumnId: dto.boardColumnId ?? parentTask.boardColumnId,
+          sprintId: dto.sprintId ?? parentTask.sprintId,
+          position: 0,
+          createdById: userId,
+        },
+        include: {
+          assignments: { include: { user: { select: { id: true, name: true, email: true, image: true } } } },
+          taskLabels: { include: { label: true } },
+          createdBy: { select: { id: true, name: true, email: true, image: true } },
+        },
+      });
+
+      // H6: una subtarea nueva nunca tiene horas → mismo gate que createTask.
+      if (this.hoursGuard.isGatedStatus(created.status)) {
+        await this.hoursGuard.enforce({
+          task: {
+            id: created.id,
+            status: created.status,
+            title: created.title,
+            organizationId: parentTask.project.organizationId,
+          },
+          targetStatus: created.status,
+          actor: { id: userId, ...actor },
+          closeWithoutHours: dto.closeWithoutHours,
+          closeWithoutHoursReason: dto.closeWithoutHoursReason,
+          tx,
+        });
+      }
+
+      return created;
     });
 
     this.eventEmitter.emit('subtask.created', {
