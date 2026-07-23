@@ -2,7 +2,6 @@ import { Injectable, Logger } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { TimeEntryStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
-import { RedisService } from '../../infrastructure/redis/redis.service';
 import { CreateTimeEntryDto } from './dto/create-time-entry.dto';
 import { CreateManualTimeEntryDto } from './dto/create-manual-time-entry.dto';
 import { UpdateTimeEntryDto } from './dto/update-time-entry.dto';
@@ -171,8 +170,8 @@ export class TimeEntryService {
     }
 
     // 6) Crear. billable SE HEREDA de la task; startTime (NOT NULL legacy) = workedOn (ancla neutra);
-    //    duration = minutes*60 deja coherentes los reportes que suman segundos; status CONFIRMED mantiene
-    //    la entrada fuera del picker DRAFT del timer SIN cobrar (el cobro lo dispara time_entry.confirmed, que NO se emite).
+    //    duration = minutes*60 deja coherentes los reportes que suman segundos; status CONFIRMED nace
+    //    SIN cobrar (el cobro lo dispara time_entry.confirmed en la aprobacion, que aca NO se emite).
     const minutes = dto.minutes;
     let entry;
     try {
@@ -456,41 +455,6 @@ export class TimeEntryService {
     }
   }
 
-  // ============================================
-  // Sincronizacion con estimaciones de tarea (Fase B — TimeEntry como motor invisible)
-  // ============================================
-
-  /**
-   * Upsert de TimeEntry DRAFT a partir de la estimacion de la tarea.
-   * Idempotente: si ya existe DRAFT para (taskId, userId), actualiza la duracion.
-   * Si no existe, crea uno nuevo. Llamado desde el listener task.estimated.
-   */
-  async upsertDraftFromTask(taskId: string, estimatedHours: number, userId: string) {
-    const durationSeconds = Math.round(estimatedHours * 3600);
-
-    const existing = await this.prisma.timeEntry.findFirst({
-      where: { taskId, userId, status: TimeEntryStatus.DRAFT, deletedAt: null },
-    });
-
-    if (existing) {
-      return this.prisma.timeEntry.update({
-        where: { id: existing.id },
-        data: { duration: durationSeconds },
-      });
-    }
-
-    return this.prisma.timeEntry.create({
-      data: {
-        taskId,
-        userId,
-        duration: durationSeconds,
-        startTime: new Date(),
-        status: TimeEntryStatus.DRAFT,
-        billable: true,
-      },
-    });
-  }
-
   /**
    * Confirma el TimeEntry DRAFT al aprobar la tarea (modal OTP).
    * Marca status=CONFIRMED, setea endTime y dispara time_entry.confirmed
@@ -595,146 +559,6 @@ export class TimeEntryService {
 
     this.logger.log(`TimeEntry ${reverted.id} revertido a DRAFT para task ${taskId}`);
     return reverted;
-  }
-}
-
-// ============================================
-// TimerService — Temporizadores activos con Redis
-// ============================================
-
-@Injectable()
-export class TimerService {
-  private readonly logger = new Logger(TimerService.name);
-
-  constructor(
-    private readonly redis: RedisService,
-    private readonly prisma: PrismaService,
-    private readonly eventEmitter: EventEmitter2,
-  ) {}
-
-  private timerKey(userId: string): string {
-    return `timer:${userId}`;
-  }
-
-  async start(userId: string, taskId: string) {
-    const existingTimer = await this.redis.get(this.timerKey(userId));
-
-    if (existingTimer) {
-      throw new AppException(
-        'Ya tienes un temporizador activo. Detenlo antes de iniciar otro.',
-        'TIMER_ALREADY_ACTIVE',
-        409,
-      );
-    }
-
-    const timerData = JSON.stringify({
-      taskId,
-      startTime: new Date().toISOString(),
-    });
-
-    await this.redis.set(this.timerKey(userId), timerData);
-
-    const task = await this.prisma.task.findUnique({
-      where: { id: taskId },
-      select: { project: { select: { organizationId: true } } },
-    });
-
-    this.eventEmitter.emit('timer.started', {
-      ...domainEvent('timer.started', 'time_entry', taskId, task?.project.organizationId ?? '', userId),
-      userId,
-      taskId,
-      startTime: new Date().toISOString(),
-    });
-
-    this.logger.log(
-      `Temporizador iniciado para usuario ${userId} en tarea ${taskId}`,
-    );
-
-    return { taskId, startTime: new Date().toISOString(), active: true };
-  }
-
-  async stop(userId: string) {
-    const timerData = await this.redis.get(this.timerKey(userId));
-
-    if (!timerData) {
-      throw new AppException(
-        'No tienes un temporizador activo',
-        'NO_ACTIVE_TIMER',
-        404,
-      );
-    }
-
-    const { taskId, startTime } = JSON.parse(timerData);
-    const endTime = new Date();
-    const elapsedSeconds = Math.floor(
-      (endTime.getTime() - new Date(startTime).getTime()) / 1000,
-    );
-
-    // Si ya existe un DRAFT para (taskId, userId) → sumar duracion. Si no → crear nuevo DRAFT.
-    const draft = await this.prisma.timeEntry.findFirst({
-      where: { taskId, userId, status: TimeEntryStatus.DRAFT, deletedAt: null },
-    });
-
-    let timeEntry;
-    if (draft) {
-      timeEntry = await this.prisma.timeEntry.update({
-        where: { id: draft.id },
-        data: {
-          duration: (draft.duration ?? 0) + elapsedSeconds,
-          endTime,
-        },
-        include: { task: { include: { project: { select: { organizationId: true } } } } },
-      });
-    } else {
-      timeEntry = await this.prisma.timeEntry.create({
-        data: {
-          userId,
-          taskId,
-          startTime: new Date(startTime),
-          endTime,
-          duration: elapsedSeconds,
-          status: TimeEntryStatus.DRAFT,
-          billable: true,
-        },
-        include: { task: { include: { project: { select: { organizationId: true } } } } },
-      });
-    }
-
-    await this.redis.del(this.timerKey(userId));
-
-    this.eventEmitter.emit('timer.stopped', {
-      ...domainEvent('timer.stopped', 'time_entry', timeEntry.id, timeEntry.task.project.organizationId, userId),
-      userId,
-      taskId,
-      timeEntryId: timeEntry.id,
-      duration: elapsedSeconds,
-    });
-
-    this.logger.log(
-      `Temporizador detenido para usuario ${userId}. Sumado ${elapsedSeconds}s al DRAFT (total: ${timeEntry.duration}s)`,
-    );
-
-    return timeEntry;
-  }
-
-  async getActive(userId: string) {
-    const timerData = await this.redis.get(this.timerKey(userId));
-
-    if (!timerData) {
-      return null;
-    }
-
-    const { taskId, startTime } = JSON.parse(timerData);
-    const elapsed = Math.floor(
-      (Date.now() - new Date(startTime).getTime()) / 1000,
-    );
-
-    return {
-      taskId,
-      startTime,
-      elapsed,
-      active: true,
-    };
   }
 }
 

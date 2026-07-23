@@ -176,15 +176,6 @@ export class TaskService {
       task,
     });
 
-    // Si la tarea se crea con estimatedHours → emitir task.estimated para que el TimeEntryListener cree el DRAFT
-    if (dto.estimatedHours && dto.estimatedHours > 0) {
-      this.eventEmitter.emit('task.estimated', {
-        ...domainEvent('task.estimated', 'task', task!.id, project.organizationId, userId, { title: task!.title, projectId }),
-        taskId: task!.id,
-        estimatedHours: dto.estimatedHours,
-      });
-    }
-
     // Emit task.assigned por cada asignado inicial (mismo evento que assignTask posterior)
     // Esto dispara notificaciones in-app + push + email respetando preferencias del usuario.
     if (dto.assigneeIds?.length) {
@@ -547,18 +538,6 @@ export class TaskService {
       this.eventEmitter.emit('task.reopened', {
         ...domainEvent('task.reopened', 'task', taskId, task.project.organizationId, userId, { title: updated!.title, projectId: task.projectId }),
         task: { ...updated, type: (updated as any).type, projectId: task.projectId },
-      });
-    }
-
-    // Emit task.estimated cuando cambia estimatedHours (TimeEntryListener crea/actualiza DRAFT)
-    if (
-      dto.estimatedHours !== undefined &&
-      dto.estimatedHours !== (task as any).estimatedHours
-    ) {
-      this.eventEmitter.emit('task.estimated', {
-        ...domainEvent('task.estimated', 'task', taskId, task.project.organizationId, userId, { title: updated!.title, projectId: task.projectId }),
-        taskId,
-        estimatedHours: dto.estimatedHours,
       });
     }
 
