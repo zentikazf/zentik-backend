@@ -126,6 +126,20 @@ describe('Motor de horas — reversión al reabrir + cobro por-carga (H7)', () =
       expect(total).toBe((180 + 90) * 60); // 16200
     });
 
+    it('B — H8a: el time_entry.confirmed emitido incluye el workedOn de la carga MANUAL', async () => {
+      prisma.timeEntry.findFirst.mockResolvedValueOnce(null as never);
+      prisma.task.findUnique.mockResolvedValue({ project: { organizationId: 'org-1' } } as never);
+      const worked = new Date('2026-06-30');
+      prisma.timeEntry.findMany.mockResolvedValue([
+        { id: 'm1', minutes: 60, version: 1, workedOn: worked },
+      ] as never);
+
+      await service.confirmFromApproval('task-1', 'user-1');
+
+      const confirmedEmit = eventEmitter.emit.mock.calls.find((c) => c[0] === 'time_entry.confirmed');
+      expect((confirmedEmit?.[1] as { workedOn: Date }).workedOn).toEqual(worked);
+    });
+
     it('B — sin cargas MANUAL vivas (0 h / escape) → no cobra nada, total 0', async () => {
       prisma.timeEntry.findFirst.mockResolvedValueOnce(null as never);
       prisma.task.findUnique.mockResolvedValue({ project: { organizationId: 'org-1' } } as never);

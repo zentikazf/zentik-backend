@@ -835,13 +835,17 @@ export class ClientService {
   async recordHoursUsage(
     taskId: string,
     durationMinutes: number,
-    opts?: { timeEntryId?: string; entryVersion?: number },
+    opts?: { timeEntryId?: string; entryVersion?: number; workedOn?: Date | string | null },
   ) {
     // H2: clave de idempotencia del ledger. El único parcial (time_entry_id, entry_version) impide
     // que un MISMO time_entry.confirmed cree dos cobros (doble evento, retry de job, doble click).
     // Es opcional: el caller inalcanzable syncMissedHours no la pasa → esas filas quedan fuera del índice.
     const timeEntryId = opts?.timeEntryId ?? null;
     const entryVersion = opts?.entryVersion ?? null;
+    // H8a: día trabajado del caller; si no viene, fallback a "ahora" (coincide con createdAt @default(now())).
+    // Materializa la invariante "toda fila billable tiene workedOn" sin reintroducir el `?? createdAt` distribuido.
+    // @db.Date ignora la hora → queda date-only del día PG.
+    const workedOn = opts?.workedOn ? new Date(opts.workedOn) : new Date();
     const task = await this.prisma.task.findUnique({
       where: { id: taskId },
       select: {
@@ -891,6 +895,7 @@ export class ClientService {
             note: `Tiempo interno (no facturable): ${task.title}`,
             timeEntryId,
             entryVersion,
+            workedOn, // H8a
           },
         });
       } catch (e) {
@@ -950,6 +955,7 @@ export class ClientService {
             priceCurrency: priceAmount !== null ? client.currency : null,
             timeEntryId,
             entryVersion,
+            workedOn, // H8a: esta fila JAMÁS puede quedar con workedOn null (es lo que H8b factura)
           },
         });
 

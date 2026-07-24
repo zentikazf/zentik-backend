@@ -34,9 +34,10 @@ export class HoursListener {
     duration: number; // segundos
     legacyMigration: boolean;
     version?: number; // H2: ciclo de confirm (clave de idempotencia). Opcional por compat de eventos viejos.
+    workedOn?: Date | null; // H8a: fecha real de trabajo. Opcional (carriers legacy no lo traen → default now()).
   }) {
     try {
-      const { timeEntryId, taskId, duration, legacyMigration, version } = event;
+      const { timeEntryId, taskId, duration, legacyMigration, version, workedOn } = event;
 
       // Salvaguarda 1: legacy migration → no descontar (descuento ya hecho con logica vieja)
       if (legacyMigration) {
@@ -61,6 +62,7 @@ export class HoursListener {
       await this.clientService.recordHoursUsage(taskId, minutes, {
         timeEntryId,
         entryVersion: version ?? 1,
+        workedOn, // H8a: forward del día trabajado (undefined en carriers legacy → recordHoursUsage cae a now())
       });
     } catch (err) {
       this.logger.error('Error descontando horas tras time_entry.confirmed', err);
@@ -103,6 +105,7 @@ export class HoursListener {
             hours: txn.hours,
             taskId,
             note: `Reversion de cupo por rechazo/reapertura (H7)`,
+            workedOn: txn.workedOn ?? txn.createdAt, // H8a: netea contra el período del cobro original, no la fecha del revert
           },
         });
 

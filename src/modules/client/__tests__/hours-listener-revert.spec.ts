@@ -83,4 +83,44 @@ describe('H7 — HoursListener.onTimeEntryReverted (refund keyed)', () => {
     expect(prisma.hoursTransaction.create).not.toHaveBeenCalled();
     expect(prisma.client.update).not.toHaveBeenCalled();
   });
+
+  it('H8a — REFUND copia el workedOn del cobro ORIGINAL (no la fecha del revert)', async () => {
+    const worked = new Date('2026-06-30'); // trabajado en junio
+    prisma.hoursTransaction.findFirst.mockResolvedValue({
+      id: 'usage-1',
+      clientId: 'c1',
+      type: 'USAGE',
+      hours: 3,
+      workedOn: worked,
+      createdAt: new Date('2026-07-02'), // cobrado/revertido en julio
+    } as never);
+
+    await listener.onTimeEntryReverted({ timeEntryId: 'm1', taskId: 'task-1', duration: 10800, entryVersion: 1 });
+
+    expect(prisma.hoursTransaction.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ type: 'REFUND', workedOn: worked }),
+      }),
+    );
+  });
+
+  it('H8a — REFUND cae a createdAt cuando el cobro original no tenía workedOn', async () => {
+    const created = new Date('2026-07-02');
+    prisma.hoursTransaction.findFirst.mockResolvedValue({
+      id: 'usage-2',
+      clientId: 'c1',
+      type: 'USAGE',
+      hours: 3,
+      workedOn: null,
+      createdAt: created,
+    } as never);
+
+    await listener.onTimeEntryReverted({ timeEntryId: 'm1', taskId: 'task-1', duration: 10800, entryVersion: 1 });
+
+    expect(prisma.hoursTransaction.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ type: 'REFUND', workedOn: created }),
+      }),
+    );
+  });
 });

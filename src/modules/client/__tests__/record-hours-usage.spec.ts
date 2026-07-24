@@ -96,3 +96,107 @@ describe('ClientService.recordHoursUsage — H1 candado PROJECT (OBJ-1)', () => 
     );
   });
 });
+
+/**
+ * H8a — recordHoursUsage denormaliza workedOn en la HoursTransaction.
+ *   - USAGE/LOAN (tx.create) e INTERNAL (prisma.create) reciben workedOn en el data.
+ *   - Si el caller pasa opts.workedOn → esa fecha; si lo omite → fallback new Date() (jamás null).
+ * Prisma MOCKEADO — nunca toca la DB.
+ */
+describe('ClientService.recordHoursUsage — H8a workedOn en el ledger', () => {
+  let prisma: DeepMockProxy<PrismaService>;
+  let audit: DeepMockProxy<AuditService>;
+  let service: ClientService;
+  let tx: DeepMockProxy<Prisma.TransactionClient>;
+
+  const supportTask = (billable = true) => ({
+    id: 'task-1',
+    title: 'Tarea X',
+    type: 'SUPPORT',
+    billable,
+    hourlyRate: null,
+    project: { id: 'p1', name: 'Proyecto', clientId: 'client-1', organizationId: 'org-1' },
+  });
+
+  const baseClient = {
+    id: 'client-1',
+    currency: 'PYG',
+    contractedHours: 100,
+    usedHours: 0,
+    loanedHours: 0,
+    supportHourlyRate: 3000,
+    developmentHourlyRate: 5000,
+  };
+
+  beforeEach(() => {
+    prisma = mockDeep<PrismaService>();
+    audit = mockDeep<AuditService>();
+    tx = mockDeep<Prisma.TransactionClient>();
+    service = new ClientService(
+      prisma,
+      audit,
+      mockDeep<EmailInvitationService>(),
+      mockDeep<OnboardingService>(),
+    );
+    prisma.client.findUnique.mockResolvedValue(baseClient as never);
+    prisma.$transaction.mockImplementation((cb: unknown) =>
+      (cb as (t: Prisma.TransactionClient) => Promise<unknown>)(tx),
+    );
+  });
+
+  it('USAGE con opts.workedOn → la fila nace con ESA fecha (no now())', async () => {
+    prisma.task.findUnique.mockResolvedValue(supportTask(true) as never);
+    const worked = new Date('2026-06-30');
+
+    await service.recordHoursUsage('task-1', 60, { timeEntryId: 'te1', entryVersion: 1, workedOn: worked });
+
+    expect(tx.hoursTransaction.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ type: 'USAGE', workedOn: worked }),
+      }),
+    );
+  });
+
+  it('USAGE sin opts.workedOn → fallback a hoy (Date, nunca null)', async () => {
+    prisma.task.findUnique.mockResolvedValue(supportTask(true) as never);
+
+    await service.recordHoursUsage('task-1', 60);
+
+    const data = (tx.hoursTransaction.create.mock.calls[0][0] as { data: { workedOn: unknown } }).data;
+    expect(data.workedOn).toBeInstanceOf(Date);
+    expect(data.workedOn).not.toBeNull();
+  });
+
+  it('INTERNAL (no facturable) también setea workedOn — con opts.workedOn usa esa fecha', async () => {
+    prisma.task.findUnique.mockResolvedValue(supportTask(false) as never); // billable=false → INTERNAL
+    const worked = new Date('2026-05-15');
+
+    await service.recordHoursUsage('task-1', 60, { timeEntryId: 'te1', entryVersion: 1, workedOn: worked });
+
+    expect(prisma.hoursTransaction.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ type: 'INTERNAL', workedOn: worked }),
+      }),
+    );
+  });
+
+  it('INTERNAL sin opts.workedOn → fallback a hoy (nunca null)', async () => {
+    prisma.task.findUnique.mockResolvedValue(supportTask(false) as never);
+
+    await service.recordHoursUsage('task-1', 60);
+
+    const data = (prisma.hoursTransaction.create.mock.calls[0][0] as { data: { type: string; workedOn: unknown } }).data;
+    expect(data.type).toBe('INTERNAL');
+    expect(data.workedOn).toBeInstanceOf(Date);
+  });
+
+  it('opts.workedOn como string ISO → se normaliza a Date del mismo día', async () => {
+    prisma.task.findUnique.mockResolvedValue(supportTask(true) as never);
+
+    await service.recordHoursUsage('task-1', 60, { workedOn: '2026-06-30' });
+
+    const data = (tx.hoursTransaction.create.mock.calls[0][0] as { data: { workedOn: Date } }).data;
+    expect(data.workedOn).toBeInstanceOf(Date);
+    expect(data.workedOn.toISOString()).toBe(new Date('2026-06-30').toISOString());
+  });
+});
