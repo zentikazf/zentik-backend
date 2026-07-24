@@ -43,15 +43,21 @@ describe('TaskApprovalService.approveTask — gate H6', () => {
     prisma.$transaction.mockImplementation((cb: any) => cb(prisma) as never);
     prisma.task.update.mockResolvedValue({ id: TASK, status: 'DONE' } as never);
     hoursGuard.enforce.mockResolvedValue({ escaped: false } as never);
-    timeEntry.confirmFromApproval.mockResolvedValue(undefined as never);
+    timeEntry.confirmFromApproval.mockResolvedValue(0 as never);
+    timeEntry.revertManualCharges.mockResolvedValue(0 as never);
   });
 
-  it('T13.1 — con horas: aprueba y confirma/cobra (H7 intacto)', async () => {
-    await service.approveTask(TASK, 'pm-1', 2);
+  it('T13.1 — con horas reales: aprueba y cobra el total que devuelve confirmFromApproval', async () => {
+    timeEntry.confirmFromApproval.mockResolvedValue(7200 as never); // 2h reales cargadas
+    await service.approveTask(TASK, 'pm-1');
     expect(hoursGuard.enforce).toHaveBeenCalledWith(
       expect.objectContaining({ targetStatus: 'DONE', task: expect.objectContaining({ id: TASK }) }),
     );
-    expect(timeEntry.confirmFromApproval).toHaveBeenCalledWith(TASK, 7200, 'pm-1'); // 2h
+    expect(timeEntry.confirmFromApproval).toHaveBeenCalledWith(TASK, 'pm-1'); // H7: ya NO manda confirmedHours
+    expect(eventEmitter.emit).toHaveBeenCalledWith(
+      'task.approval.approved',
+      expect.objectContaining({ confirmedDurationSeconds: 7200, closedWithoutHours: false }),
+    );
   });
 
   it('CA-11 — sin horas y sin escape: WORK_HOURS_REQUIRED y NO confirma (cupo sin tocar)', async () => {
@@ -64,7 +70,7 @@ describe('TaskApprovalService.approveTask — gate H6', () => {
 
   it('CA-22 — escape (cerrar sin horas): aprueba pero NO confirma ni descuenta cupo', async () => {
     hoursGuard.enforce.mockResolvedValue({ escaped: true } as never);
-    await service.approveTask(TASK, 'pm-1', undefined, {
+    await service.approveTask(TASK, 'pm-1', {
       closeWithoutHours: true,
       closeWithoutHoursReason: 'trivial',
       actor: { permissions: ['manage:projects'] },
@@ -81,5 +87,70 @@ describe('TaskApprovalService.approveTask — gate H6', () => {
     prisma.task.findUnique.mockResolvedValue({ id: TASK, status: 'IN_PROGRESS', project: {}, assignments: [] } as never);
     await expect(service.approveTask(TASK, 'pm-1')).rejects.toMatchObject({ code: 'INVALID_TASK_STATUS' });
     expect(hoursGuard.enforce).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * H7 — getApprovalPreview: la fuente de verdad son las cargas MANUAL reales, no la
+ * estimación. Además superficia AJ-3 (cierre-sin-horas) leyendo el AuditLog ya persistido.
+ */
+describe('TaskApprovalService.getApprovalPreview — H7 (horas reales + AJ-3)', () => {
+  let prisma: DeepMockProxy<PrismaService>;
+  let service: TaskApprovalService;
+
+  beforeEach(() => {
+    prisma = mockDeep<PrismaService>();
+    service = new TaskApprovalService(
+      prisma,
+      mockDeep<EventEmitter2>(),
+      mockDeep<TimeEntryService>(),
+      mockDeep<TaskHoursGuardService>(),
+    );
+    prisma.task.findUnique.mockResolvedValue({
+      id: 'task-1',
+      title: 'Tarea',
+      estimatedHours: 5,
+      originalEstimate: 5,
+    } as never);
+  });
+
+  it('suma las cargas MANUAL vivas → realHours (no la estimación) + desglose + hasManualHours', async () => {
+    prisma.timeEntry.findMany.mockResolvedValue([
+      { id: 'm1', minutes: 180, workedOn: new Date('2026-07-21'), user: { id: 'u1', name: 'Juan' } },
+      { id: 'm2', minutes: 90, workedOn: new Date('2026-07-22'), user: { id: 'u2', name: 'Ana' } },
+    ] as never);
+    prisma.auditLog.findFirst.mockResolvedValue(null as never);
+
+    const res = await service.getApprovalPreview('task-1');
+    expect(res.realMinutes).toBe(270);
+    expect(res.realHours).toBe(4.5);
+    expect(res.hasManualHours).toBe(true);
+    expect(res.entries).toHaveLength(2);
+    expect(res.originalEstimate).toBe(5); // referencia informativa, NO monto
+    expect(res.closedWithoutHours).toBeNull();
+  });
+
+  it('sin cargas MANUAL → realHours=0, hasManualHours=false', async () => {
+    prisma.timeEntry.findMany.mockResolvedValue([] as never);
+    prisma.auditLog.findFirst.mockResolvedValue(null as never);
+
+    const res = await service.getApprovalPreview('task-1');
+    expect(res.realHours).toBe(0);
+    expect(res.hasManualHours).toBe(false);
+    expect(res.entries).toHaveLength(0);
+  });
+
+  it('AJ-3 — tarea cerrada sin horas → closedWithoutHours con actor y motivo', async () => {
+    prisma.timeEntry.findMany.mockResolvedValue([] as never);
+    prisma.auditLog.findFirst.mockResolvedValue({
+      createdAt: new Date('2026-07-23'),
+      newData: { reason: 'ticket trivial' },
+      user: { name: 'PM Pérez', email: 'pm@x.com' },
+    } as never);
+
+    const res = await service.getApprovalPreview('task-1');
+    expect(res.closedWithoutHours).toEqual(
+      expect.objectContaining({ by: 'PM Pérez', reason: 'ticket trivial' }),
+    );
   });
 });

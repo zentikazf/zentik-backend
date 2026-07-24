@@ -180,6 +180,14 @@ describe('TimeEntryService — carga manual (H4)', () => {
     ).rejects.toMatchObject({ code: 'TASK_NOT_FOUND', statusCode: 404 });
   });
 
+  it('T8c — H7/GATE-5: cargar horas en tarea DONE → 409 TASK_ALREADY_DONE (el cobro ya se consolidó)', async () => {
+    mockTask({ status: 'DONE' });
+    await expect(
+      service.createManual(assignedActor, TASK, { minutes: 60, workedOn: '2024-06-15' }),
+    ).rejects.toMatchObject({ code: 'TASK_ALREADY_DONE', statusCode: 409 });
+    expect(prisma.timeEntry.create).not.toHaveBeenCalled();
+  });
+
   // ── update (corrección) ──
 
   describe('update — corrección PM con traza', () => {
@@ -280,6 +288,38 @@ describe('TimeEntryService — carga manual (H4)', () => {
         code: 'TIME_ENTRY_NOT_FOUND',
         statusCode: 404,
       });
+    });
+
+    it('T10c — H7: borrar una carga MANUAL con cobro VIVO → emite time_entry.reverted keyed (devuelve cupo)', async () => {
+      prisma.timeEntry.findFirst.mockResolvedValue({
+        id: 'te-1', userId: 'dev-2', origin: 'MANUAL', version: 1, minutes: 180, duration: 10800,
+        workedOn: new Date('2024-06-15T00:00:00Z'), taskId: TASK,
+        task: { project: { organizationId: ORG } },
+      } as never);
+      prisma.timeEntry.update.mockResolvedValue({ id: 'te-1', deletedAt: new Date() } as never);
+      prisma.hoursTransaction.findFirst.mockResolvedValue({ id: 'usage-1' } as never); // cobro vivo
+
+      await service.delete('te-1', pmActor, 'error de carga');
+
+      const revertEmit = eventEmitter.emit.mock.calls.find((c) => c[0] === 'time_entry.reverted');
+      expect(revertEmit?.[1]).toEqual(
+        expect.objectContaining({ timeEntryId: 'te-1', taskId: TASK, entryVersion: 1 }),
+      );
+    });
+
+    it('T10d — H7: borrar una carga MANUAL SIN cobro vivo → NO emite reverted (solo deleted)', async () => {
+      prisma.timeEntry.findFirst.mockResolvedValue({
+        id: 'te-1', userId: 'dev-2', origin: 'MANUAL', version: 1, minutes: 180, duration: 10800,
+        workedOn: new Date('2024-06-15T00:00:00Z'), taskId: TASK,
+        task: { project: { organizationId: ORG } },
+      } as never);
+      prisma.timeEntry.update.mockResolvedValue({ id: 'te-1', deletedAt: new Date() } as never);
+      prisma.hoursTransaction.findFirst.mockResolvedValue(null as never); // sin cobro vivo
+
+      await service.delete('te-1', pmActor);
+
+      const revertEmit = eventEmitter.emit.mock.calls.find((c) => c[0] === 'time_entry.reverted');
+      expect(revertEmit).toBeUndefined();
     });
   });
 

@@ -224,8 +224,9 @@ export class TaskController {
   // ============================================
 
   @Get('tasks/:taskId/approval-preview')
-  @ApiOperation({ summary: 'Datos para el modal OTP de aprobacion (estimado vs registrado)' })
-  @ApiResponse({ status: 200, description: 'Preview con originalEstimate y currentDraftHours' })
+  @Permissions('manage:projects')
+  @ApiOperation({ summary: 'H7 — Datos para el modal de aprobación (horas MANUALES reales + AJ-3)' })
+  @ApiResponse({ status: 200, description: 'Preview con realHours, desglose de cargas y closedWithoutHours' })
   async getApprovalPreview(@Param('taskId') taskId: string) {
     return this.taskApprovalService.getApprovalPreview(taskId);
   }
@@ -239,7 +240,7 @@ export class TaskController {
     @Body() dto: ApproveTaskDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.taskApprovalService.approveTask(taskId, user.id, dto?.confirmedHours, {
+    return this.taskApprovalService.approveTask(taskId, user.id, {
       closeWithoutHours: dto?.closeWithoutHours,
       closeWithoutHoursReason: dto?.closeWithoutHoursReason,
       actor: this.actorCtx(user),
