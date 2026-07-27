@@ -38,6 +38,9 @@ export interface BillingRowDto {
   hours: number;
   note: string | null;
   createdAt: Date;
+  workedOn: Date | null; // H8b: fecha real de trabajo (eje de facturación)
+  workedMonth: string | null; // H8b: 'YYYY-MM' de pertenencia (partes UTC de workedOn)
+  atrasada: boolean; // H8b: workedMonth < período del builder (arrastrada de un mes ya cerrado)
   priceAmount: string | null;
   priceRate: string | null;
   priceCurrency: string | null;
@@ -53,6 +56,7 @@ export interface CycleDto {
   invoiceNumber: string;
   periodStart: Date;
   periodEnd: Date;
+  cutoffDate: Date | null; // H8b: instante efectivo del corte (= periodEnd si mes completo)
   totalHours: number;
   totalAmount: string;
   currency: string;
@@ -66,6 +70,9 @@ export interface CycleDto {
 export interface CycleTransactionLine {
   id: string;
   createdAt: Date;
+  workedOn: Date | null; // H8b
+  workedMonth: string | null; // H8b: mes de pertenencia
+  atrasada: boolean; // H8b: workedMonth < período nominal del ciclo
   type: string;
   hours: number;
   note: string | null;
@@ -161,10 +168,53 @@ export class ClientBillingService {
   }
 
   /**
-   * R3/R5: predicado ÚNICO del conjunto facturable (SUPPORT · USAGE/LOAN · con precio
-   * · sin estampar · dentro de la ventana). Compartido por resolve-ids y el guard R11.
+   * H8b: fecha-calendario Asunción de un INSTANTE, como Date a UTC-midnight → borde para
+   * filtrar workedOn (@db.Date). Prisma serializa @db.Date por componentes UTC (probado),
+   * así que `workedOn: { lte: asuncionDateOnly(until) }` es determinístico e independiente
+   * del TZ de sesión. Asimetría con workedMonthKey: acá la entrada es un instante (aplica TZ).
    */
-  private buildFacturableWhere(clientId: string, periodStart: Date, until: Date): Prisma.HoursTransactionWhereInput {
+  private asuncionDateOnly(instant: Date): Date {
+    const [y, m, d] = new Intl.DateTimeFormat('en-CA', {
+      timeZone: ASUNCION_TZ,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    })
+      .format(instant)
+      .split('-')
+      .map(Number);
+    return new Date(Date.UTC(y, m - 1, d));
+  }
+
+  /**
+   * H8b: mes de pertenencia 'YYYY-MM' de un workedOn (@db.Date, UTC-midnight = fecha Asunción).
+   * Por partes UTC, NO asuncionPeriodKey: sobre un valor UTC-midnight, el TZ de Asunción (UTC-3)
+   * correría el día 1 al mes anterior (off-by-one de mes).
+   */
+  private workedMonthKey(workedOn: Date): string {
+    return `${workedOn.getUTCFullYear()}-${String(workedOn.getUTCMonth() + 1).padStart(2, '0')}`;
+  }
+
+  /**
+   * H8b: meses ya "cerrados" (con ciclo activo, no CANCELLED), como set de claves 'YYYY-MM'.
+   * El arrastre 2A-acotado solo trae atrasadas de estos meses (no de meses nunca cerrados).
+   * asuncionPeriodKey(periodStart) y workedMonthKey(workedOn) dan la MISMA clave para el mismo
+   * mes calendario, así que son comparables.
+   */
+  private async getClosedMonthKeys(orgId: string, clientId: string): Promise<Set<string>> {
+    const cycles = await this.prisma.clientBillingCycle.findMany({
+      where: { clientId, organizationId: orgId, status: { not: 'CANCELLED' } },
+      select: { periodStart: true },
+    });
+    return new Set(cycles.map((c) => this.asuncionPeriodKey(c.periodStart)));
+  }
+
+  /**
+   * R3/R5 (+ H8b): predicado del conjunto facturable SUPPORT priced sin estampar con borde
+   * superior workedOn ≤ untilDate. El borde INFERIOR (qué meses entran) lo aplica el filtro
+   * de mes en JS del caller (arrastre 2A-acotado), NO un `gte` fijo.
+   */
+  private buildFacturableWhere(clientId: string, untilDate: Date): Prisma.HoursTransactionWhereInput {
     return {
       clientId,
       deletedAt: null,
@@ -172,7 +222,7 @@ export class ClientBillingService {
       type: { in: BILLABLE_TYPES },
       priceAmount: { not: null },
       task: { type: 'SUPPORT' },
-      createdAt: { gte: periodStart, lte: until },
+      workedOn: { lte: untilDate },
     };
   }
 
@@ -210,12 +260,13 @@ export class ClientBillingService {
       hours: number;
       note: string | null;
       createdAt: Date;
+      workedOn: Date | null;
       priceAmount: Prisma.Decimal | null;
       priceRate: Prisma.Decimal | null;
       priceCurrency: string | null;
       task: { id: string; title: string; type: string } | null;
     },
-    flags: { billable: boolean; fueraCupo: boolean; sinTarifa: boolean },
+    flags: { billable: boolean; fueraCupo: boolean; sinTarifa: boolean; atrasada: boolean },
   ): BillingRowDto {
     return {
       id: r.id,
@@ -223,6 +274,9 @@ export class ClientBillingService {
       hours: r.hours,
       note: r.note,
       createdAt: r.createdAt,
+      workedOn: r.workedOn,
+      workedMonth: r.workedOn ? this.workedMonthKey(r.workedOn) : null,
+      atrasada: flags.atrasada,
       priceAmount: r.priceAmount != null ? r.priceAmount.toString() : null,
       priceRate: r.priceRate != null ? r.priceRate.toString() : null,
       priceCurrency: r.priceCurrency,
@@ -239,6 +293,7 @@ export class ClientBillingService {
     invoiceNumber: string;
     periodStart: Date;
     periodEnd: Date;
+    cutoffDate: Date | null;
     totalHours: number;
     totalAmount: Prisma.Decimal;
     currency: string;
@@ -254,6 +309,7 @@ export class ClientBillingService {
       invoiceNumber: c.invoiceNumber,
       periodStart: c.periodStart,
       periodEnd: c.periodEnd,
+      cutoffDate: c.cutoffDate,
       totalHours: c.totalHours,
       totalAmount: c.totalAmount.toString(),
       currency: c.currency,
@@ -276,11 +332,30 @@ export class ClientBillingService {
     const client = await this.assertClient(orgId, clientId);
     const { periodStart, periodEnd } = this.parsePeriod(period);
 
-    const rows = await this.prisma.hoursTransaction.findMany({
-      where: { clientId, deletedAt: null, billedCycleId: null, createdAt: { gte: periodStart, lte: periodEnd } },
+    const periodStartDate = this.asuncionDateOnly(periodStart);
+    const periodEndDate = this.asuncionDateOnly(periodEnd);
+    const closedMonthKeys = await this.getClosedMonthKeys(orgId, clientId);
+
+    // (1) on-time: TODAS las clases, con workedOn dentro del mes P (excluye workedOn NULL por el rango).
+    const onTime = await this.prisma.hoursTransaction.findMany({
+      where: { clientId, deletedAt: null, billedCycleId: null, workedOn: { gte: periodStartDate, lte: periodEndDate } },
       include: { task: { select: { id: true, title: true, type: true } } },
-      orderBy: { createdAt: 'asc' },
+      orderBy: { workedOn: 'asc' },
     });
+    // (2) atrasadas: SUPPORT USAGE/LOAN (priced o sin-tarifa) de meses YA CERRADOS, workedOn < inicio de P.
+    //     Sin filtro de priceAmount: las sin-tarifa DEBEN mostrarse (el guard R11 las bloquea; §3.1).
+    const atrasadasRaw = await this.prisma.hoursTransaction.findMany({
+      where: {
+        clientId, deletedAt: null, billedCycleId: null,
+        type: { in: BILLABLE_TYPES }, task: { type: 'SUPPORT' },
+        workedOn: { lt: periodStartDate },
+      },
+      include: { task: { select: { id: true, title: true, type: true } } },
+      orderBy: { workedOn: 'asc' },
+    });
+    const atrasadas = atrasadasRaw.filter(
+      (r) => r.workedOn && closedMonthKeys.has(this.workedMonthKey(r.workedOn)),
+    );
 
     const soporte: BillingRowDto[] = [];
     const proyecto: BillingRowDto[] = [];
@@ -288,26 +363,43 @@ export class ClientBillingService {
     let subtotalSoporte = new Prisma.Decimal(0);
     let subtotalFueraCupo = new Prisma.Decimal(0);
 
-    for (const r of rows) {
+    // Clasifica una fila SUPPORT USAGE/LOAN en `soporte`: priced suma; sin-tarifa visible pero no sumable (R11 AC1).
+    const pushSoporte = (r: (typeof onTime)[number], atrasada: boolean) => {
+      const fueraCupo = r.type === 'LOAN';
+      if (r.priceAmount != null) {
+        soporte.push(this.toRowDto(r, { billable: true, fueraCupo, sinTarifa: false, atrasada }));
+        subtotalSoporte = subtotalSoporte.plus(r.priceAmount);
+        if (fueraCupo) subtotalFueraCupo = subtotalFueraCupo.plus(r.priceAmount);
+      } else {
+        soporte.push(this.toRowDto(r, { billable: false, fueraCupo, sinTarifa: true, atrasada }));
+      }
+    };
+
+    for (const r of onTime) {
       const taskType = r.task?.type ?? null;
       const isBillableType = BILLABLE_TYPES.includes(r.type);
-
       if (taskType === 'SUPPORT' && isBillableType) {
-        const fueraCupo = r.type === 'LOAN';
-        if (r.priceAmount != null) {
-          soporte.push(this.toRowDto(r, { billable: true, fueraCupo, sinTarifa: false }));
-          subtotalSoporte = subtotalSoporte.plus(r.priceAmount);
-          if (fueraCupo) subtotalFueraCupo = subtotalFueraCupo.plus(r.priceAmount);
-        } else {
-          // SUPPORT sin tarifa: visible pero no sumable (R11 AC1).
-          soporte.push(this.toRowDto(r, { billable: false, fueraCupo, sinTarifa: true }));
-        }
+        pushSoporte(r, false);
       } else if (taskType === 'PROJECT' && isBillableType) {
-        proyecto.push(this.toRowDto(r, { billable: false, fueraCupo: false, sinTarifa: false }));
+        proyecto.push(this.toRowDto(r, { billable: false, fueraCupo: false, sinTarifa: false, atrasada: false }));
       } else {
-        interno.push(this.toRowDto(r, { billable: false, fueraCupo: false, sinTarifa: false }));
+        interno.push(this.toRowDto(r, { billable: false, fueraCupo: false, sinTarifa: false, atrasada: false }));
       }
     }
+    // Atrasadas ya son SUPPORT USAGE/LOAN de meses cerrados → a `soporte`, tagueadas atrasada:true.
+    for (const r of atrasadas) {
+      pushSoporte(r, true);
+    }
+
+    // Integridad (hallazgo 2): SUPPORT billable con precio, sin estampar y workedOn NULL = plata invisible.
+    //   El operador la ve acá y el guard de closeCycle la bloquea (BILLABLE_WITHOUT_WORKED_ON).
+    const sinFechaTrabajo = await this.prisma.hoursTransaction.count({
+      where: {
+        clientId, deletedAt: null, billedCycleId: null,
+        type: { in: BILLABLE_TYPES }, priceAmount: { not: null }, task: { type: 'SUPPORT' },
+        workedOn: null,
+      },
+    });
 
     const cycles = await this.prisma.clientBillingCycle.findMany({
       where: { clientId, organizationId: orgId, periodStart: { gte: periodStart, lte: periodEnd } },
@@ -323,6 +415,7 @@ export class ClientBillingService {
       subtotalFueraCupo: subtotalFueraCupo.toString(),
       totalFacturable: subtotalSoporte.toString(),
       currency: client.currency,
+      sinFechaTrabajo,
       cycles: cycles.map((c) => this.toCycleDto(c)),
     };
   }
@@ -348,7 +441,7 @@ export class ClientBillingService {
         priceAmount: { not: null },
         task: { type: 'SUPPORT' },
       },
-      select: { createdAt: true, priceAmount: true, billedCycleId: true },
+      select: { workedOn: true, priceAmount: true, billedCycleId: true }, // H8b: bucketea por workedOn
     });
 
     const currentKey = this.asuncionPeriodKey(new Date());
@@ -369,7 +462,8 @@ export class ClientBillingService {
     };
 
     for (const r of facturableRows) {
-      const bucket = ensure(this.asuncionPeriodKey(r.createdAt));
+      if (!r.workedOn) continue; // H8b: sin fecha de trabajo no bucketea (el guard de closeCycle es el que alarma)
+      const bucket = ensure(this.workedMonthKey(r.workedOn)); // H8b: mes de pertenencia, partes UTC
       bucket.hasFacturable = true;
       if (r.billedCycleId === null && r.priceAmount != null) {
         bucket.remainder = bucket.remainder.plus(r.priceAmount);
@@ -425,21 +519,29 @@ export class ClientBillingService {
     const transactions = await this.prisma.hoursTransaction.findMany({
       where: { billedCycleId: cycleId },
       include: { task: { select: { id: true, title: true, type: true } } },
-      orderBy: { createdAt: 'asc' },
+      orderBy: { workedOn: 'asc' },
     });
+
+    const cyclePeriod = this.asuncionPeriodKey(cycle.periodStart); // H8b: período nominal del ciclo
 
     return {
       cycle: this.toCycleDto(cycle),
-      transactions: transactions.map((t) => ({
-        id: t.id,
-        createdAt: t.createdAt,
-        type: t.type,
-        hours: t.hours,
-        note: t.note,
-        priceAmount: t.priceAmount != null ? t.priceAmount.toString() : null,
-        priceCurrency: t.priceCurrency,
-        task: t.task ? { id: t.task.id, title: t.task.title, type: t.task.type } : null,
-      })),
+      transactions: transactions.map((t) => {
+        const workedMonth = t.workedOn ? this.workedMonthKey(t.workedOn) : null;
+        return {
+          id: t.id,
+          createdAt: t.createdAt,
+          workedOn: t.workedOn,
+          workedMonth,
+          atrasada: workedMonth != null && workedMonth < cyclePeriod, // H8b: pertenece a un mes anterior al del ciclo
+          type: t.type,
+          hours: t.hours,
+          note: t.note,
+          priceAmount: t.priceAmount != null ? t.priceAmount.toString() : null,
+          priceCurrency: t.priceCurrency,
+          task: t.task ? { id: t.task.id, title: t.task.title, type: t.task.type } : null,
+        };
+      }),
     };
   }
 
@@ -465,18 +567,26 @@ export class ClientBillingService {
       }
     }
 
-    // Guard tarifa (R11, §1.6) — misma ventana [periodStart, until] que el estampado.
-    const sinTarifa = await this.prisma.hoursTransaction.count({
+    const untilDate = this.asuncionDateOnly(until);
+    const closedMonthKeys = await this.getClosedMonthKeys(orgId, clientId);
+    // Arrastre 2A-acotado: una fila entra al cierre de P si es on-time (workedMonth == period) o
+    // atrasada de un mes YA cerrado. Meses nunca cerrados NO se barren.
+    const inScope = (w: Date | null): boolean =>
+      !!w && (this.workedMonthKey(w) === period || closedMonthKeys.has(this.workedMonthKey(w)));
+
+    // Guard R11 (SUPPORT sin tarifar) — ACOTADO al facturable-al-cerrar-P (findMany + filtro de mes),
+    // conservando el borde superior workedOn ≤ untilDate (en corte parcial no cuenta trabajo posterior
+    // al corte, aunque sea del mes). Antes contaba todo ≤ until sin filtro de mes → una fila de un mes
+    // nunca cerrado bloqueaba todos los cierres.
+    const sinTarifaRows = await this.prisma.hoursTransaction.findMany({
       where: {
-        clientId,
-        deletedAt: null,
-        billedCycleId: null,
-        type: { in: BILLABLE_TYPES },
-        task: { type: 'SUPPORT' },
-        priceAmount: null,
-        createdAt: { gte: periodStart, lte: until },
+        clientId, deletedAt: null, billedCycleId: null,
+        type: { in: BILLABLE_TYPES }, task: { type: 'SUPPORT' },
+        priceAmount: null, workedOn: { lte: untilDate },
       },
+      select: { workedOn: true },
     });
+    const sinTarifa = sinTarifaRows.filter((r) => inScope(r.workedOn)).length;
     if (sinTarifa > 0) {
       throw new AppException(
         'El cliente no tiene tarifa de soporte configurada para horas sin tarifar',
@@ -486,13 +596,33 @@ export class ClientBillingService {
       );
     }
 
-    // Resolve-ids-then-stamp (§1.2): el relation-filter to-one se resuelve con findMany
-    // (que sí lo soporta) y se estampa por lista de ids + candado billedCycleId:null.
-    const facturable = await this.prisma.hoursTransaction.findMany({
-      where: this.buildFacturableWhere(clientId, periodStart, until),
+    // Guard de integridad (H8b): SUPPORT billable CON precio, sin estampar y workedOn NULL = plata
+    // invisible (nunca matchearía el rango de workedOn → se perdería en silencio). No facturar a ciegas:
+    // 409 con los ids para corregir el dato antes de cerrar. Con datos sanos (H8a: worked_on NULL=0) no dispara.
+    const sinFecha = await this.prisma.hoursTransaction.findMany({
+      where: {
+        clientId, deletedAt: null, billedCycleId: null,
+        type: { in: BILLABLE_TYPES }, priceAmount: { not: null }, task: { type: 'SUPPORT' },
+        workedOn: null,
+      },
       select: { id: true },
     });
-    const facturableIds = facturable.map((r) => r.id);
+    if (sinFecha.length > 0) {
+      throw new AppException(
+        'Hay movimientos facturables sin fecha de trabajo; corregí el dato antes de facturar',
+        'BILLABLE_WITHOUT_WORKED_ON',
+        409,
+        { ids: sinFecha.map((r) => r.id) },
+      );
+    }
+
+    // Resolve-ids-then-stamp (§1.2) con arrastre acotado: candidatos SUPPORT priced con workedOn ≤ untilDate,
+    // filtrados en JS por el mes (on-time + atrasadas de meses cerrados). Se estampa por lista de ids + candado.
+    const candidatos = await this.prisma.hoursTransaction.findMany({
+      where: this.buildFacturableWhere(clientId, untilDate),
+      select: { id: true, workedOn: true },
+    });
+    const facturableIds = candidatos.filter((r) => inScope(r.workedOn)).map((r) => r.id);
 
     const issueYear = this.asuncionYear(new Date());
     const yearStart = this.asuncionInstant(issueYear, 0, 1, 0, 0, 0, 0);
@@ -516,6 +646,7 @@ export class ClientBillingService {
                 clientId,
                 periodStart,
                 periodEnd,
+                cutoffDate: until, // H8b: instante efectivo del corte (= periodEnd si mes completo)
                 status: 'DRAFT',
                 invoiceNumber,
                 currency: client.currency,

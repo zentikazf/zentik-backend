@@ -4,7 +4,7 @@ import { ApiPropertyOptional } from '@nestjs/swagger';
 export class CloseCycleDto {
   @ApiPropertyOptional({
     description:
-      'Corte parcial: fecha ISO absoluta. El cierre estampa solo movimientos con createdAt <= until. Omitir para cerrar el mes completo.',
+      'Corte parcial: fecha ISO absoluta. El cierre estampa solo movimientos con FECHA DE TRABAJO (worked_on) <= la fecha-calendario Asunción de until. Omitir para cerrar el mes completo.',
     example: '2026-07-15T00:00:00.000Z',
   })
   @IsOptional()

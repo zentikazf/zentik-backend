@@ -1317,7 +1317,7 @@ model Holiday {
 model HoursTransaction {
   id           String    @id @default(cuid())
   clientId     String    @map("client_id")
-  type         String    // USAGE | LOAN | PURCHASE | REFUND
+  type         String    // USAGE | LOAN | PURCHASE | REFUND | INTERNAL
   hours        Float
   taskId       String?   @map("task_id")
   note         String?
@@ -1332,6 +1332,13 @@ model HoursTransaction {
   priceAmount   Decimal? @map("price_amount")   @db.Decimal(15, 2)
   priceRate     Decimal? @map("price_rate")     @db.Decimal(12, 2)
   priceCurrency String?  @map("price_currency")
+
+  // ── H8a: eje de facturación. Fecha REAL de trabajo, denormalizada del TimeEntry
+  //    (timeEntryId es nullable y sin @relation → se copia, no se joinea). date-only,
+  //    mismo tipo/estilo que TimeEntry.workedOn (schema.prisma:736).
+  //    USAGE/LOAN/INTERNAL: siempre poblada (opts.workedOn ?? now()).
+  //    PURCHASE: null (compra sin día trabajado). REFUND: workedOn del cobro original. ──
+  workedOn     DateTime? @map("worked_on") @db.Date
 
   createdAt    DateTime  @default(now()) @map("created_at")
   deletedAt    DateTime? @map("deleted_at")
@@ -1353,6 +1360,7 @@ model HoursTransaction {
   @@index([createdAt])
   @@index([billedCycleId])
   @@index([clientId, billedCycleId])
+  @@index([workedOn]) // H8a: H8b filtra/ordena el conjunto facturable por este eje
   @@map("hours_transactions")
 }
 
@@ -1366,6 +1374,10 @@ model ClientBillingCycle {
   clientId       String    @map("client_id")
   periodStart    DateTime  @map("period_start") // 1º del mes 00:00 (America/Asuncion → instante UTC)
   periodEnd      DateTime  @map("period_end") // último día 23:59:59.999 (America/Asuncion → instante UTC)
+  // ── H8a: punto de corte parcial. DORMIDA — nace en H8a, la escribe H8b (persistir "hasta
+  //    dónde se facturó" cuando un ciclo cierra a mitad de mes). TIMESTAMP(3) con hora
+  //    (coherente con periodStart/periodEnd), NO @db.Date. ──
+  cutoffDate     DateTime? @map("cutoff_date")
   status         String    @default("DRAFT") // DRAFT | SENT | PAID | CANCELLED
   invoiceNumber  String    @map("invoice_number") // FAC-YYYY-NNNNN (secuencia POR-ORG, §6.1)
   totalHours     Float     @default(0) @map("total_hours")

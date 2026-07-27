@@ -71,4 +71,38 @@ describe('HoursListener.onTimeEntryConfirmed — H1 cableado seg→min (OBJ-3)',
 
     expect(clientService.recordHoursUsage).not.toHaveBeenCalled();
   });
+
+  it('H8a — forwardea event.workedOn dentro de opts a recordHoursUsage', async () => {
+    const worked = new Date('2026-06-30');
+    await listener.onTimeEntryConfirmed({
+      timeEntryId: 'te1',
+      taskId: 't1',
+      duration: 3600,
+      legacyMigration: false,
+      version: 2,
+      workedOn: worked,
+    });
+
+    expect(clientService.recordHoursUsage).toHaveBeenCalledWith('t1', 60, {
+      timeEntryId: 'te1',
+      entryVersion: 2,
+      workedOn: worked,
+    });
+  });
+
+  it('H8a — carrier legacy sin workedOn → no rompe (opts.workedOn queda undefined → recordHoursUsage cae a now())', async () => {
+    await listener.onTimeEntryConfirmed({
+      timeEntryId: 'te1',
+      taskId: 't1',
+      duration: 3600,
+      legacyMigration: false,
+      version: 2,
+    });
+
+    expect(clientService.recordHoursUsage).toHaveBeenCalledWith('t1', 60, {
+      timeEntryId: 'te1',
+      entryVersion: 2,
+      workedOn: undefined,
+    });
+  });
 });

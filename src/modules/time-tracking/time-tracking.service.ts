@@ -519,7 +519,7 @@ export class TimeEntryService {
 
     const manuals = await this.prisma.timeEntry.findMany({
       where: { taskId, origin: 'MANUAL', deletedAt: null, minutes: { gt: 0 } },
-      select: { id: true, minutes: true, version: true },
+      select: { id: true, minutes: true, version: true, workedOn: true }, // H8a: + workedOn (fila ya en memoria, cero query extra)
     });
 
     // Escape H6 (0 h) o tarea sin cargas reales → nada que cobrar (no-op, coherente con approveTask).
@@ -539,6 +539,7 @@ export class TimeEntryService {
         duration: durationSeconds,
         legacyMigration: false,
         version: m.version, // H2: clave de idempotencia (id, version) por carga
+        workedOn: m.workedOn, // H8a: el emisor es el único que sabe qué TimeEntry originó este confirm
       });
     }
 
