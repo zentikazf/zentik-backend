@@ -154,3 +154,63 @@ describe('TaskApprovalService.getApprovalPreview — H7 (horas reales + AJ-3)', 
     );
   });
 });
+
+/**
+ * H8c — rejectTask: guard "no revertir facturado". assertNotBilled corre antes del update
+ * (defensa en profundidad). Bloquea rechazar una tarea con horas facturadas; el rechazo de
+ * una tarea NO facturada sigue revirtiendo el cupo (flujo H7 intacto = no-regresión).
+ */
+describe('TaskApprovalService.rejectTask — H8c (guard revert facturado)', () => {
+  let prisma: DeepMockProxy<PrismaService>;
+  let eventEmitter: DeepMockProxy<EventEmitter2>;
+  let timeEntry: DeepMockProxy<TimeEntryService>;
+  let hoursGuard: DeepMockProxy<TaskHoursGuardService>;
+  let service: TaskApprovalService;
+
+  const TASK = 'task-1';
+  const ORG = 'org-1';
+
+  beforeEach(() => {
+    prisma = mockDeep<PrismaService>();
+    eventEmitter = mockDeep<EventEmitter2>();
+    timeEntry = mockDeep<TimeEntryService>();
+    hoursGuard = mockDeep<TaskHoursGuardService>();
+    service = new TaskApprovalService(prisma, eventEmitter, timeEntry, hoursGuard);
+
+    prisma.task.findUnique.mockResolvedValue({
+      id: TASK,
+      status: 'IN_REVIEW',
+      title: 'Tarea',
+      projectId: 'proj-1',
+      project: { id: 'proj-1', name: 'Proj', responsibleId: 'r1', organizationId: ORG },
+      assignments: [],
+    } as never);
+    prisma.boardColumn.findFirst.mockResolvedValue({ id: 'col-dev' } as never);
+    prisma.task.update.mockResolvedValue({ id: TASK, status: 'IN_PROGRESS', reviewAttempts: 1 } as never);
+    timeEntry.revertConfirmation.mockResolvedValue(undefined as never);
+    timeEntry.revertManualCharges.mockResolvedValue(0 as never);
+  });
+
+  it('T6 no-regresión — tarea NO facturada: rechaza y revierte el cupo (H7 intacto)', async () => {
+    // hoursGuard.assertNotBilled resuelve por default (no facturada)
+    await service.rejectTask(TASK, 'motivo', 'pm-1');
+    expect(hoursGuard.assertNotBilled).toHaveBeenCalledWith(TASK);
+    expect(prisma.task.update).toHaveBeenCalled();
+    expect(timeEntry.revertConfirmation).toHaveBeenCalledWith(TASK, 'pm-1');
+    expect(timeEntry.revertManualCharges).toHaveBeenCalledWith(TASK, 'pm-1');
+    expect(eventEmitter.emit).toHaveBeenCalledWith(
+      'task.approval.rejected',
+      expect.objectContaining({ taskId: TASK }),
+    );
+  });
+
+  it('T6 bloqueo — tarea facturada: TASK_HOURS_BILLED y NO revierte cupo ni escribe estado', async () => {
+    hoursGuard.assertNotBilled.mockRejectedValue(
+      Object.assign(new Error('facturada'), { code: 'TASK_HOURS_BILLED', statusCode: 409 }) as never,
+    );
+    await expect(service.rejectTask(TASK, 'motivo', 'pm-1')).rejects.toMatchObject({ code: 'TASK_HOURS_BILLED' });
+    expect(prisma.task.update).not.toHaveBeenCalled();
+    expect(timeEntry.revertConfirmation).not.toHaveBeenCalled();
+    expect(timeEntry.revertManualCharges).not.toHaveBeenCalled();
+  });
+});

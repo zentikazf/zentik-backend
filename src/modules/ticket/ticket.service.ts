@@ -190,6 +190,13 @@ export class TicketService {
       );
     }
 
+    // H8c: paridad task↔ticket — bloquear reapertura vía sync de ticket (salir de DONE)
+    // si la tarea tiene horas ya facturadas. Corre en la MISMA tx: si lanza, revierte
+    // también el cambio de estado del ticket (RF-3). Cierra la ventana lateral del portal.
+    if (task.status === 'DONE' && targetStatus !== 'DONE') {
+      await this.hoursGuard.assertNotBilled(task.id, tx);
+    }
+
     const targetColumn = await tx.boardColumn.findFirst({
       where: {
         mappedStatus: targetStatus,

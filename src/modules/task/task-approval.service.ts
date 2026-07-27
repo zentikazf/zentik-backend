@@ -220,6 +220,11 @@ export class TaskApprovalService {
       );
     }
 
+    // H8c: defensa en profundidad — no rechazar (IN_REVIEW → IN_PROGRESS) una tarea con
+    // horas ya facturadas. Corner: una tarea aprobada (facturada) devuelta a IN_REVIEW y
+    // luego rechazada. Sin escape: candado hasta H9 (nota de crédito).
+    await this.hoursGuard.assertNotBilled(taskId);
+
     const desarrolloColumn = await this.prisma.boardColumn.findFirst({
       where: {
         board: { projectId: task.projectId },

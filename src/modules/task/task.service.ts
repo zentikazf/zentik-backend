@@ -440,6 +440,14 @@ export class TaskService {
           });
         }
 
+        // H8c: no reabrir una tarea con horas ya facturadas (el revert devolvería el
+        // cupo mientras la factura ya cobró la plata). Choke-point en la transición,
+        // dentro de la misma tx y antes de escribir el estado → el listener de revert
+        // nunca llega para tareas facturadas. Candado hasta H9 (nota de crédito).
+        if (task.status === 'DONE' && dto.status !== 'DONE') {
+          await this.hoursGuard.assertNotBilled(taskId, tx);
+        }
+
         // Auto-set startDate al pasar a IN_PROGRESS (si no tenía valor manual)
         if (dto.status === 'IN_PROGRESS' && !task.startDate && updatePayload.startDate === undefined) {
           updatePayload.startDate = new Date();

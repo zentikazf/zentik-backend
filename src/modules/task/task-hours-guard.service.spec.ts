@@ -201,4 +201,41 @@ describe('TaskHoursGuardService — gate de horas H6', () => {
       expect.objectContaining({ type: 'task.closed_without_hours', entity: 'task', entityId: TASK }),
     );
   });
+
+  // ── H8c: assertNotBilled / hasBilledHours (guard "no revertir facturado") ──
+  it('H8c.where — hasBilledHours cuenta solo USAGE/LOAN facturadas (billedCycleId != null) y vivas', async () => {
+    prisma.hoursTransaction.count.mockResolvedValue(0 as never);
+    await guard.hasBilledHours(TASK, prisma);
+    expect(prisma.hoursTransaction.count).toHaveBeenCalledWith({
+      where: {
+        taskId: TASK,
+        billedCycleId: { not: null },
+        type: { in: ['USAGE', 'LOAN'] },
+        deletedAt: null,
+      },
+    });
+  });
+
+  it('H8c.a — con ≥1 hora facturada → assertNotBilled lanza TASK_HOURS_BILLED 409', async () => {
+    prisma.hoursTransaction.count.mockResolvedValue(1 as never);
+    await expect(guard.assertNotBilled(TASK, prisma)).rejects.toMatchObject({
+      code: 'TASK_HOURS_BILLED',
+      statusCode: 409,
+      details: { taskId: TASK },
+    });
+  });
+
+  it('H8c.b — sin horas facturadas → assertNotBilled pasa (no throw)', async () => {
+    prisma.hoursTransaction.count.mockResolvedValue(0 as never);
+    await expect(guard.assertNotBilled(TASK, prisma)).resolves.toBeUndefined();
+  });
+
+  it('CA4 — REFUND/INTERNAL no cuentan como facturado: el where filtra por type USAGE/LOAN', async () => {
+    // Una tarea con solo REFUND/INTERNAL devuelve 0 por el filtro de type → no lanza.
+    prisma.hoursTransaction.count.mockResolvedValue(0 as never);
+    await expect(guard.assertNotBilled(TASK, prisma)).resolves.toBeUndefined();
+    expect(prisma.hoursTransaction.count).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ type: { in: ['USAGE', 'LOAN'] } }) }),
+    );
+  });
 });

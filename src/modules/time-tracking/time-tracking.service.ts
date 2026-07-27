@@ -375,6 +375,32 @@ export class TimeEntryService {
       );
     }
 
+    // H8c: no borrar una carga MANUAL cuyo cobro YA fue facturado (billedCycleId != null).
+    // Sin esto, el time_entry.reverted de más abajo dispararía un REFUND que devuelve el cupo
+    // mientras la factura (ciclo cerrado) ya cobró la plata → la misma divergencia invisible
+    // que frena el guard de reapertura. Bloqueo ANTES del soft-delete. Paridad con
+    // deleteHoursTransaction (TRANSACTION_BILLED) y con assertNotBilled. Candado hasta H9.
+    if (existing.origin === 'MANUAL') {
+      const billed = await this.prisma.hoursTransaction.count({
+        where: {
+          taskId: existing.taskId,
+          timeEntryId: id,
+          entryVersion: existing.version,
+          type: { in: ['USAGE', 'LOAN'] },
+          billedCycleId: { not: null },
+          deletedAt: null,
+        },
+      });
+      if (billed > 0) {
+        throw new AppException(
+          'Esta carga ya fue facturada. Para revertirla necesitás emitir una nota de crédito.',
+          'TASK_HOURS_BILLED',
+          409,
+          { timeEntryId: id, taskId: existing.taskId },
+        );
+      }
+    }
+
     // Soft delete: UPDATE, no DELETE. Libera el slot del único parcial (deleted_at IS NULL).
     const deleted = await this.prisma.timeEntry.update({
       where: { id },
