@@ -14,6 +14,7 @@ import { generateTicketNumber } from '../ticket/ticket.service';
 import { FileService } from '../file/file.service';
 import { StorageService } from '../../infrastructure/storage/storage.service';
 import { OutboxService } from '../sync/outbox.service';
+import { ClientBillingPdfService } from '../client-billing/client-billing-pdf.service';
 
 @Injectable()
 export class PortalService {
@@ -26,6 +27,7 @@ export class PortalService {
     private readonly fileService: FileService,
     private readonly storage: StorageService,
     private readonly outbox: OutboxService,
+    private readonly pdfService: ClientBillingPdfService,
   ) {}
 
   private async getClientByUserId(userId: string) {
@@ -598,10 +600,11 @@ export class PortalService {
       take: 100,
     });
 
-    // Suma solo de transacciones que tienen precio asociado (snapshot).
-    // Las transacciones legacy o sin tarifa configurada no suman al total.
+    // H8f: el "Total facturable" del portal = lo que FALTA cobrar, no todo lo con precio.
+    // Suma solo transacciones con precio Y aún NO facturadas (billedCycleId null). Cuando una
+    // factura se emite, sus transacciones quedan estampadas (billedCycleId) y salen del total.
     const totalAmount = recentTransactions
-      .filter((t) => t.priceAmount !== null)
+      .filter((t) => t.priceAmount !== null && t.billedCycleId === null)
       .reduce((sum, t) => sum + parseFloat(t.priceAmount!.toString()), 0);
 
     return {
@@ -618,6 +621,66 @@ export class PortalService {
       totalAmount,
       transactions: recentTransactions,
     };
+  }
+
+  // ── H8f: Facturas de horas emitidas al cliente (portal) ─────────────────
+
+  // GATE-1 (dueño, 2026-07-27): el cliente ve SENT + PAID + CANCELLED marcadas "Anulada";
+  // NUNCA DRAFT (borradores internos del staff). Ordenadas por período desc.
+  async getMyInvoices(userId: string) {
+    const client = await this.getClientByUserId(userId);
+
+    return this.prisma.clientBillingCycle.findMany({
+      where: {
+        clientId: client.id,
+        status: { in: ['SENT', 'PAID', 'CANCELLED'] },
+      },
+      orderBy: { periodStart: 'desc' },
+      select: {
+        id: true,
+        invoiceNumber: true,
+        kind: true,
+        periodStart: true,
+        periodEnd: true,
+        cutoffDate: true,
+        totalHours: true,
+        totalAmount: true,
+        currency: true,
+        status: true,
+        cancelReason: true,
+        cancelledAt: true,
+      },
+    });
+  }
+
+  // Descarga del PDF de UNA factura del cliente. Reusa el generador de H8e
+  // (ClientBillingPdfService), pero valida ANTES que el ciclo sea del cliente del usuario y
+  // esté emitido (SENT/PAID) — nunca DRAFT (interno) ni CANCELLED (sin acción). El org del
+  // ciclo (denormalizado = autoridad) alimenta al generador scopeado por org/cliente/ciclo.
+  async downloadMyInvoice(userId: string, cycleId: string, res: Response): Promise<void> {
+    const client = await this.getClientByUserId(userId);
+
+    const cycle = await this.prisma.clientBillingCycle.findFirst({
+      where: {
+        id: cycleId,
+        clientId: client.id,
+        status: { in: ['SENT', 'PAID'] },
+      },
+      select: { id: true, organizationId: true },
+    });
+    if (!cycle) {
+      throw new AppException('Factura no encontrada', 'INVOICE_NOT_FOUND', 404);
+    }
+
+    const { buffer, filename } = await this.pdfService.generateInvoicePdf(
+      cycle.organizationId,
+      client.id,
+      cycle.id,
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', buffer.length.toString());
+    res.send(buffer);
   }
 
   async convertToTask(projectId: string, suggestionId: string) {

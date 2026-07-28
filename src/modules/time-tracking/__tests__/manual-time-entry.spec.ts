@@ -321,6 +321,33 @@ describe('TimeEntryService — carga manual (H4)', () => {
       const revertEmit = eventEmitter.emit.mock.calls.find((c) => c[0] === 'time_entry.reverted');
       expect(revertEmit).toBeUndefined();
     });
+
+    it('T10e — H8c: borrar una carga MANUAL YA FACTURADA → 409 TASK_HOURS_BILLED, sin soft-delete ni reverted', async () => {
+      prisma.timeEntry.findFirst.mockResolvedValue({
+        id: 'te-1', userId: 'dev-2', origin: 'MANUAL', version: 1, minutes: 180, duration: 10800,
+        workedOn: new Date('2024-06-15T00:00:00Z'), taskId: TASK,
+        task: { project: { organizationId: ORG } },
+      } as never);
+      prisma.hoursTransaction.count.mockResolvedValue(1 as never); // cobro vivo YA facturado (billedCycleId != null)
+
+      await expect(service.delete('te-1', pmActor, 'error')).rejects.toMatchObject({
+        code: 'TASK_HOURS_BILLED',
+        statusCode: 409,
+      });
+      // El count filtra por la carga de ESTA entrada + billedCycleId != null
+      expect(prisma.hoursTransaction.count).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            timeEntryId: 'te-1',
+            billedCycleId: { not: null },
+            type: { in: ['USAGE', 'LOAN'] },
+          }),
+        }),
+      );
+      // Bloqueo ANTES de escribir: no soft-delete, no evento de reverso de cupo.
+      expect(prisma.timeEntry.update).not.toHaveBeenCalled();
+      expect(eventEmitter.emit.mock.calls.find((c) => c[0] === 'time_entry.reverted')).toBeUndefined();
+    });
   });
 
   // ── lecturas excluyen soft-deleted ──

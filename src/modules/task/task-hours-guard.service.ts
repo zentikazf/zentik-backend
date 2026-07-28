@@ -127,6 +127,42 @@ export class TaskHoursGuardService {
   }
 
   /**
+   * H8c — Guard "no revertir facturado". Hermano de assertHasWorkedHours: count de
+   * lectura + throw ANTES de escribir el estado. Bloquea reabrir/rechazar una tarea
+   * cuyas horas YA se facturaron (billedCycleId != null) — el revert devolvería el cupo
+   * (vía REFUND en onTimeEntryReverted) mientras la factura, inmutable en un ciclo
+   * cerrado, ya cobró la plata → divergencia invisible. La llave (nota de crédito) es H9;
+   * acá va solo el candado. Puro guard de lectura: no escribe, no toca cupo ni plata.
+   *
+   * Cuenta USAGE/LOAN (los BILLABLE_TYPES); NO cuenta REFUND ni INTERNAL. Excluye las
+   * soft-deleted. Lo invocan los 4 caminos que sacan de DONE (updateTask, board move,
+   * ticket sync, rejectTask), en paridad con el choke-point de H6.
+   */
+  async hasBilledHours(taskId: string, tx: PrismaLike = this.prisma): Promise<boolean> {
+    const billed = await tx.hoursTransaction.count({
+      where: {
+        taskId,
+        billedCycleId: { not: null },
+        type: { in: ['USAGE', 'LOAN'] },
+        deletedAt: null,
+      },
+    });
+    return billed > 0;
+  }
+
+  /** Lanza TASK_HOURS_BILLED (409) si la tarea tiene ≥1 hora ya facturada. */
+  async assertNotBilled(taskId: string, tx: PrismaLike = this.prisma): Promise<void> {
+    if (await this.hasBilledHours(taskId, tx)) {
+      throw new AppException(
+        'Esta tarea ya fue facturada. Para revertirla necesitás emitir una nota de crédito.',
+        'TASK_HOURS_BILLED',
+        409,
+        { taskId },
+      );
+    }
+  }
+
+  /**
    * Gate CON escape para los caminos que sí lo exponen (updateTask, create/
    * subtask, approveTask). Si `closeWithoutHours`:
    *   - valida permiso (asignado || manage:projects) → si no, 403

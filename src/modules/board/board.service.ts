@@ -360,6 +360,13 @@ export class BoardService {
       );
     }
 
+    // H8c: bloquear reapertura (salir de DONE) si la tarea tiene horas ya facturadas.
+    // Espeja la condición del emit de task.reopened (más abajo): sin este guard el
+    // revert devolvería el cupo mientras la factura ya cobró. Candado hasta H9.
+    if (previousStatus === 'DONE' && targetColumn.mappedStatus && targetColumn.mappedStatus !== 'DONE') {
+      await this.hoursGuard.assertNotBilled(dto.taskId, this.prisma);
+    }
+
     // Build update data — sync status if column has mappedStatus
     const updateData: Record<string, unknown> = {
       boardColumnId: dto.targetColumnId,
