@@ -118,6 +118,26 @@ export class PortalController {
     return this.portalService.getMyHours(user.id);
   }
 
+  // ── Invoices endpoint (Portal, H8f) ──────────────────────
+
+  @Get('portal/invoices')
+  @ApiOperation({ summary: 'Facturas de horas emitidas al cliente (SENT/PAID/anuladas)' })
+  getMyInvoices(@CurrentUser() user: AuthenticatedUser) {
+    return this.portalService.getMyInvoices(user.id);
+  }
+
+  // Ruta de 3 segmentos (invoices/:cycleId/pdf) → no colisiona con GET portal/invoices.
+  // `@Res({ passthrough: false })` bypassea el interceptor global (igual que el PDF admin de H8e).
+  @Get('portal/invoices/:cycleId/pdf')
+  @ApiOperation({ summary: 'Descargar el PDF de una factura del cliente' })
+  downloadMyInvoice(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('cycleId') cycleId: string,
+    @Res({ passthrough: false }) res: Response,
+  ): Promise<void> {
+    return this.portalService.downloadMyInvoice(user.id, cycleId, res);
+  }
+
   // ── Ticket endpoints (Portal) ─────────────────────────────
 
   @Get('portal/tickets')

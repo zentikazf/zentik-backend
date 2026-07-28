@@ -10,5 +10,6 @@ import { ClientBillingPdfService } from './client-billing-pdf.service';
   imports: [PrismaModule, AppConfigModule, AuditModule],
   controllers: [ClientBillingController],
   providers: [ClientBillingService, ClientBillingPdfService],
+  exports: [ClientBillingPdfService],
 })
 export class ClientBillingModule {}
