@@ -572,7 +572,9 @@ export class ClientService {
       }),
       this.prisma.hoursTransaction.count({ where }),
       this.prisma.hoursTransaction.aggregate({
-        where: { ...where, type: { in: ['USAGE', 'LOAN'] }, priceAmount: { not: null } },
+        // H9b: excluye las filas ESPEJO (rebilledFromTransactionId != null) para NO doble-contar
+        // la espejo con su original en el "Total facturable" del cartel del staff.
+        where: { ...where, type: { in: ['USAGE', 'LOAN'] }, priceAmount: { not: null }, rebilledFromTransactionId: null },
         _sum: { priceAmount: true },
       }),
     ]);

@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import PDFDocument from 'pdfkit';
 import { PrismaService } from '../../database/prisma.service';
 import {
@@ -92,6 +93,8 @@ export interface InvoiceModel {
   totalHoras: string;
   totalMonto: string;
   currency: string;
+  docTitle?: string; // default 'FACTURA'; NC pasa 'NOTA DE CRÉDITO'
+  referenceLine?: string; // NC: 'Aplica a FAC-YYYY-NNNNN'
 }
 
 /**
@@ -163,6 +166,105 @@ export function buildInvoiceModel(input: {
   };
 }
 
+// ── H9b: Nota de crédito ────────────────────────────────────────────────────
+
+/** Mes de pertenencia 'YYYY-MM' de un workedOn (@db.Date, UTC-midnight). Partes UTC, NO TZ (patrón workedMonthKey del service). */
+function creditWorkedMonthKey(workedOn: Date): string {
+  return `${workedOn.getUTCFullYear()}-${String(workedOn.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+export interface CreditNoteModelInput {
+  creditNote: {
+    number: string;
+    reason: string;
+    currency: string;
+    totalAmount: Prisma.Decimal; // NEGATIVO (efecto neto)
+    totalHours: number; // NEGATIVO
+    issuedAt: Date;
+    createdAt: Date;
+    appliesTo: { invoiceNumber: string };
+  };
+  lines: Array<{
+    hours: number; // POSITIVO (snapshot fiel)
+    priceAmount: Prisma.Decimal; // POSITIVO (snapshot fiel)
+    priceRate: Prisma.Decimal | null;
+    priceCurrency: string | null;
+    workedOn: Date | null;
+    description: string | null;
+  }>;
+  clientName: string;
+  org: { name: string | null; supportEmail: string | null } | null;
+}
+
+/**
+ * H9b: arma el MISMO `InvoiceModel` para una nota de crédito, con `docTitle`/`referenceLine` seteados y
+ * TODOS los montos/horas en NEGATIVO (las líneas guardan positivo → se niegan para presentar; los totales
+ * ya vienen negativos de la tabla). Sin banda ANULADA. Reusa la lógica de agrupación por mes-de-trabajo.
+ */
+export function buildCreditNoteModel(input: CreditNoteModelInput): InvoiceModel {
+  const { creditNote, lines, clientName, org } = input;
+  const currency = creditNote.currency;
+
+  // Agrupa por mes-de-trabajo (partes UTC de workedOn; null → 'sin-fecha').
+  const buckets = new Map<string, { subtotal: Prisma.Decimal; horas: number; lines: InvoiceLine[] }>();
+  for (const l of lines) {
+    const key = l.workedOn ? creditWorkedMonthKey(l.workedOn) : 'sin-fecha';
+    const b = buckets.get(key) ?? { subtotal: new Prisma.Decimal(0), horas: 0, lines: [] };
+    b.subtotal = b.subtotal.plus(l.priceAmount);
+    b.horas += l.hours;
+    b.lines.push({
+      concepto: l.description ?? '—',
+      tipo: 'Crédito',
+      horas: `${(-l.hours).toFixed(2)}h`, // NEGATIVO (presentación)
+      tarifa: fmtMoney(l.priceRate != null ? l.priceRate.toString() : null, currency),
+      monto: fmtMoney(l.priceAmount.negated().toString(), currency), // NEGATIVO
+    });
+    buckets.set(key, b);
+  }
+
+  const keys = [...buckets.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const multi = keys.length > 1;
+  const groups: InvoiceGroup[] = keys.map((key) => {
+    const b = buckets.get(key)!;
+    return {
+      label: key === 'sin-fecha' ? 'Sin fecha' : monthLabelEs(key),
+      showHeader: multi,
+      subtotal: fmtMoney(b.subtotal.negated().toString(), currency), // NEGATIVO
+      horas: `${(-b.horas).toFixed(2)}h`,
+      lines: b.lines,
+    };
+  });
+
+  // Período: rango de meses reales tocados (excluye 'sin-fecha'); fallback al mes de emisión.
+  const realKeys = keys.filter((k) => k !== 'sin-fecha');
+  let periodLabel: string;
+  if (realKeys.length === 0) {
+    periodLabel = monthLabelEs(monthKeyAsuncion(creditNote.issuedAt));
+  } else {
+    const startKey = realKeys[0];
+    const endKey = realKeys[realKeys.length - 1];
+    periodLabel = startKey === endKey ? monthLabelEs(startKey) : `${monthLabelEs(startKey)} – ${monthLabelEs(endKey)}`;
+  }
+
+  return {
+    orgName: org?.name ?? 'Organización',
+    supportEmail: org?.supportEmail ?? null,
+    invoiceNumber: creditNote.number,
+    kind: 'CREDIT_NOTE', // no ACCUMULATED → no dibuja "Factura acumulada"
+    emittedAt: fmtDateAsuncion(creditNote.issuedAt ?? creditNote.createdAt),
+    clientName,
+    periodLabel,
+    cutoffLabel: null,
+    cancelled: null, // D3: sin banda ANULADA en v1
+    groups,
+    totalHoras: `${creditNote.totalHours.toFixed(2)}h`, // ya NEGATIVO
+    totalMonto: fmtMoney(creditNote.totalAmount.toString(), currency), // ya NEGATIVO
+    currency,
+    docTitle: 'NOTA DE CRÉDITO',
+    referenceLine: `Aplica a ${creditNote.appliesTo.invoiceNumber}`,
+  };
+}
+
 /**
  * Logo de la agencia SOLO como data-URI PNG/JPEG (embebible por pdfkit, sin red). Decisión
  * deliberada: NO se hace fetch de URLs remotas desde el generador de un documento financiero
@@ -225,6 +327,37 @@ export class ClientBillingPdfService {
 
     const buffer = await this.render(model, loadLogoDataUri(org?.logo));
     return { buffer, filename: `${cycle.invoiceNumber}.pdf` };
+  }
+
+  /**
+   * H9b: genera el PDF de una NOTA DE CRÉDITO. Lee la NC + sus líneas congeladas (`getCreditNoteTransactions`,
+   * scopeada por org/cliente; lanza 404 si no existe) + query de cliente/agencia. Reusa el mismo `render`
+   * con `docTitle`/`referenceLine`/montos negativos. Filename NC-YYYY-NNNNN.pdf.
+   */
+  async generateCreditNotePdf(
+    orgId: string,
+    clientId: string,
+    creditNoteId: string,
+  ): Promise<{ buffer: Buffer; filename: string }> {
+    const { creditNote, lines } = await this.billing.getCreditNoteTransactions(orgId, clientId, creditNoteId);
+
+    const [client, org] = await Promise.all([
+      this.prisma.client.findUnique({ where: { id: clientId }, select: { name: true } }),
+      this.prisma.organization.findUnique({
+        where: { id: orgId },
+        select: { name: true, logo: true, supportEmail: true },
+      }),
+    ]);
+
+    const model = buildCreditNoteModel({
+      creditNote,
+      lines,
+      clientName: client?.name ?? 'Cliente',
+      org: org ? { name: org.name, supportEmail: org.supportEmail } : null,
+    });
+
+    const buffer = await this.render(model, loadLogoDataUri(org?.logo));
+    return { buffer, filename: `${creditNote.number}.pdf` };
   }
 
   /** Dibuja el modelo con pdfkit. Layout absoluto + salto de página con re-dibujo del encabezado de tabla. */
@@ -317,7 +450,11 @@ export class ClientBillingPdfService {
     if (model.supportEmail) {
       doc.font('Helvetica').fontSize(9).fillColor(MUTED).text(model.supportEmail, LEFT, doc.y + 1, { width: 280 });
     }
-    doc.font('Helvetica-Bold').fontSize(18).fillColor(INK).text('FACTURA', 300, top, { width: 245, align: 'right' });
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(18)
+      .fillColor(INK)
+      .text(model.docTitle ?? 'FACTURA', 300, top, { width: 245, align: 'right' });
     doc
       .font('Helvetica-Bold')
       .fontSize(12)
@@ -328,6 +465,13 @@ export class ClientBillingPdfService {
       .fontSize(9)
       .fillColor(MUTED)
       .text(`Emitida: ${model.emittedAt}`, 300, top + 44, { width: 245, align: 'right' });
+    if (model.referenceLine) {
+      // NC: línea de referencia a la FAC acreditada (mismo estilo muted).
+      doc.font('Helvetica').fontSize(9).fillColor(MUTED).text(model.referenceLine, 300, top + 58, {
+        width: 245,
+        align: 'right',
+      });
+    }
     if (model.kind === 'ACCUMULATED') {
       doc.font('Helvetica').fontSize(9).fillColor(MUTED).text('Factura acumulada', 300, top + 58, {
         width: 245,

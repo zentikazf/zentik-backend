@@ -236,17 +236,17 @@ enum TimeEntryOrigin {
 // ============================================================================
 
 model User {
-  id            String   @id @default(cuid())
-  name          String
-  email         String   @unique
-  emailVerified Boolean  @default(false) @map("email_verified")
-  image         String?
-  onboardingCompleted Boolean @default(false) @map("onboarding_completed")
-  mustChangePassword  Boolean @default(false) @map("must_change_password")
-  clientId      String?  @map("client_id")
-  notificationEmail String? @map("notification_email")
-  createdAt     DateTime @default(now()) @map("created_at")
-  updatedAt     DateTime @updatedAt @map("updated_at")
+  id                  String   @id @default(cuid())
+  name                String
+  email               String   @unique
+  emailVerified       Boolean  @default(false) @map("email_verified")
+  image               String?
+  onboardingCompleted Boolean  @default(false) @map("onboarding_completed")
+  mustChangePassword  Boolean  @default(false) @map("must_change_password")
+  clientId            String?  @map("client_id")
+  notificationEmail   String?  @map("notification_email")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
 
   activationTokens UserActivationToken[]
 
@@ -255,32 +255,33 @@ model User {
   sessions Session[]
 
   // Application relations
-  organizationMembers OrganizationMember[]
-  projectMembers      ProjectMember[]
-  taskAssignments     TaskAssignment[]
-  timeEntries         TimeEntry[]
-  comments            Comment[]
-  messages            Message[]
-  notifications       Notification[]
-  files               File[]
-  auditLogs           AuditLog[]
-  createdTasks        Task[]               @relation("TaskCreator")
-  createdProjects     Project[]            @relation("ProjectCreator")
-  createdInvoices     Invoice[]            @relation("InvoiceCreator")
-  createdChannels     Channel[]            @relation("ChannelCreator")
-  createdLabels       Label[]              @relation("LabelCreator")
-  createdSprints      Sprint[]             @relation("SprintCreator")
-  channelMemberships  ChannelMember[]
-  responsibleProjects Project[]            @relation("projectResponsible")
-  clientProfile       Client?              @relation("ClientOwner")
-  clientGroup         Client?              @relation("ClientUsers", fields: [clientId], references: [id], onDelete: SetNull)
-  createdMeetings     Meeting[]            @relation("MeetingCreator")
-  createdTickets      Ticket[]             @relation("TicketCreator")
-  closedTickets       Ticket[]             @relation("TicketCloser")
-  ticketEvents        TicketEvent[]        @relation("TicketEventActor")
-  deletedHoursTransactions HoursTransaction[] @relation("HoursDeletedBy")
+  organizationMembers      OrganizationMember[]
+  projectMembers           ProjectMember[]
+  taskAssignments          TaskAssignment[]
+  timeEntries              TimeEntry[]
+  comments                 Comment[]
+  messages                 Message[]
+  notifications            Notification[]
+  files                    File[]
+  auditLogs                AuditLog[]
+  createdTasks             Task[]                       @relation("TaskCreator")
+  createdProjects          Project[]                    @relation("ProjectCreator")
+  createdInvoices          Invoice[]                    @relation("InvoiceCreator")
+  createdChannels          Channel[]                    @relation("ChannelCreator")
+  createdLabels            Label[]                      @relation("LabelCreator")
+  createdSprints           Sprint[]                     @relation("SprintCreator")
+  channelMemberships       ChannelMember[]
+  responsibleProjects      Project[]                    @relation("projectResponsible")
+  clientProfile            Client?                      @relation("ClientOwner")
+  clientGroup              Client?                      @relation("ClientUsers", fields: [clientId], references: [id], onDelete: SetNull)
+  createdMeetings          Meeting[]                    @relation("MeetingCreator")
+  createdTickets           Ticket[]                     @relation("TicketCreator")
+  closedTickets            Ticket[]                     @relation("TicketCloser")
+  ticketEvents             TicketEvent[]                @relation("TicketEventActor")
+  deletedHoursTransactions HoursTransaction[]           @relation("HoursDeletedBy")
   closedBillingCycles      ClientBillingCycle[]         @relation("CycleClosedBy")
   cancelledBillingCycles   ClientBillingCycle[]         @relation("CycleCancelledBy")
+  creditNotesIssued        CreditNote[]                 @relation("CreditNoteIssuedBy")
   pushSubscriptions        PushSubscription[]
   notificationPreferences  UserNotificationPreference[]
   deletedFiles             File[]                       @relation("FileDeletedBy")
@@ -333,31 +334,32 @@ model Session {
 // ============================================================================
 
 model Organization {
-  id        String   @id @default(cuid())
-  name      String
-  slug      String   @unique
-  logo      String?
-  supportEmail String? @map("support_email")
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  id           String   @id @default(cuid())
+  name         String
+  slug         String   @unique
+  logo         String?
+  supportEmail String?  @map("support_email")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
 
   // Relations
-  subscription Subscription?
-  members      OrganizationMember[]
-  roles        Role[]
-  inviteLinks  InviteLink[]
-  projects     Project[]
-  channels     Channel[]
-  invoices     Invoice[]
-  auditLogs    AuditLog[]
-  files        File[]
-  labels       Label[]
-  clients      Client[]
-  tickets              Ticket[]
+  subscription          Subscription?
+  members               OrganizationMember[]
+  roles                 Role[]
+  inviteLinks           InviteLink[]
+  projects              Project[]
+  channels              Channel[]
+  invoices              Invoice[]
+  auditLogs             AuditLog[]
+  files                 File[]
+  labels                Label[]
+  clients               Client[]
+  tickets               Ticket[]
   ticketCategoryConfigs TicketCategoryConfig[]
   slaConfigs            SlaConfig[]
   businessHoursConfig   BusinessHoursConfig?
   holidays              Holiday[]
+  creditNotes           CreditNote[]
 
   @@index([slug])
   @@map("organizations")
@@ -478,28 +480,28 @@ model InviteLink {
 // ============================================================================
 
 model Project {
-  id             String        @id @default(cuid())
-  organizationId String        @map("organization_id")
-  name           String
-  description    String?
-  slug           String
+  id                  String                 @id @default(cuid())
+  organizationId      String                 @map("organization_id")
+  name                String
+  description         String?
+  slug                String
   status              ProjectStatus          @default(DISCOVERY)
   lifecycleStatus     ProjectLifecycleStatus @default(ACTIVE) @map("lifecycle_status")
-  startDate      DateTime?     @map("start_date")
-  endDate        DateTime?     @map("end_date")
-  createdById    String        @map("created_by_id")
-  createdAt      DateTime      @default(now()) @map("created_at")
-  updatedAt      DateTime      @updatedAt @map("updated_at")
-  clientId       String?       @map("client_id")
-  hourlyRate     Decimal?      @map("hourly_rate") @db.Decimal(12, 2)
-  estimatedHours Float?        @map("estimated_hours")
-  budget         Decimal?      @db.Decimal(15, 0)
-  investment     Decimal?      @db.Decimal(15, 0)
-  billingMonth   String?       @map("billing_month")
-  responsibleId  String?        @map("responsible_id")
-  alcanceStatus        AlcanceStatus? @map("alcance_status")
-  alcanceFileId        String?        @unique @map("alcance_file_id")
-  pendingClientReview  Boolean        @default(false) @map("pending_client_review")
+  startDate           DateTime?              @map("start_date")
+  endDate             DateTime?              @map("end_date")
+  createdById         String                 @map("created_by_id")
+  createdAt           DateTime               @default(now()) @map("created_at")
+  updatedAt           DateTime               @updatedAt @map("updated_at")
+  clientId            String?                @map("client_id")
+  hourlyRate          Decimal?               @map("hourly_rate") @db.Decimal(12, 2)
+  estimatedHours      Float?                 @map("estimated_hours")
+  budget              Decimal?               @db.Decimal(15, 0)
+  investment          Decimal?               @db.Decimal(15, 0)
+  billingMonth        String?                @map("billing_month")
+  responsibleId       String?                @map("responsible_id")
+  alcanceStatus       AlcanceStatus?         @map("alcance_status")
+  alcanceFileId       String?                @unique @map("alcance_file_id")
+  pendingClientReview Boolean                @default(false) @map("pending_client_review")
 
   organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   createdBy    User            @relation("ProjectCreator", fields: [createdById], references: [id])
@@ -612,45 +614,45 @@ model Sprint {
 // ============================================================================
 
 model Task {
-  id             String       @id @default(cuid())
-  projectId      String       @map("project_id")
-  boardColumnId  String?      @map("board_column_id")
-  sprintId       String?      @map("sprint_id")
-  parentTaskId   String?      @map("parent_task_id")
-  title          String
-  description    String?
-  status         TaskStatus   @default(BACKLOG)
-  type           TaskType     @default(PROJECT)
-  priority       TaskPriority @default(MEDIUM)
-  position       Int          @default(0)
-  storyPoints    Int?         @map("story_points")
-  dueDate        DateTime?    @map("due_date")
-  startDate      DateTime?    @map("start_date")
-  endDate        DateTime?    @map("end_date")
+  id               String       @id @default(cuid())
+  projectId        String       @map("project_id")
+  boardColumnId    String?      @map("board_column_id")
+  sprintId         String?      @map("sprint_id")
+  parentTaskId     String?      @map("parent_task_id")
+  title            String
+  description      String?
+  status           TaskStatus   @default(BACKLOG)
+  type             TaskType     @default(PROJECT)
+  priority         TaskPriority @default(MEDIUM)
+  position         Int          @default(0)
+  storyPoints      Int?         @map("story_points")
+  dueDate          DateTime?    @map("due_date")
+  startDate        DateTime?    @map("start_date")
+  endDate          DateTime?    @map("end_date")
   estimatedHours   Float?       @map("estimated_hours")
   originalEstimate Float?       @map("original_estimate")
   hourlyRate       Decimal?     @map("hourly_rate") @db.Decimal(12, 2)
-  roleId         String?      @map("role_id")
-  clientVisible  Boolean      @default(false) @map("client_visible")
-  billable       Boolean      @default(true)  @map("billable")
-  reviewAttempts Int          @default(0) @map("review_attempts")
-  createdById    String       @map("created_by_id")
-  createdAt      DateTime     @default(now()) @map("created_at")
-  updatedAt      DateTime     @updatedAt @map("updated_at")
+  roleId           String?      @map("role_id")
+  clientVisible    Boolean      @default(false) @map("client_visible")
+  billable         Boolean      @default(true) @map("billable")
+  reviewAttempts   Int          @default(0) @map("review_attempts")
+  createdById      String       @map("created_by_id")
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @updatedAt @map("updated_at")
 
-  project     Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  boardColumn BoardColumn?     @relation(fields: [boardColumnId], references: [id], onDelete: SetNull)
-  sprint      Sprint?          @relation(fields: [sprintId], references: [id], onDelete: SetNull)
-  parentTask  Task?            @relation("SubTasks", fields: [parentTaskId], references: [id], onDelete: SetNull)
-  createdBy   User             @relation("TaskCreator", fields: [createdById], references: [id])
-  role        Role?            @relation(fields: [roleId], references: [id], onDelete: SetNull)
-  subTasks    Task[]           @relation("SubTasks")
-  assignments TaskAssignment[]
-  taskLabels  TaskLabel[]
-  timeEntries  TimeEntry[]
-  comments     Comment[]
-  files        File[]
-  invoiceItems InvoiceItem[]
+  project           Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  boardColumn       BoardColumn?       @relation(fields: [boardColumnId], references: [id], onDelete: SetNull)
+  sprint            Sprint?            @relation(fields: [sprintId], references: [id], onDelete: SetNull)
+  parentTask        Task?              @relation("SubTasks", fields: [parentTaskId], references: [id], onDelete: SetNull)
+  createdBy         User               @relation("TaskCreator", fields: [createdById], references: [id])
+  role              Role?              @relation(fields: [roleId], references: [id], onDelete: SetNull)
+  subTasks          Task[]             @relation("SubTasks")
+  assignments       TaskAssignment[]
+  taskLabels        TaskLabel[]
+  timeEntries       TimeEntry[]
+  comments          Comment[]
+  files             File[]
+  invoiceItems      InvoiceItem[]
   suggestion        Suggestion?
   ticket            Ticket?
   hoursTransactions HoursTransaction[]
@@ -748,8 +750,8 @@ model TimeEntry {
   deletedById     String?          @map("deleted_by_id")
   deleteReason    String?          @map("delete_reason")
 
-  createdAt       DateTime        @default(now()) @map("created_at")
-  updatedAt       DateTime        @updatedAt @map("updated_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -882,45 +884,45 @@ model Notification {
 // ============================================================================
 
 model File {
-  id             String       @id @default(cuid())
-  organizationId String       @map("organization_id")
-  taskId         String?      @map("task_id")
-  commentId      String?      @map("comment_id")
-  messageId      String?      @map("message_id")
-  projectId      String?      @map("project_id")
-  clientId       String?      @map("client_id")
-  uploadedById   String       @map("uploaded_by_id")
-  name           String
-  originalName   String       @map("original_name")
-  description    String?
-  mimeType       String       @map("mime_type")
-  size           Int // Size in bytes
-  url            String
-  key            String // S3 object key
-  category       FileCategory @default(ATTACHMENT)
+  id               String            @id @default(cuid())
+  organizationId   String            @map("organization_id")
+  taskId           String?           @map("task_id")
+  commentId        String?           @map("comment_id")
+  messageId        String?           @map("message_id")
+  projectId        String?           @map("project_id")
+  clientId         String?           @map("client_id")
+  uploadedById     String            @map("uploaded_by_id")
+  name             String
+  originalName     String            @map("original_name")
+  description      String?
+  mimeType         String            @map("mime_type")
+  size             Int // Size in bytes
+  url              String
+  key              String // S3 object key
+  category         FileCategory      @default(ATTACHMENT)
   // Compartir con cliente
   clientVisible    Boolean           @default(false) @map("client_visible")
   documentCategory DocumentCategory? @map("document_category") // DEPRECATED — categories no longer used in UI, kept for legacy data
   // Versionado (DEPRECATED — replaced by edit-overwrite, kept for legacy data)
-  parentFileId   String? @map("parent_file_id")
-  version        Int     @default(1)
+  parentFileId     String?           @map("parent_file_id")
+  version          Int               @default(1)
   // Soft delete
-  deletedAt      DateTime? @map("deleted_at")
-  deletedById    String?   @map("deleted_by_id")
-  createdAt      DateTime     @default(now()) @map("created_at")
-  updatedAt      DateTime     @updatedAt @map("updated_at")
+  deletedAt        DateTime?         @map("deleted_at")
+  deletedById      String?           @map("deleted_by_id")
+  createdAt        DateTime          @default(now()) @map("created_at")
+  updatedAt        DateTime          @updatedAt @map("updated_at")
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  task         Task?        @relation(fields: [taskId], references: [id], onDelete: SetNull)
-  comment      Comment?     @relation(fields: [commentId], references: [id], onDelete: SetNull)
-  message      Message?     @relation(fields: [messageId], references: [id], onDelete: SetNull)
-  project      Project?     @relation("ProjectDocuments", fields: [projectId], references: [id], onDelete: Cascade)
-  client       Client?      @relation("ClientFiles", fields: [clientId], references: [id], onDelete: Cascade)
-  uploadedBy   User         @relation(fields: [uploadedById], references: [id])
-  alcanceProject Project?   @relation("ProjectAlcanceFile")
-  parentFile     File?      @relation("FileVersions", fields: [parentFileId], references: [id], onDelete: SetNull)
-  versions       File[]     @relation("FileVersions")
-  deletedBy      User?      @relation("FileDeletedBy", fields: [deletedById], references: [id], onDelete: SetNull)
+  organization   Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  task           Task?               @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  comment        Comment?            @relation(fields: [commentId], references: [id], onDelete: SetNull)
+  message        Message?            @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  project        Project?            @relation("ProjectDocuments", fields: [projectId], references: [id], onDelete: Cascade)
+  client         Client?             @relation("ClientFiles", fields: [clientId], references: [id], onDelete: Cascade)
+  uploadedBy     User                @relation(fields: [uploadedById], references: [id])
+  alcanceProject Project?            @relation("ProjectAlcanceFile")
+  parentFile     File?               @relation("FileVersions", fields: [parentFileId], references: [id], onDelete: SetNull)
+  versions       File[]              @relation("FileVersions")
+  deletedBy      User?               @relation("FileDeletedBy", fields: [deletedById], references: [id], onDelete: SetNull)
   downloadEvents FileDownloadEvent[]
 
   @@index([organizationId])
@@ -1046,34 +1048,35 @@ model AuditLog {
 // ============================================================================
 
 model Client {
-  id              String   @id @default(cuid())
-  organizationId  String   @map("organization_id")
-  name            String
-  email           String?
-  phone           String?
-  notes           String?
-  userId          String?  @unique @map("user_id")
-  status          ClientStatus @default(ACTIVE)
-  portalEnabled   Boolean  @default(false) @map("portal_enabled")
-  portalBillingEnabled Boolean @default(false) @map("portal_billing_enabled")
-  contractedHours Float    @default(0) @map("contracted_hours")
-  usedHours       Float    @default(0) @map("used_hours")
-  loanedHours     Float    @default(0) @map("loaned_hours")
-  developmentHourlyRate Decimal? @map("development_hourly_rate") @db.Decimal(12, 2)
-  supportHourlyRate     Decimal? @map("support_hourly_rate")     @db.Decimal(12, 2)
-  currency        String   @default("PYG")
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @updatedAt @map("updated_at")
+  id                    String       @id @default(cuid())
+  organizationId        String       @map("organization_id")
+  name                  String
+  email                 String?
+  phone                 String?
+  notes                 String?
+  userId                String?      @unique @map("user_id")
+  status                ClientStatus @default(ACTIVE)
+  portalEnabled         Boolean      @default(false) @map("portal_enabled")
+  portalBillingEnabled  Boolean      @default(false) @map("portal_billing_enabled")
+  contractedHours       Float        @default(0) @map("contracted_hours")
+  usedHours             Float        @default(0) @map("used_hours")
+  loanedHours           Float        @default(0) @map("loaned_hours")
+  developmentHourlyRate Decimal?     @map("development_hourly_rate") @db.Decimal(12, 2)
+  supportHourlyRate     Decimal?     @map("support_hourly_rate") @db.Decimal(12, 2)
+  currency              String       @default("PYG")
+  createdAt             DateTime     @default(now()) @map("created_at")
+  updatedAt             DateTime     @updatedAt @map("updated_at")
 
-  organization      Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  user              User?              @relation("ClientOwner", fields: [userId], references: [id], onDelete: SetNull)
-  users             User[]             @relation("ClientUsers")
+  organization      Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user              User?                @relation("ClientOwner", fields: [userId], references: [id], onDelete: SetNull)
+  users             User[]               @relation("ClientUsers")
   projects          Project[]
   suggestions       Suggestion[]
   tickets           Ticket[]
   hoursTransactions HoursTransaction[]
   billingCycles     ClientBillingCycle[]
-  files             File[]             @relation("ClientFiles")
+  creditNotes       CreditNote[]
+  files             File[]               @relation("ClientFiles")
 
   @@index([organizationId])
   @@index([organizationId, status])
@@ -1090,7 +1093,7 @@ model BudgetItem {
   description String
   category    String?
   hours       Decimal  @default(0) @db.Decimal(10, 2)
-  hourlyRate  Decimal  @default(0) @db.Decimal(15, 0) @map("hourly_rate")
+  hourlyRate  Decimal  @default(0) @map("hourly_rate") @db.Decimal(15, 0)
   amount      Decimal  @default(0) @db.Decimal(15, 0)
   order       Int      @default(0)
   createdAt   DateTime @default(now()) @map("created_at")
@@ -1134,7 +1137,7 @@ model Meeting {
   title        String
   description  String?
   date         DateTime
-  endDate      DateTime?  @map("end_date")
+  endDate      DateTime? @map("end_date")
   location     String?
   notifyClient Boolean   @default(false) @map("notify_client")
   createdById  String    @map("created_by_id")
@@ -1192,16 +1195,16 @@ model Ticket {
   // Integracion Onnix (feature #13): code externo (TK-...) devuelto por Onnix
   // al replicar el ticket via outbox. Aditivo, nullable, sin FK. NO se sincroniza
   // de vuelta — es solo referencia para UI/debug.
-  onnixCode      String?            @map("onnix_code")
+  onnixCode String? @map("onnix_code")
 
   // Ticket relacionado (feature #11): self-relation nullable para trazabilidad
   // de follow-ups. Cuando un ticket queda RESOLVED (terminal) el cliente crea una
   // "nueva consulta" enlazada al anterior via relatedTicketId. ON DELETE SET NULL
   // para que borrar el ticket padre no rompa el follow-up. SQL aditivo (NO migrate).
-  relatedTicketId String?           @map("related_ticket_id")
+  relatedTicketId String? @map("related_ticket_id")
 
-  createdAt      DateTime           @default(now()) @map("created_at")
-  updatedAt      DateTime           @updatedAt @map("updated_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   organization   Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   project        Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
@@ -1215,6 +1218,7 @@ model Ticket {
   followUps      Ticket[]              @relation("TicketFollowUp")
   events         TicketEvent[]
 
+  @@unique([organizationId, ticketNumber])
   @@index([organizationId])
   @@index([projectId])
   @@index([clientId])
@@ -1225,20 +1229,19 @@ model Ticket {
   @@index([organizationId, status, createdAt(sort: Desc)])
   @@index([closedAt])
   @@index([relatedTicketId])
-  @@unique([organizationId, ticketNumber])
   @@map("tickets")
 }
 
 model TicketEvent {
-  id          String              @id @default(cuid())
-  ticketId    String              @map("ticket_id")
-  type        TicketEventType
-  fromValue   String?             @map("from_value")
-  toValue     String?             @map("to_value")
-  source      TicketEventSource   @default(TICKET)
-  metadata    Json?
-  userId      String?             @map("user_id")
-  createdAt   DateTime            @default(now()) @map("created_at")
+  id        String            @id @default(cuid())
+  ticketId  String            @map("ticket_id")
+  type      TicketEventType
+  fromValue String?           @map("from_value")
+  toValue   String?           @map("to_value")
+  source    TicketEventSource @default(TICKET)
+  metadata  Json?
+  userId    String?           @map("user_id")
+  createdAt DateTime          @default(now()) @map("created_at")
 
   ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
   user   User?  @relation("TicketEventActor", fields: [userId], references: [id], onDelete: SetNull)
@@ -1254,14 +1257,14 @@ model TicketEvent {
 // ============================================================================
 
 model TicketCategoryConfig {
-  id             String   @id @default(cuid())
-  organizationId String   @map("organization_id")
+  id             String            @id @default(cuid())
+  organizationId String            @map("organization_id")
   name           String
   description    String?
   criticality    TicketCriticality @default(MEDIUM)
-  isActive       Boolean  @default(true) @map("is_active")
-  createdAt      DateTime @default(now()) @map("created_at")
-  updatedAt      DateTime @updatedAt @map("updated_at")
+  isActive       Boolean           @default(true) @map("is_active")
+  createdAt      DateTime          @default(now()) @map("created_at")
+  updatedAt      DateTime          @updatedAt @map("updated_at")
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   tickets      Ticket[]
@@ -1316,22 +1319,22 @@ model Holiday {
 // ============================================================================
 
 model HoursTransaction {
-  id           String    @id @default(cuid())
-  clientId     String    @map("client_id")
-  type         String    // USAGE | LOAN | PURCHASE | REFUND | INTERNAL
-  hours        Float
-  taskId       String?   @map("task_id")
-  note         String?
+  id       String  @id @default(cuid())
+  clientId String  @map("client_id")
+  type     String // USAGE | LOAN | PURCHASE | REFUND | INTERNAL
+  hours    Float
+  taskId   String? @map("task_id")
+  note     String?
 
   // ── H2: clave de idempotencia del ledger (aditivas, nullable) ──
   // El único parcial (WHERE time_entry_id IS NOT NULL) va a mano en el migration.sql:
   // Prisma 5.x no expresa índices parciales. NO declarar @@unique acá.
-  timeEntryId  String?   @map("time_entry_id")
-  entryVersion Int?      @map("entry_version")
+  timeEntryId  String? @map("time_entry_id")
+  entryVersion Int?    @map("entry_version")
 
   // Snapshot de precio al momento del descuento (Fase Precio Hora)
-  priceAmount   Decimal? @map("price_amount")   @db.Decimal(15, 2)
-  priceRate     Decimal? @map("price_rate")     @db.Decimal(12, 2)
+  priceAmount   Decimal? @map("price_amount") @db.Decimal(15, 2)
+  priceRate     Decimal? @map("price_rate") @db.Decimal(12, 2)
   priceCurrency String?  @map("price_currency")
 
   // ── H8a: eje de facturación. Fecha REAL de trabajo, denormalizada del TimeEntry
@@ -1339,7 +1342,7 @@ model HoursTransaction {
   //    mismo tipo/estilo que TimeEntry.workedOn (schema.prisma:736).
   //    USAGE/LOAN/INTERNAL: siempre poblada (opts.workedOn ?? now()).
   //    PURCHASE: null (compra sin día trabajado). REFUND: workedOn del cobro original. ──
-  workedOn     DateTime? @map("worked_on") @db.Date
+  workedOn DateTime? @map("worked_on") @db.Date
 
   createdAt    DateTime  @default(now()) @map("created_at")
   deletedAt    DateTime? @map("deleted_at")
@@ -1355,12 +1358,18 @@ model HoursTransaction {
   //    migration.sql — Prisma 5.x no expresa índices parciales (patrón H2). NO declarar @@unique. ──
   reversesTransactionId String? @map("reverses_transaction_id")
 
-  client      Client              @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  task        Task?               @relation(fields: [taskId], references: [id], onDelete: SetNull)
-  deletedBy   User?               @relation("HoursDeletedBy", fields: [deletedById], references: [id], onDelete: SetNull)
-  billedCycle ClientBillingCycle? @relation("BilledCycle", fields: [billedCycleId], references: [id], onDelete: SetNull)
-  reverses    HoursTransaction?  @relation("HoursReversal", fields: [reversesTransactionId], references: [id], onDelete: SetNull)
-  reversedBy  HoursTransaction[] @relation("HoursReversal")
+  // H9b: marca la FILA ESPEJO (re-facturable creada por una NC-con-devolución) y su linaje al original.
+  rebilledFromTransactionId String? @map("rebilled_from_transaction_id")
+
+  client         Client              @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  task           Task?               @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  deletedBy      User?               @relation("HoursDeletedBy", fields: [deletedById], references: [id], onDelete: SetNull)
+  billedCycle    ClientBillingCycle? @relation("BilledCycle", fields: [billedCycleId], references: [id], onDelete: SetNull)
+  reverses       HoursTransaction?   @relation("HoursReversal", fields: [reversesTransactionId], references: [id], onDelete: SetNull)
+  reversedBy     HoursTransaction[]  @relation("HoursReversal")
+  rebilledFrom   HoursTransaction?   @relation("HoursRebill", fields: [rebilledFromTransactionId], references: [id], onDelete: SetNull)
+  rebilledTo     HoursTransaction[]  @relation("HoursRebill")
+  creditedByLine CreditNoteLine?     @relation("CreditedLine")
 
   @@index([clientId])
   @@index([taskId])
@@ -1370,6 +1379,7 @@ model HoursTransaction {
   @@index([clientId, billedCycleId])
   @@index([workedOn]) // H8a: H8b filtra/ordena el conjunto facturable por este eje
   @@index([reversesTransactionId])
+  @@index([rebilledFromTransactionId])
   @@map("hours_transactions")
 }
 
@@ -1412,12 +1422,67 @@ model ClientBillingCycle {
   closedBy           User?              @relation("CycleClosedBy", fields: [closedById], references: [id], onDelete: SetNull)
   cancelledBy        User?              @relation("CycleCancelledBy", fields: [cancelledById], references: [id], onDelete: SetNull)
   billedTransactions HoursTransaction[] @relation("BilledCycle")
+  creditNotes        CreditNote[]       @relation("CycleCreditNotes")
 
   // Numeración POR-ORG (§6.1): sin @unique inline sobre invoice_number; secuencia por org.
   @@unique([organizationId, invoiceNumber])
   @@index([organizationId])
   @@index([clientId, periodStart])
   @@map("client_billing_cycles")
+}
+
+// ============================================================================
+// CREDIT NOTES (Nota de crédito — feature H9b)
+// ============================================================================
+// Documento propio (append-only): acredita líneas de una factura SENT/PAID sin
+// mutar el snapshot original. Convención de signo: CreditNoteLine guarda magnitudes
+// POSITIVAS (snapshot fiel); CreditNote.total* guarda NEGATIVO (efecto neto).
+
+model CreditNote {
+  id                    String   @id @default(cuid())
+  organizationId        String   @map("organization_id")
+  clientId              String   @map("client_id")
+  appliesToCycleId      String   @map("applies_to_cycle_id")
+  number                String
+  reason                String
+  returnHoursToBillable Boolean  @default(true) @map("return_hours_to_billable")
+  totalAmount           Decimal  @default(0) @map("total_amount") @db.Decimal(15, 2) // NEGATIVO (efecto neto)
+  totalHours            Float    @default(0) @map("total_hours") // NEGATIVO
+  currency              String
+  issuedById            String?  @map("issued_by_id")
+  issuedAt              DateTime @default(now()) @map("issued_at")
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+
+  organization Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client       Client             @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  appliesTo    ClientBillingCycle @relation("CycleCreditNotes", fields: [appliesToCycleId], references: [id], onDelete: Restrict)
+  issuedBy     User?              @relation("CreditNoteIssuedBy", fields: [issuedById], references: [id], onDelete: SetNull)
+  lines        CreditNoteLine[]
+
+  @@unique([organizationId, number])
+  @@index([appliesToCycleId])
+  @@index([clientId])
+  @@index([organizationId])
+  @@map("credit_notes")
+}
+
+model CreditNoteLine {
+  id                    String    @id @default(cuid())
+  creditNoteId          String    @map("credit_note_id")
+  creditedTransactionId String    @unique @map("credited_transaction_id") // INVARIANTE: una línea no se acredita 2 veces (unique PLANO)
+  hours                 Float
+  priceAmount           Decimal   @db.Decimal(15, 2)
+  priceRate             Decimal?  @db.Decimal(12, 2)
+  priceCurrency         String?
+  workedOn              DateTime? @map("worked_on") @db.Date
+  description           String?
+
+  creditNote CreditNote       @relation(fields: [creditNoteId], references: [id], onDelete: Cascade)
+  credited   HoursTransaction @relation("CreditedLine", fields: [creditedTransactionId], references: [id], onDelete: Restrict)
+
+  @@index([creditNoteId])
+  @@map("credit_note_lines")
 }
 
 // ============================================================================

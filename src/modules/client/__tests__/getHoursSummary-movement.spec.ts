@@ -115,4 +115,14 @@ describe('ClientService — filtro de movimiento en getHoursSummary (F2 #26)', (
       }),
     );
   });
+
+  it('H9b — el aggregate del KPI excluye las filas ESPEJO (rebilledFromTransactionId: null) para no doble-contar', async () => {
+    await service.getHoursSummary(ORG, CLIENT, 1, 20);
+
+    expect(prisma.hoursTransaction.aggregate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ rebilledFromTransactionId: null }),
+      }),
+    );
+  });
 });

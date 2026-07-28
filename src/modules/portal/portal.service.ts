@@ -627,30 +627,61 @@ export class PortalService {
 
   // GATE-1 (dueño, 2026-07-27): el cliente ve SENT + PAID + CANCELLED marcadas "Anulada";
   // NUNCA DRAFT (borradores internos del staff). Ordenadas por período desc.
+  // H9b: además de las FAC, trae las NC del cliente (de facturas que el cliente ve) y devuelve un
+  // shape MERGE { invoices, creditNotes }. Las NC llevan monto NEGATIVO (efecto neto) + docType.
   async getMyInvoices(userId: string) {
     const client = await this.getClientByUserId(userId);
 
-    return this.prisma.clientBillingCycle.findMany({
-      where: {
-        clientId: client.id,
-        status: { in: ['SENT', 'PAID', 'CANCELLED'] },
-      },
-      orderBy: { periodStart: 'desc' },
-      select: {
-        id: true,
-        invoiceNumber: true,
-        kind: true,
-        periodStart: true,
-        periodEnd: true,
-        cutoffDate: true,
-        totalHours: true,
-        totalAmount: true,
-        currency: true,
-        status: true,
-        cancelReason: true,
-        cancelledAt: true,
-      },
-    });
+    const [invoices, creditNotes] = await Promise.all([
+      this.prisma.clientBillingCycle.findMany({
+        where: {
+          clientId: client.id,
+          status: { in: ['SENT', 'PAID', 'CANCELLED'] },
+        },
+        orderBy: { periodStart: 'desc' },
+        select: {
+          id: true,
+          invoiceNumber: true,
+          kind: true,
+          periodStart: true,
+          periodEnd: true,
+          cutoffDate: true,
+          totalHours: true,
+          totalAmount: true,
+          currency: true,
+          status: true,
+          cancelReason: true,
+          cancelledAt: true,
+        },
+      }),
+      this.prisma.creditNote.findMany({
+        where: { clientId: client.id, appliesTo: { status: { in: ['SENT', 'PAID'] } } }, // NC de facturas que el cliente ve
+        orderBy: { issuedAt: 'desc' },
+        select: {
+          id: true,
+          number: true,
+          totalAmount: true,
+          totalHours: true,
+          currency: true,
+          issuedAt: true,
+          appliesTo: { select: { invoiceNumber: true } },
+        },
+      }),
+    ]);
+
+    return {
+      invoices: invoices.map((i) => ({ docType: 'INVOICE' as const, ...i })),
+      creditNotes: creditNotes.map((n) => ({
+        docType: 'CREDIT_NOTE' as const,
+        id: n.id,
+        number: n.number,
+        appliesToInvoiceNumber: n.appliesTo.invoiceNumber,
+        totalAmount: n.totalAmount, // ya negativo
+        totalHours: n.totalHours,
+        currency: n.currency,
+        issuedAt: n.issuedAt,
+      })),
+    };
   }
 
   // Descarga del PDF de UNA factura del cliente. Reusa el generador de H8e
@@ -677,6 +708,22 @@ export class PortalService {
       client.id,
       cycle.id,
     );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', buffer.length.toString());
+    res.send(buffer);
+  }
+
+  // H9b: descarga del PDF de UNA nota de crédito del cliente. Valida ANTES que la NC sea del cliente
+  // del usuario y que la FAC acreditada esté emitida (SENT/PAID) — coherente con downloadMyInvoice.
+  async downloadMyCreditNote(userId: string, creditNoteId: string, res: Response): Promise<void> {
+    const client = await this.getClientByUserId(userId);
+    const nc = await this.prisma.creditNote.findFirst({
+      where: { id: creditNoteId, clientId: client.id, appliesTo: { status: { in: ['SENT', 'PAID'] } } },
+      select: { id: true, organizationId: true },
+    });
+    if (!nc) throw new AppException('Nota de crédito no encontrada', 'CREDIT_NOTE_NOT_FOUND', 404);
+    const { buffer, filename } = await this.pdfService.generateCreditNotePdf(nc.organizationId, client.id, nc.id);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Length', buffer.length.toString());
