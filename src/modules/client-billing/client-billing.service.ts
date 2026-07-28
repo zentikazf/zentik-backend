@@ -82,6 +82,7 @@ export interface CycleTransactionLine {
   hours: number;
   note: string | null;
   priceAmount: string | null;
+  priceRate: string | null; // H8e: tarifa por hora (para el PDF de la factura)
   priceCurrency: string | null;
   task: { id: string; title: string; type: string } | null;
 }
@@ -593,6 +594,7 @@ export class ClientBillingService {
         hours: t.hours,
         note: t.note,
         priceAmount: t.priceAmount != null ? t.priceAmount.toString() : null,
+        priceRate: t.priceRate != null ? t.priceRate.toString() : null, // H8e
         priceCurrency: t.priceCurrency,
         task: t.task ? { id: t.task.id, title: t.task.title, type: t.task.type } : null,
       };

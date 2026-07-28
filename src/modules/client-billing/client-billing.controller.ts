@@ -1,10 +1,12 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Param, Patch, Post, Res, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Response } from 'express';
 import { AuthGuard, PermissionsGuard } from '../auth/guards';
 import { Permissions } from '../../common/decorators/permissions.decorator';
 import { CurrentUser } from '../../common/decorators';
 import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { ClientBillingService } from './client-billing.service';
+import { ClientBillingPdfService } from './client-billing-pdf.service';
 import { CloseCycleDto } from './dto/close-cycle.dto';
 import { PreviewCycleDto } from './dto/preview-cycle.dto';
 import { ReopenCycleDto } from './dto/reopen-cycle.dto';
@@ -15,7 +17,10 @@ import { UpdateCycleDto } from './dto/update-cycle.dto';
 @UseGuards(AuthGuard, PermissionsGuard)
 @Controller('organizations/:orgId/clients/:clientId/billing')
 export class ClientBillingController {
-  constructor(private readonly service: ClientBillingService) {}
+  constructor(
+    private readonly service: ClientBillingService,
+    private readonly pdfService: ClientBillingPdfService,
+  ) {}
 
   @Get('cycles')
   @Permissions('read:billing')
@@ -46,6 +51,25 @@ export class ClientBillingController {
     @Param('cycleId') cycleId: string,
   ) {
     return this.service.getCycleTransactions(orgId, clientId, cycleId);
+  }
+
+  // H8e: descarga del PDF de la factura. Ruta de 3 segmentos (cycles/:cycleId/pdf) → no colisiona
+  // con GET cycles/:period (2 segmentos). `@Res({ passthrough: false })` bypassea el interceptor
+  // global (mismo patrón que el export CSV de tickets, ticket.controller.ts).
+  @Get('cycles/:cycleId/pdf')
+  @Permissions('read:billing')
+  @ApiOperation({ summary: 'Descargar la factura del ciclo como PDF' })
+  async downloadInvoicePdf(
+    @Param('orgId') orgId: string,
+    @Param('clientId') clientId: string,
+    @Param('cycleId') cycleId: string,
+    @Res({ passthrough: false }) res: Response,
+  ): Promise<void> {
+    const { buffer, filename } = await this.pdfService.generateInvoicePdf(orgId, clientId, cycleId);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', buffer.length.toString());
+    res.send(buffer);
   }
 
   // H8d: rutas period-less (el período/meses viajan en el body). Declaradas ANTES de las rutas
