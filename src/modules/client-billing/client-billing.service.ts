@@ -7,6 +7,8 @@ import { AppException } from '../../common/filters/app-exception';
 import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { tzOffsetMinutes } from '../ticket/sla.util';
 import { CloseCycleDto } from './dto/close-cycle.dto';
+import { PreviewCycleDto } from './dto/preview-cycle.dto';
+import { ReopenCycleDto } from './dto/reopen-cycle.dto';
 import { UpdateCycleDto } from './dto/update-cycle.dto';
 
 // Zona del negocio (es-PY). Los bordes del período se computan en esta zona y se
@@ -53,6 +55,7 @@ export interface BillingRowDto {
 export interface CycleDto {
   id: string;
   status: string;
+  kind: string; // H8d: MONTH | ACCUMULATED
   invoiceNumber: string;
   periodStart: Date;
   periodEnd: Date;
@@ -64,6 +67,8 @@ export interface CycleDto {
   closedAt: Date | null;
   sentAt: Date | null;
   paidAt: Date | null;
+  cancelReason: string | null; // H8d/A3: motivo de anulación (keep-data)
+  cancelledAt: Date | null; // H8d/A3: cuándo se anuló
   createdAt: Date;
 }
 
@@ -84,6 +89,39 @@ export interface CycleTransactionLine {
 export interface CycleTransactionsResponse {
   cycle: CycleDto;
   transactions: CycleTransactionLine[];
+  grupos: Array<{ workedMonth: string; label: string; subtotal: string; horas: number }>; // H8d: desglose por mes
+}
+
+// H8d: modo del motor. MES = un mes nominal (comportamiento mono-mes previo). ACUMULADO = varios
+// meses ELEGIDOS a mano (A1) barridos en una sola factura, sin gate de mes cerrado.
+type FacturableMode = 'MES' | 'ACUMULADO';
+
+// Fila cruda del candidato facturable (con Decimal), para agrupar/subtotalizar en el preview.
+interface FacturableRawRow {
+  id: string;
+  type: string;
+  hours: number;
+  note: string | null;
+  createdAt: Date;
+  workedOn: Date | null;
+  priceAmount: Prisma.Decimal | null;
+  priceRate: Prisma.Decimal | null;
+  priceCurrency: string | null;
+  task: { id: string; title: string; type: string } | null;
+}
+
+// Resultado de la fase read+compute compartida por preview (dry-run) y emisión (closeCycle).
+interface ComputeFacturableResult {
+  facturableIds: string[];
+  rows: FacturableRawRow[]; // filas incluidas (post inScope), con workedOn no-null garantizado
+  periodStart: Date; // borde inferior (mes nominal en MES; 1º del mes más viejo con filas en ACUMULADO)
+  periodEnd: Date; // borde nominal superior (= cutoffDate)
+  cutoffDate: Date; // instante efectivo del corte (= until)
+  currency: string;
+  bloqueos: {
+    sinTarifaRate: boolean; // SUPPORT_RATE_NOT_CONFIGURED anticipado (flag, no lanza)
+    sinFechaTrabajo: { count: number; ids: string[] }; // BILLABLE_WITHOUT_WORKED_ON anticipado
+  };
 }
 
 @Injectable()
@@ -290,6 +328,7 @@ export class ClientBillingService {
   private toCycleDto(c: {
     id: string;
     status: string;
+    kind: string;
     invoiceNumber: string;
     periodStart: Date;
     periodEnd: Date;
@@ -301,11 +340,14 @@ export class ClientBillingService {
     closedAt: Date | null;
     sentAt: Date | null;
     paidAt: Date | null;
+    cancelReason: string | null;
+    cancelledAt: Date | null;
     createdAt: Date;
   }): CycleDto {
     return {
       id: c.id,
       status: c.status,
+      kind: c.kind,
       invoiceNumber: c.invoiceNumber,
       periodStart: c.periodStart,
       periodEnd: c.periodEnd,
@@ -317,8 +359,20 @@ export class ClientBillingService {
       closedAt: c.closedAt,
       sentAt: c.sentAt,
       paidAt: c.paidAt,
+      cancelReason: c.cancelReason,
+      cancelledAt: c.cancelledAt,
       createdAt: c.createdAt,
     };
+  }
+
+  /** H8d: etiqueta de mes es-PY 'YYYY-MM' → 'Abril 2026' (header de grupo del preview). */
+  private monthLabel(period: string): string {
+    const [y, m] = period.split('-').map(Number);
+    if (!y || !m) return period;
+    const label = new Intl.DateTimeFormat('es-PY', { month: 'long', year: 'numeric' }).format(
+      new Date(Date.UTC(y, m - 1, 15)),
+    );
+    return label.charAt(0).toUpperCase() + label.slice(1);
   }
 
   // ── Lecturas (T5, T6) ──────────────────────────────────────────────────
@@ -481,10 +535,13 @@ export class ClientBillingService {
         estado = 'EN_CURSO';
       } else if (!b.hasFacturable) {
         estado = 'SIN_TRABAJO';
-      } else if (activeCycles.length > 0 && hasRemainder) {
-        estado = 'FACTURADO_PARCIAL';
-      } else if (activeCycles.length > 0) {
+      } else if (!hasRemainder) {
+        // H8d: sin remanente = todo lo facturable del mes ya está estampado, venga de un ciclo mensual
+        //   o de una factura ACUMULADA que barrió este mes (bucketeada bajo su mes más viejo, no acá).
+        //   Antes esto exigía activeCycles>0 y dejaba mayo/junio de una acumulada como "No facturado Gs 0".
         estado = 'FACTURADO';
+      } else if (activeCycles.length > 0) {
+        estado = 'FACTURADO_PARCIAL';
       } else {
         estado = 'NO_FACTURADO';
       }
@@ -524,60 +581,118 @@ export class ClientBillingService {
 
     const cyclePeriod = this.asuncionPeriodKey(cycle.periodStart); // H8b: período nominal del ciclo
 
+    const lines = transactions.map((t) => {
+      const workedMonth = t.workedOn ? this.workedMonthKey(t.workedOn) : null;
+      return {
+        id: t.id,
+        createdAt: t.createdAt,
+        workedOn: t.workedOn,
+        workedMonth,
+        atrasada: workedMonth != null && workedMonth < cyclePeriod, // H8b: pertenece a un mes anterior al del ciclo
+        type: t.type,
+        hours: t.hours,
+        note: t.note,
+        priceAmount: t.priceAmount != null ? t.priceAmount.toString() : null,
+        priceCurrency: t.priceCurrency,
+        task: t.task ? { id: t.task.id, title: t.task.title, type: t.task.type } : null,
+      };
+    });
+
+    // H8d: desglose por mes-de-trabajo (subtotales Decimal → string en el BACKEND; nunca aritmética en el
+    // cliente). Útil sobre todo en facturas ACUMULADAS que cruzan varios meses.
+    const bucket = new Map<string, { subtotal: Prisma.Decimal; horas: number }>();
+    for (const t of transactions) {
+      const key = t.workedOn ? this.workedMonthKey(t.workedOn) : 'sin-fecha';
+      const b = bucket.get(key) ?? { subtotal: new Prisma.Decimal(0), horas: 0 };
+      b.subtotal = b.subtotal.plus(t.priceAmount ?? 0);
+      b.horas += t.hours ?? 0;
+      bucket.set(key, b);
+    }
+    const grupos = [...bucket.entries()]
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([workedMonth, b]) => ({
+        workedMonth,
+        label: workedMonth === 'sin-fecha' ? 'Sin fecha' : this.monthLabel(workedMonth),
+        subtotal: b.subtotal.toString(),
+        horas: b.horas,
+      }));
+
     return {
       cycle: this.toCycleDto(cycle),
-      transactions: transactions.map((t) => {
-        const workedMonth = t.workedOn ? this.workedMonthKey(t.workedOn) : null;
-        return {
-          id: t.id,
-          createdAt: t.createdAt,
-          workedOn: t.workedOn,
-          workedMonth,
-          atrasada: workedMonth != null && workedMonth < cyclePeriod, // H8b: pertenece a un mes anterior al del ciclo
-          type: t.type,
-          hours: t.hours,
-          note: t.note,
-          priceAmount: t.priceAmount != null ? t.priceAmount.toString() : null,
-          priceCurrency: t.priceCurrency,
-          task: t.task ? { id: t.task.id, title: t.task.title, type: t.task.type } : null,
-        };
-      }),
+      transactions: lines,
+      grupos,
     };
   }
 
   // ── Mutaciones (T7, T8) ────────────────────────────────────────────────
 
   /**
-   * R4/R5/R6/R11/R12/R14: cierra el período. Read+compute FUERA del tx; writes acoplados
-   * DENTRO (create ciclo → estampa por lista de ids → snapshot Decimal); audit DESPUÉS.
-   * Retry P2002 del invoice_number POR FUERA del tx (§1.1/§1.3).
+   * H8d Capa 0: fase read+compute COMPARTIDA por el preview (dry-run) y la emisión (closeCycle), para
+   * que NUNCA diverjan (el preview no puede mentir respecto de lo que se estampa). En modo MES conserva
+   * EXACTAMENTE el arrastre 2A-acotado previo (mismas queries, mismo orden). En ACUMULADO (A1) barre el
+   * trabajo no facturado de los MESES ELEGIDOS a mano, sin gate de mes cerrado. Devuelve los bloqueos
+   * como data (flags): el caller decide si lanza (closeCycle) o los expone (preview).
    */
-  async closeCycle(orgId: string, clientId: string, period: string, dto: CloseCycleDto, user: AuthenticatedUser) {
+  private async computeFacturable(
+    orgId: string,
+    clientId: string,
+    opts: { mode: FacturableMode; period?: string; months?: string[]; until?: string },
+  ): Promise<ComputeFacturableResult> {
     const client = await this.assertClient(orgId, clientId);
-    const { periodStart, periodEnd } = this.parsePeriod(period);
 
-    let until = periodEnd;
-    if (dto.until) {
-      until = new Date(dto.until);
-      if (until < periodStart || until > periodEnd) {
-        throw new AppException('La fecha de corte está fuera del período', 'INVALID_UNTIL', 400, {
-          until: dto.until,
-          period,
-        });
+    let periodStart: Date;
+    let periodEnd: Date;
+    let until: Date;
+    let inScope: (w: Date | null) => boolean;
+
+    if (opts.mode === 'MES') {
+      if (!opts.period) {
+        throw new AppException('Falta el período a facturar', 'PERIOD_REQUIRED', 400);
       }
+      const period = opts.period;
+      ({ periodStart, periodEnd } = this.parsePeriod(period));
+      until = periodEnd;
+      if (opts.until) {
+        until = new Date(opts.until);
+        if (until < periodStart || until > periodEnd) {
+          throw new AppException('La fecha de corte está fuera del período', 'INVALID_UNTIL', 400, {
+            until: opts.until,
+            period,
+          });
+        }
+      }
+      // Arrastre 2A-acotado (idéntico al mono-mes previo): on-time del mes o atrasada de un mes YA cerrado.
+      const closedMonthKeys = await this.getClosedMonthKeys(orgId, clientId);
+      inScope = (w: Date | null): boolean =>
+        !!w && (this.workedMonthKey(w) === period || closedMonthKeys.has(this.workedMonthKey(w)));
+    } else {
+      // ACUMULADO (A1): se factura el trabajo no facturado de los MESES ELEGIDOS a mano.
+      if (!opts.months || opts.months.length === 0) {
+        throw new AppException('Elegí al menos un mes para la factura acumulada', 'MONTHS_REQUIRED', 400);
+      }
+      for (const m of opts.months) {
+        if (!/^\d{4}-\d{2}$/.test(m)) {
+          throw new AppException('Mes inválido en la selección (formato YYYY-MM)', 'INVALID_PERIOD', 400, { month: m });
+        }
+      }
+      const monthSet = new Set(opts.months);
+      const sortedMonths = [...opts.months].sort();
+      const oldestMonth = sortedMonths[0];
+      const latestMonth = sortedMonths[sortedMonths.length - 1];
+      // Bordes nominales del rango elegido; periodStart se refina al mes más viejo con filas reales (A4).
+      periodStart = this.parsePeriod(oldestMonth).periodStart;
+      const latestEnd = this.parsePeriod(latestMonth).periodEnd;
+      // Corte parcial libre dentro de los meses elegidos (A7); default = fin del mes más nuevo elegido.
+      until = opts.until ? new Date(opts.until) : latestEnd;
+      if (until > latestEnd) until = latestEnd; // no barrer más allá de los meses seleccionados
+      periodEnd = until;
+      // Sin gate closedMonthKeys: entra TODO lo no facturado de los meses elegidos (cerrados o nunca cerrados).
+      inScope = (w: Date | null): boolean => !!w && monthSet.has(this.workedMonthKey(w));
     }
 
     const untilDate = this.asuncionDateOnly(until);
-    const closedMonthKeys = await this.getClosedMonthKeys(orgId, clientId);
-    // Arrastre 2A-acotado: una fila entra al cierre de P si es on-time (workedMonth == period) o
-    // atrasada de un mes YA cerrado. Meses nunca cerrados NO se barren.
-    const inScope = (w: Date | null): boolean =>
-      !!w && (this.workedMonthKey(w) === period || closedMonthKeys.has(this.workedMonthKey(w)));
 
-    // Guard R11 (SUPPORT sin tarifar) — ACOTADO al facturable-al-cerrar-P (findMany + filtro de mes),
-    // conservando el borde superior workedOn ≤ untilDate (en corte parcial no cuenta trabajo posterior
-    // al corte, aunque sea del mes). Antes contaba todo ≤ until sin filtro de mes → una fila de un mes
-    // nunca cerrado bloqueaba todos los cierres.
+    // Guard R11 (SUPPORT sin tarifar) como FLAG — no lanza acá; closeCycle lo re-evalúa y lanza (§3.3).
     const sinTarifaRows = await this.prisma.hoursTransaction.findMany({
       where: {
         clientId, deletedAt: null, billedCycleId: null,
@@ -586,19 +701,9 @@ export class ClientBillingService {
       },
       select: { workedOn: true },
     });
-    const sinTarifa = sinTarifaRows.filter((r) => inScope(r.workedOn)).length;
-    if (sinTarifa > 0) {
-      throw new AppException(
-        'El cliente no tiene tarifa de soporte configurada para horas sin tarifar',
-        'SUPPORT_RATE_NOT_CONFIGURED',
-        409,
-        { sinTarifa },
-      );
-    }
+    const sinTarifaRate = sinTarifaRows.some((r) => inScope(r.workedOn));
 
-    // Guard de integridad (H8b): SUPPORT billable CON precio, sin estampar y workedOn NULL = plata
-    // invisible (nunca matchearía el rango de workedOn → se perdería en silencio). No facturar a ciegas:
-    // 409 con los ids para corregir el dato antes de cerrar. Con datos sanos (H8a: worked_on NULL=0) no dispara.
+    // Guard integridad (SUPPORT priced con workedOn NULL) como FLAG — global (un null no se atribuye a un mes).
     const sinFecha = await this.prisma.hoursTransaction.findMany({
       where: {
         clientId, deletedAt: null, billedCycleId: null,
@@ -607,22 +712,140 @@ export class ClientBillingService {
       },
       select: { id: true },
     });
-    if (sinFecha.length > 0) {
+
+    // Candidatos: buildFacturableWhere trae todo ≤ untilDate sin estampar; inScope acota el borde inferior.
+    const candidatos = await this.prisma.hoursTransaction.findMany({
+      where: this.buildFacturableWhere(clientId, untilDate),
+      select: {
+        id: true, type: true, hours: true, note: true, createdAt: true, workedOn: true,
+        priceAmount: true, priceRate: true, priceCurrency: true,
+        task: { select: { id: true, title: true, type: true } },
+      },
+      orderBy: { workedOn: 'asc' },
+    });
+    const rows = candidatos.filter((r) => inScope(r.workedOn));
+    const facturableIds = rows.map((r) => r.id);
+
+    // A4: en acumulado, periodStart = 1º del mes más viejo REALMENTE incluido en el set (no un rango teórico).
+    if (opts.mode === 'ACUMULADO' && rows.length > 0) {
+      const oldestWorked = rows.reduce<Date>(
+        (min, r) => (r.workedOn! < min ? r.workedOn! : min),
+        rows[0].workedOn!,
+      );
+      periodStart = this.parsePeriod(this.workedMonthKey(oldestWorked)).periodStart;
+    }
+
+    return {
+      facturableIds,
+      rows,
+      periodStart,
+      periodEnd,
+      cutoffDate: until,
+      currency: client.currency,
+      bloqueos: {
+        sinTarifaRate,
+        sinFechaTrabajo: { count: sinFecha.length, ids: sinFecha.map((r) => r.id) },
+      },
+    };
+  }
+
+  /**
+   * H8d Capa 1: PREVIEW dry-run. computeFacturable + agrupación por mes-de-trabajo (workedMonth);
+   * subtotales/total calculados en BACKEND con Decimal → string (nunca aritmética en el cliente).
+   * CERO escrituras. Los bloqueos se exponen como flags accionables (no llegan como sorpresa post-submit).
+   * No predice invoiceNumber (se numera dentro del tx de emisión).
+   */
+  async previewCycle(orgId: string, clientId: string, dto: PreviewCycleDto) {
+    const mode: FacturableMode = dto.mode ?? 'MES';
+    const comp = await this.computeFacturable(orgId, clientId, {
+      mode, period: dto.period, months: dto.months, until: dto.until,
+    });
+
+    // Agrupación por workedMonth (Map<string,Bucket>, patrón idéntico a listCycles).
+    const buckets = new Map<string, { rows: FacturableRawRow[]; subtotal: Prisma.Decimal; horas: number }>();
+    for (const r of comp.rows) {
+      const key = this.workedMonthKey(r.workedOn!); // rows garantizan workedOn no-null (inScope)
+      const b = buckets.get(key) ?? { rows: [], subtotal: new Prisma.Decimal(0), horas: 0 };
+      b.rows.push(r);
+      b.subtotal = b.subtotal.plus(r.priceAmount ?? 0);
+      b.horas += r.hours ?? 0;
+      buckets.set(key, b);
+    }
+
+    const grupos = [...buckets.entries()]
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)) // cronológico ascendente: abril, mayo, junio…
+      .map(([workedMonth, b]) => ({
+        workedMonth,
+        label: this.monthLabel(workedMonth),
+        rows: b.rows.map((r) =>
+          this.toRowDto(r, {
+            billable: r.priceAmount != null,
+            fueraCupo: r.type === 'LOAN',
+            sinTarifa: r.priceAmount == null,
+            atrasada: false,
+          }),
+        ),
+        subtotalMes: b.subtotal.toString(),
+        horasMes: b.horas,
+      }));
+
+    const total = grupos.reduce((acc, g) => acc.plus(g.subtotalMes), new Prisma.Decimal(0)).toString();
+
+    const puedeEmitir =
+      comp.facturableIds.length > 0 &&
+      !comp.bloqueos.sinTarifaRate &&
+      comp.bloqueos.sinFechaTrabajo.count === 0;
+
+    const issueYear = this.asuncionYear(new Date());
+
+    return {
+      mode,
+      periodStart: comp.periodStart,
+      periodEnd: comp.periodEnd,
+      cutoffDate: comp.cutoffDate,
+      grupos,
+      total,
+      currency: comp.currency,
+      bloqueos: comp.bloqueos,
+      puedeEmitir,
+      motivo: comp.facturableIds.length === 0 ? 'NOTHING_TO_BILL' : null, // empty state anticipado
+      nextInvoiceHint: `FAC-${issueYear}-…`,
+    };
+  }
+
+  /**
+   * H8d Capa 2 (R4/R5/R6/R11/R12/R14): emite la factura (MES o ACUMULADO). Read+compute compartido
+   * FUERA del tx (computeFacturable); writes acoplados DENTRO (create ciclo → estampa por lista de ids →
+   * snapshot Decimal); audit DESPUÉS. Retry P2002 del invoice_number POR FUERA del tx (§1.1/§1.3).
+   * `period` posicional = mes nominal del modo MES (viaja por path en la ruta legacy :period/close).
+   */
+  async closeCycle(orgId: string, clientId: string, period: string, dto: CloseCycleDto, user: AuthenticatedUser) {
+    const mode: FacturableMode = dto.mode ?? 'MES';
+    const comp = await this.computeFacturable(orgId, clientId, {
+      mode, period, months: dto.months, until: dto.until,
+    });
+
+    // Defensa en profundidad: los flags que el preview solo exponía, acá SÍ lanzan (por si el estado cambió
+    // entre preview y emit). Orden idéntico al previo: primero tarifa, después fecha de trabajo.
+    if (comp.bloqueos.sinTarifaRate) {
+      throw new AppException(
+        'El cliente no tiene tarifa de soporte configurada para horas sin tarifar',
+        'SUPPORT_RATE_NOT_CONFIGURED',
+        409,
+      );
+    }
+    if (comp.bloqueos.sinFechaTrabajo.count > 0) {
       throw new AppException(
         'Hay movimientos facturables sin fecha de trabajo; corregí el dato antes de facturar',
         'BILLABLE_WITHOUT_WORKED_ON',
         409,
-        { ids: sinFecha.map((r) => r.id) },
+        { ids: comp.bloqueos.sinFechaTrabajo.ids },
       );
     }
 
-    // Resolve-ids-then-stamp (§1.2) con arrastre acotado: candidatos SUPPORT priced con workedOn ≤ untilDate,
-    // filtrados en JS por el mes (on-time + atrasadas de meses cerrados). Se estampa por lista de ids + candado.
-    const candidatos = await this.prisma.hoursTransaction.findMany({
-      where: this.buildFacturableWhere(clientId, untilDate),
-      select: { id: true, workedOn: true },
-    });
-    const facturableIds = candidatos.filter((r) => inScope(r.workedOn)).map((r) => r.id);
+    const kind = mode === 'ACUMULADO' ? 'ACCUMULATED' : 'MONTH';
+    const facturableIds = comp.facturableIds;
+    const scopeLabel = mode === 'ACUMULADO' ? (dto.months ?? []).join(',') : period;
 
     const issueYear = this.asuncionYear(new Date());
     const yearStart = this.asuncionInstant(issueYear, 0, 1, 0, 0, 0, 0);
@@ -634,7 +857,8 @@ export class ClientBillingService {
       try {
         result = await this.prisma.$transaction(
           async (tx) => {
-            // Numeración POR-ORG, status-agnóstica, año de emisión (§6.1).
+            // Numeración POR-ORG, status-agnóstica, año de emisión (§6.1). Se mantiene tal cual (A3):
+            // la anulada CONSUME su número (fiscalmente correcto es-PY); ningún número se reutiliza.
             const count = await tx.clientBillingCycle.count({
               where: { organizationId: orgId, createdAt: { gte: yearStart, lt: yearEnd } },
             });
@@ -644,12 +868,13 @@ export class ClientBillingService {
               data: {
                 organizationId: orgId,
                 clientId,
-                periodStart,
-                periodEnd,
-                cutoffDate: until, // H8b: instante efectivo del corte (= periodEnd si mes completo)
+                kind, // H8d: MONTH | ACCUMULATED
+                periodStart: comp.periodStart, // ACUMULADO: 1º del mes más viejo realmente incluido
+                periodEnd: comp.periodEnd,
+                cutoffDate: comp.cutoffDate, // instante efectivo del corte (= periodEnd si completo)
                 status: 'DRAFT',
                 invoiceNumber,
-                currency: client.currency,
+                currency: comp.currency,
                 notes: dto.notes ?? null,
               },
             });
@@ -704,36 +929,47 @@ export class ClientBillingService {
       newData: {
         cycleId: result.cycleId,
         invoiceNumber: result.invoiceNumber,
-        period,
+        mode,
+        kind,
+        period: mode === 'MES' ? period : null,
+        months: mode === 'ACUMULADO' ? (dto.months ?? null) : null,
         totalAmount: result.totalAmount.toString(),
         totalHours: result.totalHours,
-        currency: client.currency,
+        currency: comp.currency,
         movementCount: result.movementCount,
       },
     });
 
     this.logger.log(
-      `Cerrado ciclo ${result.cycleId} (${result.invoiceNumber}) cliente ${clientId}: ` +
-        `${result.movementCount} movimientos, ${result.totalAmount.toString()} ${client.currency}`,
+      `Emitido ciclo ${result.cycleId} (${result.invoiceNumber}, ${kind}) cliente ${clientId} [${scopeLabel}]: ` +
+        `${result.movementCount} movimientos, ${result.totalAmount.toString()} ${comp.currency}`,
     );
 
     return {
       id: result.cycleId,
       invoiceNumber: result.invoiceNumber,
-      period,
+      kind,
+      period: mode === 'MES' ? period : null,
       status: 'DRAFT',
       totalAmount: result.totalAmount.toString(),
       totalHours: result.totalHours,
       movementCount: result.movementCount,
-      currency: client.currency,
+      currency: comp.currency,
     };
   }
 
   /**
-   * R8/R12: reabre un ciclo DRAFT/SENT → libera estampados (billedCycleId=null) y marca
-   * el ciclo CANCELLED (keep-data). PAID → 409 sin liberar.
+   * R8/R12 + H8d/A3: anula (reabre) un ciclo DRAFT/SENT → libera estampados (billedCycleId=null) y marca
+   * el ciclo CANCELLED con MOTIVO obligatorio + trazabilidad (quién/cuándo). Keep-data: la factura anulada
+   * queda como registro contable permanente, visible en el listado marcada "Anulada". PAID → 409 sin liberar.
    */
-  async reopenCycle(orgId: string, clientId: string, cycleId: string, user: AuthenticatedUser) {
+  async reopenCycle(
+    orgId: string,
+    clientId: string,
+    cycleId: string,
+    dto: ReopenCycleDto,
+    user: AuthenticatedUser,
+  ) {
     await this.assertClient(orgId, clientId);
 
     const cycle = await this.prisma.clientBillingCycle.findFirst({
@@ -752,13 +988,17 @@ export class ClientBillingService {
       });
     }
 
+    const cancelReason = dto.cancelReason.trim();
     const released = await this.prisma.$transaction(
       async (tx) => {
         const freed = await tx.hoursTransaction.updateMany({
           where: { billedCycleId: cycleId },
           data: { billedCycleId: null },
         });
-        await tx.clientBillingCycle.update({ where: { id: cycleId }, data: { status: 'CANCELLED' } });
+        await tx.clientBillingCycle.update({
+          where: { id: cycleId },
+          data: { status: 'CANCELLED', cancelReason, cancelledAt: new Date(), cancelledById: user.id },
+        });
         return freed.count;
       },
       { timeout: this.config.prismaTxTimeoutMs, maxWait: this.config.prismaTxMaxWaitMs },
@@ -777,10 +1017,13 @@ export class ClientBillingService {
         totalHours: cycle.totalHours,
         currency: cycle.currency,
         movementCount: released,
+        cancelReason,
       },
     });
 
-    this.logger.log(`Reabierto ciclo ${cycleId} cliente ${clientId}: liberados ${released} movimientos`);
+    this.logger.log(
+      `Anulado ciclo ${cycleId} (${cycle.invoiceNumber}) cliente ${clientId}: liberados ${released} movimientos — motivo: ${cancelReason}`,
+    );
 
     return { id: cycleId, status: 'CANCELLED', releasedCount: released };
   }

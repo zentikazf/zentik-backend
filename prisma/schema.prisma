@@ -280,6 +280,7 @@ model User {
   ticketEvents        TicketEvent[]        @relation("TicketEventActor")
   deletedHoursTransactions HoursTransaction[] @relation("HoursDeletedBy")
   closedBillingCycles      ClientBillingCycle[]         @relation("CycleClosedBy")
+  cancelledBillingCycles   ClientBillingCycle[]         @relation("CycleCancelledBy")
   pushSubscriptions        PushSubscription[]
   notificationPreferences  UserNotificationPreference[]
   deletedFiles             File[]                       @relation("FileDeletedBy")
@@ -1379,6 +1380,9 @@ model ClientBillingCycle {
   //    (coherente con periodStart/periodEnd), NO @db.Date. ──
   cutoffDate     DateTime? @map("cutoff_date")
   status         String    @default("DRAFT") // DRAFT | SENT | PAID | CANCELLED
+  // H8d: tipo de factura. MONTH = un mes nominal; ACCUMULATED = varios meses elegidos a mano en una
+  //   sola factura. Aditivo con default → todo lo histórico queda MONTH sin backfill.
+  kind           String    @default("MONTH") @map("kind") // MONTH | ACCUMULATED
   invoiceNumber  String    @map("invoice_number") // FAC-YYYY-NNNNN (secuencia POR-ORG, §6.1)
   totalHours     Float     @default(0) @map("total_hours")
   totalAmount    Decimal   @default(0) @map("total_amount") @db.Decimal(15, 2)
@@ -1388,11 +1392,17 @@ model ClientBillingCycle {
   closedById     String?   @map("closed_by_id")
   sentAt         DateTime? @map("sent_at")
   paidAt         DateTime? @map("paid_at")
+  // H8d/A3: anulación como REGISTRO permanente (keep-data). reopenCycle exige motivo obligatorio y
+  //   sella quién/cuándo. La factura anulada NUNCA se borra ni se oculta del listado — se marca "Anulada".
+  cancelReason   String?   @map("cancel_reason")
+  cancelledAt    DateTime? @map("cancelled_at")
+  cancelledById  String?   @map("cancelled_by_id")
   createdAt      DateTime  @default(now()) @map("created_at")
   updatedAt      DateTime  @updatedAt @map("updated_at")
 
   client             Client             @relation(fields: [clientId], references: [id], onDelete: Cascade)
   closedBy           User?              @relation("CycleClosedBy", fields: [closedById], references: [id], onDelete: SetNull)
+  cancelledBy        User?              @relation("CycleCancelledBy", fields: [cancelledById], references: [id], onDelete: SetNull)
   billedTransactions HoursTransaction[] @relation("BilledCycle")
 
   // Numeración POR-ORG (§6.1): sin @unique inline sobre invoice_number; secuencia por org.

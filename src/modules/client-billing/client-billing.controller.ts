@@ -6,6 +6,8 @@ import { CurrentUser } from '../../common/decorators';
 import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { ClientBillingService } from './client-billing.service';
 import { CloseCycleDto } from './dto/close-cycle.dto';
+import { PreviewCycleDto } from './dto/preview-cycle.dto';
+import { ReopenCycleDto } from './dto/reopen-cycle.dto';
 import { UpdateCycleDto } from './dto/update-cycle.dto';
 
 @ApiTags('Client Billing')
@@ -46,6 +48,34 @@ export class ClientBillingController {
     return this.service.getCycleTransactions(orgId, clientId, cycleId);
   }
 
+  // H8d: rutas period-less (el período/meses viajan en el body). Declaradas ANTES de las rutas
+  // con :param para que el segmento estático gane el match.
+  @Post('cycles/preview')
+  @Permissions('read:billing')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Dry-run: conjunto facturable agrupado por mes-de-trabajo, sin emitir' })
+  previewCycle(
+    @Param('orgId') orgId: string,
+    @Param('clientId') clientId: string,
+    @Body() dto: PreviewCycleDto,
+  ) {
+    return this.service.previewCycle(orgId, clientId, dto);
+  }
+
+  @Post('cycles/emit')
+  @Permissions('manage:billing')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Emitir factura (mes individual | acumulada | parcial): crea ciclo Borrador y estampa' })
+  emitCycle(
+    @Param('orgId') orgId: string,
+    @Param('clientId') clientId: string,
+    @Body() dto: CloseCycleDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.service.closeCycle(orgId, clientId, dto.period ?? '', dto, user);
+  }
+
+  // Alias legacy: el CloseCycleDialog viejo cierra un mes por path (mode=MES implícito).
   @Post('cycles/:period/close')
   @Permissions('manage:billing')
   @HttpCode(HttpStatus.CREATED)
@@ -57,20 +87,21 @@ export class ClientBillingController {
     @Body() dto: CloseCycleDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.service.closeCycle(orgId, clientId, period, dto, user);
+    return this.service.closeCycle(orgId, clientId, period, { ...dto, mode: 'MES', period }, user);
   }
 
   @Post('cycles/:cycleId/reopen')
   @Permissions('manage:billing')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Reabrir un ciclo (libera estampados + CANCELLED, keep-data)' })
+  @ApiOperation({ summary: 'Anular un ciclo con motivo obligatorio (libera estampados + CANCELLED, keep-data)' })
   reopenCycle(
     @Param('orgId') orgId: string,
     @Param('clientId') clientId: string,
     @Param('cycleId') cycleId: string,
+    @Body() dto: ReopenCycleDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.service.reopenCycle(orgId, clientId, cycleId, user);
+    return this.service.reopenCycle(orgId, clientId, cycleId, dto, user);
   }
 
   @Patch('cycles/:cycleId')

@@ -345,6 +345,161 @@ describe('ClientBillingService (#25 + H8b)', () => {
     });
   });
 
+  // ── H8d — previewCycle (dry-run) + emisión acumulada + numeración ────────
+  describe('previewCycle + emisión H8d', () => {
+    const d = (y: number, m0: number, day: number) => new Date(Date.UTC(y, m0, day));
+
+    // Orden de queries de computeFacturable(MES): clientBillingCycle.findMany(closedMonthKeys) +
+    //   3 hoursTransaction.findMany [0]sinTarifa [1]sinFecha [2]candidatos. Sin $transaction.
+    function stubComputeMes(opts: {
+      candidatos: unknown[];
+      closedMonths?: Date[];
+      sinTarifa?: Array<{ workedOn: Date | null }>;
+      sinFecha?: Array<{ id: string }>;
+    }) {
+      prisma.clientBillingCycle.findMany.mockResolvedValue(
+        (opts.closedMonths ?? []).map((dt) => ({ periodStart: dt })) as never,
+      );
+      prisma.hoursTransaction.findMany
+        .mockResolvedValueOnce((opts.sinTarifa ?? []) as never)
+        .mockResolvedValueOnce((opts.sinFecha ?? []) as never)
+        .mockResolvedValueOnce(opts.candidatos as never);
+    }
+
+    it('AC-3/AC-4 — preview MES agrupa por workedMonth, subtotales string, puedeEmitir, sin escribir', async () => {
+      stubComputeMes({
+        candidatos: [
+          makeRow({ id: 's1', type: 'USAGE', taskType: 'SUPPORT', price: '100' }),
+          makeRow({ id: 's2', type: 'LOAN', taskType: 'SUPPORT', price: '50' }),
+        ],
+      });
+
+      const res = await service.previewCycle(ORG, CLIENT, { mode: 'MES', period: '2026-07' });
+
+      expect(res.grupos).toHaveLength(1);
+      expect(res.grupos[0].workedMonth).toBe('2026-07');
+      expect(res.grupos[0].subtotalMes).toBe('150');
+      expect(typeof res.grupos[0].subtotalMes).toBe('string');
+      expect(res.grupos[0].horasMes).toBe(2);
+      expect(res.total).toBe('150');
+      expect(res.puedeEmitir).toBe(true);
+      expect(res.motivo).toBeNull();
+      // AC-1: dry-run no escribe.
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(tx.clientBillingCycle.create).not.toHaveBeenCalled();
+    });
+
+    it('AC-5 — preview ACUMULADO barre meses NUNCA cerrados (abril+mayo): 2 grupos ordenados, total = suma', async () => {
+      // ACUMULADO no consulta closedMonthKeys: solo los 3 hoursTransaction.findMany.
+      prisma.hoursTransaction.findMany
+        .mockResolvedValueOnce([] as never) // sinTarifa
+        .mockResolvedValueOnce([] as never) // sinFecha
+        .mockResolvedValueOnce([
+          makeRow({ id: 'may', type: 'USAGE', taskType: 'SUPPORT', price: '200', workedOn: d(2026, 4, 10) }),
+          makeRow({ id: 'abr', type: 'USAGE', taskType: 'SUPPORT', price: '100', workedOn: d(2026, 3, 10) }),
+        ] as never);
+
+      const res = await service.previewCycle(ORG, CLIENT, { mode: 'ACUMULADO', months: ['2026-04', '2026-05'] });
+
+      expect(res.grupos.map((g) => g.workedMonth)).toEqual(['2026-04', '2026-05']); // cronológico
+      expect(res.grupos[0].subtotalMes).toBe('100');
+      expect(res.grupos[1].subtotalMes).toBe('200');
+      expect(res.total).toBe('300');
+      expect(res.puedeEmitir).toBe(true);
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('AC-5 — ACUMULADO filtra por los meses ELEGIDOS: una fila de marzo (no elegido) NO entra', async () => {
+      prisma.hoursTransaction.findMany
+        .mockResolvedValueOnce([] as never)
+        .mockResolvedValueOnce([] as never)
+        .mockResolvedValueOnce([
+          makeRow({ id: 'mar', type: 'USAGE', taskType: 'SUPPORT', price: '999', workedOn: d(2026, 2, 10) }), // marzo
+          makeRow({ id: 'abr', type: 'USAGE', taskType: 'SUPPORT', price: '100', workedOn: d(2026, 3, 10) }), // abril
+        ] as never);
+
+      const res = await service.previewCycle(ORG, CLIENT, { mode: 'ACUMULADO', months: ['2026-04'] });
+
+      expect(res.grupos.map((g) => g.workedMonth)).toEqual(['2026-04']);
+      expect(res.total).toBe('100');
+    });
+
+    it('AC-13/AC-14 — preview expone bloqueos como flags (puedeEmitir false), SIN lanzar', async () => {
+      stubComputeMes({
+        candidatos: [makeRow({ id: 'h1', type: 'USAGE', taskType: 'SUPPORT', price: '100' })],
+        sinTarifa: [{ workedOn: d(2026, 6, 9) }], // SUPPORT sin tarifa on-time julio → in scope
+        sinFecha: [{ id: 'ghost' }],
+      });
+
+      const res = await service.previewCycle(ORG, CLIENT, { mode: 'MES', period: '2026-07' });
+
+      expect(res.bloqueos.sinTarifaRate).toBe(true);
+      expect(res.bloqueos.sinFechaTrabajo).toEqual({ count: 1, ids: ['ghost'] });
+      expect(res.puedeEmitir).toBe(false);
+    });
+
+    it('AC-12 — preview vacío → motivo NOTHING_TO_BILL, grupos [], total 0, puedeEmitir false', async () => {
+      stubComputeMes({ candidatos: [] });
+
+      const res = await service.previewCycle(ORG, CLIENT, { mode: 'MES', period: '2026-07' });
+
+      expect(res.grupos).toEqual([]);
+      expect(res.total).toBe('0');
+      expect(res.motivo).toBe('NOTHING_TO_BILL');
+      expect(res.puedeEmitir).toBe(false);
+    });
+
+    it('AC-2/AC-8 — emisión ACUMULADA estampa kind=ACCUMULATED, periodStart=mes más viejo incluido, candado billedCycleId:null', async () => {
+      prisma.hoursTransaction.findMany
+        .mockResolvedValueOnce([] as never) // sinTarifa
+        .mockResolvedValueOnce([] as never) // sinFecha
+        .mockResolvedValueOnce([
+          { id: 'abr', workedOn: d(2026, 3, 10) },
+          { id: 'may', workedOn: d(2026, 4, 10) },
+        ] as never); // candidatos
+      tx.clientBillingCycle.count.mockResolvedValue(0 as never);
+      tx.clientBillingCycle.create.mockResolvedValue({ id: 'cycA' } as never);
+      tx.hoursTransaction.updateMany.mockResolvedValue({ count: 2 } as never);
+      tx.hoursTransaction.aggregate.mockResolvedValue({
+        _sum: { priceAmount: new Prisma.Decimal('300'), hours: 3 },
+      } as never);
+      tx.clientBillingCycle.update.mockResolvedValue(makeCycle() as never);
+
+      const res = await service.closeCycle(ORG, CLIENT, '', { mode: 'ACUMULADO', months: ['2026-04', '2026-05'] }, USER);
+
+      const createData = tx.clientBillingCycle.create.mock.calls[0][0].data as Record<string, unknown>;
+      expect(createData.kind).toBe('ACCUMULATED');
+      expect((createData.periodStart as Date).getUTCMonth()).toBe(3); // abril = mes más viejo del set
+      expect(createData.cutoffDate).toBeInstanceOf(Date);
+      const updateArg = tx.hoursTransaction.updateMany.mock.calls[0][0];
+      expect(updateArg.where).toMatchObject({ id: { in: ['abr', 'may'] }, billedCycleId: null });
+      expect(res.kind).toBe('ACCUMULATED');
+    });
+
+    it('AC-9 — numeración status-agnóstica: cuenta TODOS los ciclos del año (incl. anulados) → next = count+1', async () => {
+      stubComputeMes({ candidatos: [{ id: 'h1', workedOn: d(2026, 6, 10) }] });
+      tx.clientBillingCycle.count.mockResolvedValue(2 as never); // ya hay 2 (una puede estar anulada)
+      tx.clientBillingCycle.create.mockResolvedValue({ id: 'cyc3' } as never);
+      tx.hoursTransaction.updateMany.mockResolvedValue({ count: 1 } as never);
+      tx.hoursTransaction.aggregate.mockResolvedValue({
+        _sum: { priceAmount: new Prisma.Decimal('100'), hours: 1 },
+      } as never);
+      tx.clientBillingCycle.update.mockResolvedValue(makeCycle() as never);
+
+      await service.closeCycle(ORG, CLIENT, '2026-07', {}, USER);
+
+      const createData = tx.clientBillingCycle.create.mock.calls[0][0].data as Record<string, unknown>;
+      expect(createData.invoiceNumber).toMatch(/^FAC-\d{4}-00003$/); // 2 + 1 = 00003 (sin reuso)
+    });
+
+    it('MONTHS_REQUIRED 400 si ACUMULADO sin meses', async () => {
+      await expect(service.previewCycle(ORG, CLIENT, { mode: 'ACUMULADO', months: [] })).rejects.toMatchObject({
+        code: 'MONTHS_REQUIRED',
+        statusCode: 400,
+      });
+    });
+  });
+
   // ── T19 — estados / reopen (R7, R8) ─────────────────────────────────────
   describe('updateCycle', () => {
     it('DRAFT→SENT sella sentAt', async () => {
@@ -370,17 +525,22 @@ describe('ClientBillingService (#25 + H8b)', () => {
   });
 
   describe('reopenCycle', () => {
-    it('libera estampados (billedCycleId=null) + CANCELLED + audita', async () => {
+    it('H8d/A3 — anula con motivo: libera estampados + CANCELLED + sella cancelReason/cancelledAt/cancelledById + audita', async () => {
       prisma.clientBillingCycle.findFirst.mockResolvedValue(makeCycle({ status: 'DRAFT' }) as never);
       tx.hoursTransaction.updateMany.mockResolvedValue({ count: 3 } as never);
       tx.clientBillingCycle.update.mockResolvedValue(makeCycle({ status: 'CANCELLED' }) as never);
 
-      const res = await service.reopenCycle(ORG, CLIENT, 'cyc1', USER);
+      const res = await service.reopenCycle(ORG, CLIENT, 'cyc1', { cancelReason: 'Error de carga' }, USER);
 
       expect(tx.hoursTransaction.updateMany).toHaveBeenCalledWith({
         where: { billedCycleId: 'cyc1' },
         data: { billedCycleId: null },
       });
+      const updateData = tx.clientBillingCycle.update.mock.calls[0][0].data as Record<string, unknown>;
+      expect(updateData.status).toBe('CANCELLED');
+      expect(updateData.cancelReason).toBe('Error de carga');
+      expect(updateData.cancelledAt).toBeInstanceOf(Date);
+      expect(updateData.cancelledById).toBe(USER.id);
       expect(audit.create).toHaveBeenCalledWith(expect.objectContaining({ action: 'client.billing.cycle_reopened' }));
       expect(res.releasedCount).toBe(3);
     });
@@ -388,7 +548,9 @@ describe('ClientBillingService (#25 + H8b)', () => {
     it('reopen de PAID → 409 CYCLE_ALREADY_PAID sin liberar', async () => {
       prisma.clientBillingCycle.findFirst.mockResolvedValue(makeCycle({ status: 'PAID' }) as never);
 
-      await expect(service.reopenCycle(ORG, CLIENT, 'cyc1', USER)).rejects.toMatchObject({
+      await expect(
+        service.reopenCycle(ORG, CLIENT, 'cyc1', { cancelReason: 'no aplica' }, USER),
+      ).rejects.toMatchObject({
         code: 'CYCLE_ALREADY_PAID',
         statusCode: 409,
       });
