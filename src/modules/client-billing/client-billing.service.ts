@@ -122,6 +122,7 @@ interface ComputeFacturableResult {
   bloqueos: {
     sinTarifaRate: boolean; // SUPPORT_RATE_NOT_CONFIGURED anticipado (flag, no lanza)
     sinFechaTrabajo: { count: number; ids: string[] }; // BILLABLE_WITHOUT_WORKED_ON anticipado
+    revertidasVivas: { count: number; ids: string[] }; // H9a: BILLABLE_INTEGRITY_VIOLATION anticipado
   };
 }
 
@@ -728,6 +729,17 @@ export class ClientBillingService {
     const rows = candidatos.filter((r) => inScope(r.workedOn));
     const facturableIds = rows.map((r) => r.id);
 
+    // H9a guard fail-closed: post-neteo una carga revertida está tombstoneada y NUNCA llega a
+    // candidatos. Si un REFUND vivo referencia un candidato facturable = regresión del neteo (o
+    // data re-corrompida) → se bloquea la emisión ANTES de cobrar plata de más. Flag acá; lanza
+    // closeCycle (mismo patrón que sinTarifaRate/sinFechaTrabajo).
+    const revertidasVivas = facturableIds.length
+      ? await this.prisma.hoursTransaction.findMany({
+          where: { type: 'REFUND', deletedAt: null, reversesTransactionId: { in: facturableIds } },
+          select: { reversesTransactionId: true },
+        })
+      : [];
+
     // A4: en acumulado, periodStart = 1º del mes más viejo REALMENTE incluido en el set (no un rango teórico).
     if (opts.mode === 'ACUMULADO' && rows.length > 0) {
       const oldestWorked = rows.reduce<Date>(
@@ -747,6 +759,10 @@ export class ClientBillingService {
       bloqueos: {
         sinTarifaRate,
         sinFechaTrabajo: { count: sinFecha.length, ids: sinFecha.map((r) => r.id) },
+        revertidasVivas: {
+          count: revertidasVivas.length,
+          ids: revertidasVivas.map((r) => r.reversesTransactionId!),
+        },
       },
     };
   }
@@ -796,7 +812,8 @@ export class ClientBillingService {
     const puedeEmitir =
       comp.facturableIds.length > 0 &&
       !comp.bloqueos.sinTarifaRate &&
-      comp.bloqueos.sinFechaTrabajo.count === 0;
+      comp.bloqueos.sinFechaTrabajo.count === 0 &&
+      comp.bloqueos.revertidasVivas.count === 0;
 
     const issueYear = this.asuncionYear(new Date());
 
@@ -842,6 +859,14 @@ export class ClientBillingService {
         'BILLABLE_WITHOUT_WORKED_ON',
         409,
         { ids: comp.bloqueos.sinFechaTrabajo.ids },
+      );
+    }
+    if (comp.bloqueos.revertidasVivas.count > 0) {
+      throw new AppException(
+        'Hay cargas revertidas sin neutralizar en el conjunto facturable',
+        'BILLABLE_INTEGRITY_VIOLATION',
+        409,
+        { ids: comp.bloqueos.revertidasVivas.ids },
       );
     }
 

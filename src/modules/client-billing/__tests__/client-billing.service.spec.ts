@@ -84,6 +84,10 @@ describe('ClientBillingService (#25 + H8b)', () => {
     prisma.$transaction.mockImplementation((cb: unknown) =>
       (cb as (t: Prisma.TransactionClient) => Promise<unknown>)(tx),
     );
+    // H9a: computeFacturable hace un findMany EXTRA (revertidasVivas) después de candidatos y solo
+    // si hay facturables. Los mockResolvedValueOnce de los stubs se consumen primero; esa llamada
+    // extra cae en este fallback vacío (sin bloqueo) para no correr los índices de los stubs.
+    prisma.hoursTransaction.findMany.mockResolvedValue([] as never);
   });
 
   // ── T17 + H8b — getBuilder: clasificación + workedMonth/atrasada ──────────
@@ -184,7 +188,8 @@ describe('ClientBillingService (#25 + H8b)', () => {
       prisma.hoursTransaction.findMany
         .mockResolvedValueOnce((opts.sinTarifa ?? []) as never) // guard R11
         .mockResolvedValueOnce((opts.sinFecha ?? []) as never) // guard workedOn-null
-        .mockResolvedValueOnce(opts.candidatos as never); // candidatos
+        .mockResolvedValueOnce(opts.candidatos as never) // candidatos
+        .mockResolvedValue([] as never); // H9a revertidasVivas (fallback vacío; cubre re-stubs post clearAllMocks)
       tx.clientBillingCycle.count.mockResolvedValue(0 as never);
       tx.clientBillingCycle.create.mockResolvedValue({ id: 'cyc1' } as never);
       tx.hoursTransaction.updateMany.mockResolvedValue({
@@ -497,6 +502,42 @@ describe('ClientBillingService (#25 + H8b)', () => {
         code: 'MONTHS_REQUIRED',
         statusCode: 400,
       });
+    });
+  });
+
+  // ── H9a — guard fail-closed (REFUND vivo apuntando a un candidato facturable) ──
+  describe('H9a — guard fail-closed', () => {
+    // Orden de queries de computeFacturable(MES): clientBillingCycle.findMany(closedMonthKeys) +
+    //   4 hoursTransaction.findMany: [0] sinTarifa, [1] sinFecha, [2] candidatos, [3] revertidasVivas.
+    function stubComputeConZombie() {
+      prisma.clientBillingCycle.findMany.mockResolvedValue([] as never); // closedMonthKeys
+      prisma.hoursTransaction.findMany
+        .mockResolvedValueOnce([] as never) // guard R11 (sinTarifa)
+        .mockResolvedValueOnce([] as never) // guard workedOn-null
+        .mockResolvedValueOnce([
+          makeRow({ id: 'usage-zombie', type: 'USAGE', taskType: 'SUPPORT', price: '100' }),
+        ] as never) // candidatos
+        .mockResolvedValueOnce([{ reversesTransactionId: 'usage-zombie' }] as never); // H9a revertidasVivas
+    }
+
+    it('closeCycle lanza BILLABLE_INTEGRITY_VIOLATION 409 con los ids zombie → no abre tx', async () => {
+      stubComputeConZombie();
+
+      await expect(service.closeCycle(ORG, CLIENT, '2026-07', {}, USER)).rejects.toMatchObject({
+        code: 'BILLABLE_INTEGRITY_VIOLATION',
+        statusCode: 409,
+        details: { ids: ['usage-zombie'] },
+      });
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('previewCycle con REFUND vivo sobre candidato → bloqueo revertidasVivas y puedeEmitir false, SIN lanzar', async () => {
+      stubComputeConZombie();
+
+      const res = await service.previewCycle(ORG, CLIENT, { mode: 'MES', period: '2026-07' });
+
+      expect(res.bloqueos.revertidasVivas).toEqual({ count: 1, ids: ['usage-zombie'] });
+      expect(res.puedeEmitir).toBe(false);
     });
   });
 
