@@ -7,6 +7,7 @@ import { AppException } from '../../common/filters/app-exception';
 import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { tzOffsetMinutes } from '../ticket/sla.util';
 import { CloseCycleDto } from './dto/close-cycle.dto';
+import { CreateCreditNoteDto } from './dto/create-credit-note.dto';
 import { PreviewCycleDto } from './dto/preview-cycle.dto';
 import { ReopenCycleDto } from './dto/reopen-cycle.dto';
 import { UpdateCycleDto } from './dto/update-cycle.dto';
@@ -244,9 +245,36 @@ export class ClientBillingService {
   private async getClosedMonthKeys(orgId: string, clientId: string): Promise<Set<string>> {
     const cycles = await this.prisma.clientBillingCycle.findMany({
       where: { clientId, organizationId: orgId, status: { not: 'CANCELLED' } },
-      select: { periodStart: true },
+      select: { periodStart: true, periodEnd: true },
     });
-    return new Set(cycles.map((c) => this.asuncionPeriodKey(c.periodStart)));
+    // H9b/D1: un ciclo (sobre todo ACUMULADO) "cierra" TODOS los meses de su rango [periodStart..periodEnd],
+    // no solo el de periodStart. Sin esto, una hora devuelta por una NC con workedOn en un mes intermedio
+    // quedaría invisible al arrastre 2A → plata varada. Para MONTH el rango es 1 mes (inocuo).
+    const keys = new Set<string>();
+    for (const c of cycles) {
+      for (const key of this.monthKeysInRange(c.periodStart, c.periodEnd)) keys.add(key);
+    }
+    return keys;
+  }
+
+  // H9b/D1: claves 'YYYY-MM' (Asunción) de todos los meses tocados por [start..end] inclusive.
+  private monthKeysInRange(start: Date, end: Date): string[] {
+    const keys: string[] = [];
+    let y = Number(this.asuncionPeriodKey(start).slice(0, 4));
+    let m = Number(this.asuncionPeriodKey(start).slice(5, 7)); // 1-12
+    const endKey = this.asuncionPeriodKey(end);
+    // Avanza mes a mes hasta cubrir endKey (guard de 240 iteraciones por seguridad).
+    for (let i = 0; i < 240; i++) {
+      const key = `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}`;
+      keys.push(key);
+      if (key >= endKey) break;
+      m += 1;
+      if (m > 12) {
+        m = 1;
+        y += 1;
+      }
+    }
+    return keys;
   }
 
   /**
@@ -289,6 +317,25 @@ export class ClientBillingService {
     const target = (e.meta as { target?: string[] | string } | undefined)?.target;
     const hay = Array.isArray(target) ? target.join(',') : target ?? '';
     return hay.toLowerCase().includes('invoice');
+  }
+
+  /** ¿el P2002 es la colisión del número de NC? (índice credit_notes_organization_id_number_key). */
+  private isCreditNoteNumberConflict(e: unknown): boolean {
+    if (!(e instanceof Prisma.PrismaClientKnownRequestError) || e.code !== 'P2002') return false;
+    const target = (e.meta as { target?: string[] | string } | undefined)?.target;
+    const hay = Array.isArray(target) ? target.join(',') : target ?? '';
+    // Robusto a AMBOS shapes de meta.target (nombre de índice string | array de columnas): el único
+    // (organization_id, number) siempre contiene 'number'; el único de línea es 'credited_transaction_id'
+    // (sin 'number'), así que 'number' basta para separarlos sin depender de que aparezca 'credit'.
+    return hay.toLowerCase().includes('number');
+  }
+
+  /** ¿el P2002 es I1 (línea ya acreditada)? (índice credit_note_lines_credited_transaction_id_key). */
+  private isLineAlreadyCreditedConflict(e: unknown): boolean {
+    if (!(e instanceof Prisma.PrismaClientKnownRequestError) || e.code !== 'P2002') return false;
+    const target = (e.meta as { target?: string[] | string } | undefined)?.target;
+    const hay = Array.isArray(target) ? target.join(',') : target ?? '';
+    return hay.toLowerCase().includes('credited_transaction');
   }
 
   // ── DTO helpers ────────────────────────────────────────────────────────
@@ -1015,6 +1062,18 @@ export class ClientBillingService {
       });
     }
 
+    // H9b: no se puede anular una factura que ya tiene NC (anular libera billedCycleId → doble devolución
+    // de la misma plata; la NC ya devolvió/acreditó). La NC es el mecanismo de corrección, no la anulación.
+    const ncCount = await this.prisma.creditNote.count({ where: { appliesToCycleId: cycleId } });
+    if (ncCount > 0) {
+      throw new AppException(
+        'La factura tiene notas de crédito y no puede anularse',
+        'CYCLE_HAS_CREDIT_NOTES',
+        409,
+        { cycleId, creditNotes: ncCount },
+      );
+    }
+
     const cancelReason = dto.cancelReason.trim();
     const released = await this.prisma.$transaction(
       async (tx) => {
@@ -1082,5 +1141,285 @@ export class ClientBillingService {
 
     const updated = await this.prisma.clientBillingCycle.update({ where: { id: cycleId }, data });
     return this.toCycleDto(updated);
+  }
+
+  // ── H9b: Notas de crédito ───────────────────────────────────────────────
+
+  /**
+   * Carga la FAC + valida estado + resuelve y valida las líneas pedidas contra el snapshot. Devuelve las
+   * filas originales a acreditar (ya chequeado: pertenecen a la FAC, facturables, vivas, no acreditadas).
+   */
+  private async resolveCreditNoteLines(orgId: string, clientId: string, cycleId: string, lineIds: string[]) {
+    const cycle = await this.prisma.clientBillingCycle.findFirst({
+      where: { id: cycleId, clientId, organizationId: orgId },
+    });
+    if (!cycle) throw new AppException('El ciclo no existe', 'CYCLE_NOT_FOUND', 404, { cycleId });
+    if (cycle.status !== 'SENT' && cycle.status !== 'PAID') {
+      throw new AppException(
+        'Solo se puede emitir una nota de crédito sobre una factura enviada o cobrada',
+        'CREDIT_NOTE_INVALID_INVOICE_STATE',
+        409,
+        { cycleId, status: cycle.status },
+      );
+    }
+    const uniqueIds = [...new Set(lineIds)];
+    const originals = await this.prisma.hoursTransaction.findMany({
+      where: {
+        id: { in: uniqueIds },
+        billedCycleId: cycleId, // pertenece a ESTA factura (I2.a)
+        deletedAt: null,
+        type: { in: BILLABLE_TYPES },
+        priceAmount: { not: null },
+      },
+      include: { task: { select: { title: true } } },
+    });
+    if (originals.length !== uniqueIds.length) {
+      throw new AppException(
+        'Alguna línea no pertenece a esta factura o no es acreditable',
+        'CREDIT_NOTE_INVALID_LINE',
+        400,
+      );
+    }
+    // pre-check I1 (mensaje limpio; el unique lo fuerza igual bajo carrera)
+    const already = await this.prisma.creditNoteLine.findMany({
+      where: { creditedTransactionId: { in: uniqueIds } },
+      select: { creditedTransactionId: true },
+    });
+    if (already.length > 0) {
+      throw new AppException('Alguna línea ya fue acreditada', 'LINE_ALREADY_CREDITED', 409, {
+        ids: already.map((a) => a.creditedTransactionId),
+      });
+    }
+    return { cycle, originals };
+  }
+
+  /**
+   * H9b Capa preview: dry-run de la nota de crédito. CERO writes. Reusa resolveCreditNoteLines para
+   * validar y devuelve totales NEGATIVOS (presentación) + el detalle de líneas.
+   */
+  async previewCreditNote(orgId: string, clientId: string, cycleId: string, dto: CreateCreditNoteDto) {
+    const { cycle, originals } = await this.resolveCreditNoteLines(orgId, clientId, cycleId, dto.lineIds);
+    const totalAmount = originals.reduce((s, t) => s.add(t.priceAmount!), new Prisma.Decimal(0));
+    const totalHours = originals.reduce((s, t) => s + t.hours, 0);
+    return {
+      invoiceNumber: cycle.invoiceNumber,
+      currency: cycle.currency,
+      returnHoursToBillable: dto.returnHoursToBillable ?? true,
+      lineCount: originals.length,
+      totalAmount: totalAmount.negated().toString(), // negativo (presentación)
+      totalHours: -totalHours,
+      lines: originals.map((t) => ({
+        id: t.id,
+        description: t.task?.title ?? t.note ?? '—',
+        hours: t.hours,
+        priceAmount: t.priceAmount!.toString(),
+        workedOn: t.workedOn,
+      })),
+    };
+  }
+
+  /**
+   * H9b Capa emisión: crea la NC (documento propio) + sus líneas congeladas (snapshot POSITIVO) + —si
+   * returnHoursToBillable— una FILA ESPEJO facturable por línea (re-entra al pool sin tocar cupo ni el
+   * snapshot original). Numeración NC aislada con count-in-tx por año + retry P2002. `billedCycleId` de las
+   * filas existentes JAMÁS se toca. Audit best-effort DESPUÉS.
+   */
+  async emitCreditNote(
+    orgId: string,
+    clientId: string,
+    cycleId: string,
+    dto: CreateCreditNoteDto,
+    user: AuthenticatedUser,
+  ) {
+    // MinLength(3) del DTO valida el string crudo; acá exigimos 3 EFECTIVOS post-trim (un motivo " a "
+    // pasaría el DTO y quedaría "a" en el documento contable). Alineado con el frontend.
+    const reason = dto.reason.trim();
+    if (reason.length < 3) {
+      throw new AppException('El motivo de la nota de crédito es obligatorio (mínimo 3 caracteres)', 'CREDIT_NOTE_REASON_REQUIRED', 400);
+    }
+    const returnHours = dto.returnHoursToBillable ?? true;
+    const issueYear = this.asuncionYear(new Date());
+    const yearStart = this.asuncionInstant(issueYear, 0, 1, 0, 0, 0, 0);
+    const yearEnd = this.asuncionInstant(issueYear + 1, 0, 1, 0, 0, 0, 0);
+
+    let result:
+      | { creditNoteId: string; number: string; totalAmount: Prisma.Decimal; totalHours: number; lineCount: number }
+      | undefined;
+
+    for (let attempt = 0; attempt < MAX_INVOICE_RETRIES; attempt++) {
+      // Re-resolver DENTRO del loop (defensa ante cambios entre intentos). Lanza 404/409/400 tal cual.
+      const { cycle, originals } = await this.resolveCreditNoteLines(orgId, clientId, cycleId, dto.lineIds);
+      const totalAmountPos = originals.reduce((s, t) => s.add(t.priceAmount!), new Prisma.Decimal(0));
+      const totalHoursPos = originals.reduce((s, t) => s + t.hours, 0);
+      try {
+        result = await this.prisma.$transaction(
+          async (tx) => {
+            const count = await tx.creditNote.count({
+              where: { organizationId: orgId, createdAt: { gte: yearStart, lt: yearEnd } },
+            });
+            const number = `NC-${issueYear}-${String(count + 1).padStart(5, '0')}`;
+
+            const nc = await tx.creditNote.create({
+              data: {
+                organizationId: orgId,
+                clientId,
+                appliesToCycleId: cycleId,
+                number,
+                reason,
+                returnHoursToBillable: returnHours,
+                totalAmount: totalAmountPos.negated(), // NEGATIVO (efecto neto)
+                totalHours: -totalHoursPos,
+                currency: cycle.currency,
+                issuedById: user.id,
+              },
+            });
+
+            for (const t of originals) {
+              // línea congelada (snapshot POSITIVO); el @unique de creditedTransactionId es I1 (serializa carreras)
+              await tx.creditNoteLine.create({
+                data: {
+                  creditNoteId: nc.id,
+                  creditedTransactionId: t.id,
+                  hours: t.hours,
+                  priceAmount: t.priceAmount!,
+                  priceRate: t.priceRate,
+                  priceCurrency: t.priceCurrency,
+                  workedOn: t.workedOn,
+                  description: t.task?.title ?? t.note ?? null,
+                },
+              });
+
+              if (returnHours) {
+                // FILA ESPEJO facturable — re-entra al pool por buildFacturableWhere. NO toca cupo.
+                // timeEntryId/entryVersion NULL (no copiar → evita el único parcial H2). billedCycleId NULL.
+                await tx.hoursTransaction.create({
+                  data: {
+                    clientId,
+                    type: t.type,
+                    hours: t.hours,
+                    taskId: t.taskId,
+                    priceAmount: t.priceAmount,
+                    priceRate: t.priceRate,
+                    priceCurrency: t.priceCurrency,
+                    workedOn: t.workedOn, // H8b: mes REAL de trabajo (se re-factura en su mes)
+                    rebilledFromTransactionId: t.id,
+                    note: `Re-facturable por ${number}`,
+                  },
+                });
+              }
+            }
+
+            return {
+              creditNoteId: nc.id,
+              number,
+              totalAmount: nc.totalAmount,
+              totalHours: nc.totalHours,
+              lineCount: originals.length,
+            };
+          },
+          { timeout: this.config.prismaTxTimeoutMs, maxWait: this.config.prismaTxMaxWaitMs },
+        );
+        break; // éxito
+      } catch (e) {
+        if (this.isCreditNoteNumberConflict(e)) {
+          if (attempt < MAX_INVOICE_RETRIES - 1) continue; // recomputa el número
+          throw new AppException(
+            'No se pudo asignar número de nota de crédito, reintentá',
+            'CREDIT_NOTE_NUMBER_CONFLICT',
+            409,
+          );
+        }
+        if (this.isLineAlreadyCreditedConflict(e)) {
+          throw new AppException('Alguna línea ya fue acreditada', 'LINE_ALREADY_CREDITED', 409);
+        }
+        throw e;
+      }
+    }
+    if (!result) {
+      throw new AppException('No se pudo emitir la nota de crédito, reintentá', 'CREDIT_NOTE_NUMBER_CONFLICT', 409);
+    }
+
+    await this.auditService.create({
+      organizationId: orgId,
+      userId: user.id,
+      action: 'client.billing.credit_note_issued',
+      resource: 'client',
+      resourceId: clientId,
+      newData: {
+        creditNoteId: result.creditNoteId,
+        number: result.number,
+        cycleId,
+        lineCount: result.lineCount,
+        totalAmount: result.totalAmount.toString(),
+        totalHours: result.totalHours,
+        returnHoursToBillable: returnHours,
+        reason,
+      },
+    });
+
+    this.logger.log(
+      `Emitida nota de crédito ${result.creditNoteId} (${result.number}) cliente ${clientId} sobre ciclo ${cycleId}: ` +
+        `${result.lineCount} líneas, ${result.totalAmount.toString()} (devolver horas: ${returnHours})`,
+    );
+
+    return {
+      id: result.creditNoteId,
+      number: result.number,
+      appliesToCycleId: cycleId,
+      totalAmount: result.totalAmount.toString(),
+      totalHours: result.totalHours,
+      lineCount: result.lineCount,
+      returnHoursToBillable: returnHours,
+    };
+  }
+
+  /**
+   * H9b: notas de crédito emitidas sobre un ciclo (banner staff). Scopeada por org/cliente/ciclo.
+   * Montos Decimal → string (ya NEGATIVOS en la tabla).
+   */
+  async getCreditNotes(orgId: string, clientId: string, cycleId: string) {
+    await this.assertClient(orgId, clientId);
+    const notes = await this.prisma.creditNote.findMany({
+      where: { appliesToCycleId: cycleId, clientId, organizationId: orgId },
+      orderBy: { issuedAt: 'desc' },
+      select: {
+        id: true,
+        number: true,
+        reason: true,
+        totalAmount: true,
+        totalHours: true,
+        returnHoursToBillable: true,
+        issuedAt: true,
+      },
+    });
+    return notes.map((n) => ({
+      id: n.id,
+      number: n.number,
+      reason: n.reason,
+      totalAmount: n.totalAmount.toString(),
+      totalHours: n.totalHours,
+      returnHoursToBillable: n.returnHoursToBillable,
+      issuedAt: n.issuedAt,
+    }));
+  }
+
+  /**
+   * H9b: NC + sus líneas congeladas (para el PDF). Valida la NC (org+client) → 404. Incluye el
+   * invoiceNumber de la FAC acreditada (referenceLine del PDF). Líneas ordenadas por workedOn.
+   */
+  async getCreditNoteTransactions(orgId: string, clientId: string, creditNoteId: string) {
+    await this.assertClient(orgId, clientId);
+    const creditNote = await this.prisma.creditNote.findFirst({
+      where: { id: creditNoteId, clientId, organizationId: orgId },
+      include: { appliesTo: { select: { invoiceNumber: true } } },
+    });
+    if (!creditNote) {
+      throw new AppException('Nota de crédito no encontrada', 'CREDIT_NOTE_NOT_FOUND', 404, { creditNoteId });
+    }
+    const lines = await this.prisma.creditNoteLine.findMany({
+      where: { creditNoteId },
+      orderBy: { workedOn: 'asc' },
+    });
+    return { creditNote, lines };
   }
 }

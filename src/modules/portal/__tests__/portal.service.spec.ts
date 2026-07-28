@@ -31,6 +31,8 @@ describe('PortalService.getMyInvoices (H8f)', () => {
     );
     // getClientByUserId → owner path
     prisma.client.findFirst.mockResolvedValue({ id: CLIENT, organizationId: 'org-1' } as never);
+    // H9b: getMyInvoices ahora hace Promise.all([cycles, creditNotes]); default vacío para las NC.
+    prisma.creditNote.findMany.mockResolvedValue([] as never);
   });
 
   it('scopea por el cliente del usuario y filtra status a SENT/PAID/CANCELLED (sin DRAFT)', async () => {
@@ -48,12 +50,45 @@ describe('PortalService.getMyInvoices (H8f)', () => {
     expect(arg.select.notes).toBeUndefined();
   });
 
-  it('devuelve tal cual los ciclos del cliente (passthrough)', async () => {
+  it('H9b — devuelve { invoices, creditNotes }: FAC con docType INVOICE y NC con docType CREDIT_NOTE (monto negativo)', async () => {
     const rows = [{ id: 'cyc1', invoiceNumber: 'FAC-2026-00001', status: 'SENT' }];
     prisma.clientBillingCycle.findMany.mockResolvedValue(rows as never);
+    prisma.creditNote.findMany.mockResolvedValue([
+      {
+        id: 'nc1',
+        number: 'NC-2026-00001',
+        totalAmount: '-150000',
+        totalHours: -3,
+        currency: 'PYG',
+        issuedAt: new Date('2026-07-28T12:00:00Z'),
+        appliesTo: { invoiceNumber: 'FAC-2026-00001' },
+      },
+    ] as never);
 
     const res = await service.getMyInvoices('user-1');
 
-    expect(res).toEqual(rows);
+    expect(res.invoices).toEqual([{ docType: 'INVOICE', id: 'cyc1', invoiceNumber: 'FAC-2026-00001', status: 'SENT' }]);
+    expect(res.creditNotes).toHaveLength(1);
+    expect(res.creditNotes[0]).toMatchObject({
+      docType: 'CREDIT_NOTE',
+      id: 'nc1',
+      number: 'NC-2026-00001',
+      appliesToInvoiceNumber: 'FAC-2026-00001',
+      totalAmount: '-150000',
+      totalHours: -3,
+    });
+    // solo las NC de facturas SENT/PAID (nunca DRAFT/CANCELLED).
+    const ncArg = prisma.creditNote.findMany.mock.calls[0][0] as any;
+    expect(ncArg.where.clientId).toBe(CLIENT);
+    expect(ncArg.where.appliesTo.status.in).toEqual(['SENT', 'PAID']);
+  });
+
+  it('sin NC devuelve creditNotes vacío y las FAC en invoices', async () => {
+    prisma.clientBillingCycle.findMany.mockResolvedValue([{ id: 'cyc1', status: 'PAID' }] as never);
+
+    const res = await service.getMyInvoices('user-1');
+
+    expect(res.creditNotes).toEqual([]);
+    expect(res.invoices).toEqual([{ docType: 'INVOICE', id: 'cyc1', status: 'PAID' }]);
   });
 });

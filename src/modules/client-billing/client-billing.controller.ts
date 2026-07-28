@@ -8,6 +8,7 @@ import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { ClientBillingService } from './client-billing.service';
 import { ClientBillingPdfService } from './client-billing-pdf.service';
 import { CloseCycleDto } from './dto/close-cycle.dto';
+import { CreateCreditNoteDto } from './dto/create-credit-note.dto';
 import { PreviewCycleDto } from './dto/preview-cycle.dto';
 import { ReopenCycleDto } from './dto/reopen-cycle.dto';
 import { UpdateCycleDto } from './dto/update-cycle.dto';
@@ -139,5 +140,64 @@ export class ClientBillingController {
     @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.service.updateCycle(orgId, clientId, cycleId, dto, user);
+  }
+
+  // ── H9b: Notas de crédito ────────────────────────────────────────────────
+
+  // Ruta de 4 segmentos (cycles/:cycleId/credit-notes/preview) → declarada ANTES del POST de 3
+  // segmentos para que el segmento estático 'preview' gane el match.
+  @Post('cycles/:cycleId/credit-notes/preview')
+  @Permissions('read:billing')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Dry-run de una nota de crédito (montos negativos), sin emitir' })
+  previewCreditNote(
+    @Param('orgId') orgId: string,
+    @Param('clientId') clientId: string,
+    @Param('cycleId') cycleId: string,
+    @Body() dto: CreateCreditNoteDto,
+  ) {
+    return this.service.previewCreditNote(orgId, clientId, cycleId, dto);
+  }
+
+  @Post('cycles/:cycleId/credit-notes')
+  @Permissions('manage:billing')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Emitir una nota de crédito sobre una factura SENT/PAID' })
+  emitCreditNote(
+    @Param('orgId') orgId: string,
+    @Param('clientId') clientId: string,
+    @Param('cycleId') cycleId: string,
+    @Body() dto: CreateCreditNoteDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.service.emitCreditNote(orgId, clientId, cycleId, dto, user);
+  }
+
+  @Get('cycles/:cycleId/credit-notes')
+  @Permissions('read:billing')
+  @ApiOperation({ summary: 'Notas de crédito emitidas sobre un ciclo (banner staff)' })
+  getCreditNotes(
+    @Param('orgId') orgId: string,
+    @Param('clientId') clientId: string,
+    @Param('cycleId') cycleId: string,
+  ) {
+    return this.service.getCreditNotes(orgId, clientId, cycleId);
+  }
+
+  // Ruta de 3 segmentos con estático inicial 'credit-notes' → no colisiona con cycles/:cycleId/...
+  @Get('credit-notes/:creditNoteId/pdf')
+  @Permissions('read:billing')
+  @ApiOperation({ summary: 'Descargar la nota de crédito como PDF' })
+  async downloadCreditNotePdf(
+    @Param('orgId') orgId: string,
+    @Param('clientId') clientId: string,
+    @Param('creditNoteId') creditNoteId: string,
+    @Res({ passthrough: false }) res: Response,
+  ): Promise<void> {
+    const { buffer, filename } = await this.pdfService.generateCreditNotePdf(orgId, clientId, creditNoteId);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', buffer.length.toString());
+    res.send(buffer);
   }
 }

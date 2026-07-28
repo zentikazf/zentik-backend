@@ -751,4 +751,329 @@ describe('ClientBillingService (#25 + H8b)', () => {
       expect(prisma.client.findFirst.mock.calls[0][0]!.where).toMatchObject({ id: 'other-client', organizationId: ORG });
     });
   });
+
+  // ── H9b — Notas de crédito ───────────────────────────────────────────────
+  describe('emit/preview credit note (H9b)', () => {
+    // Fila original estampada (con task.title), como la devuelve resolveCreditNoteLines.
+    function makeOriginal(opts: {
+      id: string;
+      type?: string;
+      hours?: number;
+      price?: string;
+      workedOn?: Date;
+      taskId?: string;
+      title?: string;
+    }) {
+      return {
+        id: opts.id,
+        type: opts.type ?? 'USAGE',
+        hours: opts.hours ?? 2,
+        taskId: opts.taskId ?? `task-${opts.id}`,
+        note: `note-${opts.id}`,
+        priceAmount: new Prisma.Decimal(opts.price ?? '100'),
+        priceRate: new Prisma.Decimal('50'),
+        priceCurrency: 'PYG',
+        workedOn: opts.workedOn ?? new Date(Date.UTC(2026, 6, 10)),
+        task: { title: opts.title ?? `Task ${opts.id}` },
+      };
+    }
+
+    beforeEach(() => {
+      // pre-check I1: por defecto ninguna línea acreditada previamente.
+      prisma.creditNoteLine.findMany.mockResolvedValue([] as never);
+    });
+
+    it('emit ON: crea CreditNote + N líneas congeladas (positivo) + N espejos (billedCycleId/timeEntryId/entryVersion sin setear, rebilled=orig, workedOn copiado); totales NEGATIVOS + audit', async () => {
+      prisma.clientBillingCycle.findFirst.mockResolvedValue(makeCycle({ status: 'SENT' }) as never);
+      prisma.hoursTransaction.findMany.mockResolvedValueOnce([
+        makeOriginal({ id: 'o1', price: '100', hours: 2 }),
+        makeOriginal({ id: 'o2', price: '50', hours: 1 }),
+      ] as never);
+      tx.creditNote.count.mockResolvedValue(0 as never);
+      tx.creditNote.create.mockResolvedValue({
+        id: 'nc1',
+        totalAmount: new Prisma.Decimal('-150'),
+        totalHours: -3,
+      } as never);
+      tx.creditNoteLine.create.mockResolvedValue({} as never);
+      tx.hoursTransaction.create.mockResolvedValue({} as never);
+
+      const res = await service.emitCreditNote(
+        ORG,
+        CLIENT,
+        'cyc1',
+        { lineIds: ['o1', 'o2'], reason: 'Tarifa equivocada', returnHoursToBillable: true },
+        USER,
+      );
+
+      // Header: número NC aislado + totales NEGATIVOS.
+      const ncData = tx.creditNote.create.mock.calls[0][0].data as Record<string, unknown>;
+      expect(ncData.number).toMatch(/^NC-\d{4}-00001$/);
+      expect((ncData.totalAmount as Prisma.Decimal).toString()).toBe('-150');
+      expect(ncData.totalHours).toBe(-3);
+      expect(ncData.returnHoursToBillable).toBe(true);
+      expect(ncData.appliesToCycleId).toBe('cyc1');
+
+      // 2 líneas congeladas con montos POSITIVOS (snapshot fiel).
+      expect(tx.creditNoteLine.create).toHaveBeenCalledTimes(2);
+      const line0 = tx.creditNoteLine.create.mock.calls[0][0].data as Record<string, unknown>;
+      expect(line0.creditedTransactionId).toBe('o1');
+      expect((line0.priceAmount as Prisma.Decimal).toString()).toBe('100');
+      expect(line0.description).toBe('Task o1');
+
+      // 2 espejos facturables: no tocan cupo ni estampan; linaje al original.
+      expect(tx.hoursTransaction.create).toHaveBeenCalledTimes(2);
+      const mirror0 = tx.hoursTransaction.create.mock.calls[0][0].data as Record<string, unknown>;
+      expect(mirror0.billedCycleId).toBeUndefined();
+      expect(mirror0.timeEntryId).toBeUndefined();
+      expect(mirror0.entryVersion).toBeUndefined();
+      expect(mirror0.rebilledFromTransactionId).toBe('o1');
+      expect(mirror0.workedOn).toEqual(new Date(Date.UTC(2026, 6, 10)));
+      expect(mirror0.type).toBe('USAGE');
+
+      expect(res.totalAmount).toBe('-150');
+      expect(res.lineCount).toBe(2);
+      expect(res.returnHoursToBillable).toBe(true);
+      expect(audit.create).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'client.billing.credit_note_issued' }),
+      );
+    });
+
+    it('emit OFF: crea líneas pero SIN espejos', async () => {
+      prisma.clientBillingCycle.findFirst.mockResolvedValue(makeCycle({ status: 'PAID' }) as never);
+      prisma.hoursTransaction.findMany.mockResolvedValueOnce([makeOriginal({ id: 'o1', price: '100' })] as never);
+      tx.creditNote.count.mockResolvedValue(0 as never);
+      tx.creditNote.create.mockResolvedValue({
+        id: 'nc1',
+        totalAmount: new Prisma.Decimal('-100'),
+        totalHours: -2,
+      } as never);
+      tx.creditNoteLine.create.mockResolvedValue({} as never);
+
+      await service.emitCreditNote(
+        ORG,
+        CLIENT,
+        'cyc1',
+        { lineIds: ['o1'], reason: 'Gesto comercial', returnHoursToBillable: false },
+        USER,
+      );
+
+      expect(tx.creditNoteLine.create).toHaveBeenCalledTimes(1);
+      expect(tx.hoursTransaction.create).not.toHaveBeenCalled();
+    });
+
+    it('numeración count-in-tx: number = NC-YYYY-(count+1)', async () => {
+      prisma.clientBillingCycle.findFirst.mockResolvedValue(makeCycle({ status: 'SENT' }) as never);
+      prisma.hoursTransaction.findMany.mockResolvedValueOnce([makeOriginal({ id: 'o1', price: '100' })] as never);
+      tx.creditNote.count.mockResolvedValue(4 as never); // ya hay 4 NC este año
+      tx.creditNote.create.mockResolvedValue({
+        id: 'nc5',
+        totalAmount: new Prisma.Decimal('-100'),
+        totalHours: -2,
+      } as never);
+      tx.creditNoteLine.create.mockResolvedValue({} as never);
+      tx.hoursTransaction.create.mockResolvedValue({} as never);
+
+      await service.emitCreditNote(ORG, CLIENT, 'cyc1', { lineIds: ['o1'], reason: 'motivo' }, USER);
+
+      const ncData = tx.creditNote.create.mock.calls[0][0].data as Record<string, unknown>;
+      expect(ncData.number).toMatch(/^NC-\d{4}-00005$/);
+    });
+
+    it('guard I3: NC sobre factura DRAFT → 409 CREDIT_NOTE_INVALID_INVOICE_STATE, no abre tx', async () => {
+      prisma.clientBillingCycle.findFirst.mockResolvedValue(makeCycle({ status: 'DRAFT' }) as never);
+
+      await expect(
+        service.emitCreditNote(ORG, CLIENT, 'cyc1', { lineIds: ['o1'], reason: 'motivo' }, USER),
+      ).rejects.toMatchObject({ code: 'CREDIT_NOTE_INVALID_INVOICE_STATE', statusCode: 409 });
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('guard: NC sobre factura CANCELLED → 409 CREDIT_NOTE_INVALID_INVOICE_STATE', async () => {
+      prisma.clientBillingCycle.findFirst.mockResolvedValue(makeCycle({ status: 'CANCELLED' }) as never);
+
+      await expect(
+        service.emitCreditNote(ORG, CLIENT, 'cyc1', { lineIds: ['o1'], reason: 'motivo' }, USER),
+      ).rejects.toMatchObject({ code: 'CREDIT_NOTE_INVALID_INVOICE_STATE', statusCode: 409 });
+    });
+
+    it('ciclo inexistente → 404 CYCLE_NOT_FOUND', async () => {
+      prisma.clientBillingCycle.findFirst.mockResolvedValue(null as never);
+      await expect(
+        service.emitCreditNote(ORG, CLIENT, 'nope', { lineIds: ['o1'], reason: 'motivo' }, USER),
+      ).rejects.toMatchObject({ code: 'CYCLE_NOT_FOUND', statusCode: 404 });
+    });
+
+    it('línea que no pertenece a la FAC / no acreditable → 400 CREDIT_NOTE_INVALID_LINE', async () => {
+      prisma.clientBillingCycle.findFirst.mockResolvedValue(makeCycle({ status: 'SENT' }) as never);
+      // pide 2, resuelve 1 → mismatch.
+      prisma.hoursTransaction.findMany.mockResolvedValueOnce([makeOriginal({ id: 'o1' })] as never);
+
+      await expect(
+        service.emitCreditNote(ORG, CLIENT, 'cyc1', { lineIds: ['o1', 'o2'], reason: 'motivo' }, USER),
+      ).rejects.toMatchObject({ code: 'CREDIT_NOTE_INVALID_LINE', statusCode: 400 });
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('pre-check I1: línea ya acreditada → 409 LINE_ALREADY_CREDITED con los ids', async () => {
+      prisma.clientBillingCycle.findFirst.mockResolvedValue(makeCycle({ status: 'SENT' }) as never);
+      prisma.hoursTransaction.findMany.mockResolvedValueOnce([makeOriginal({ id: 'o1' })] as never);
+      prisma.creditNoteLine.findMany.mockResolvedValue([{ creditedTransactionId: 'o1' }] as never);
+
+      await expect(
+        service.emitCreditNote(ORG, CLIENT, 'cyc1', { lineIds: ['o1'], reason: 'motivo' }, USER),
+      ).rejects.toMatchObject({ code: 'LINE_ALREADY_CREDITED', statusCode: 409, details: { ids: ['o1'] } });
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('reintenta el P2002 del número de NC (isCreditNoteNumberConflict) y luego emite', async () => {
+      prisma.clientBillingCycle.findFirst.mockResolvedValue(makeCycle({ status: 'SENT' }) as never);
+      prisma.hoursTransaction.findMany.mockResolvedValue([makeOriginal({ id: 'o1', price: '100', hours: 2 })] as never);
+      tx.creditNote.count.mockResolvedValue(0 as never);
+      const p2002 = new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: '5.22.0',
+        meta: { target: 'credit_notes_organization_id_number_key' },
+      });
+      tx.creditNote.create
+        .mockRejectedValueOnce(p2002)
+        .mockResolvedValueOnce({ id: 'nc1', totalAmount: new Prisma.Decimal('-100'), totalHours: -2 } as never);
+      tx.creditNoteLine.create.mockResolvedValue({} as never);
+      tx.hoursTransaction.create.mockResolvedValue({} as never);
+
+      const res = await service.emitCreditNote(
+        ORG,
+        CLIENT,
+        'cyc1',
+        { lineIds: ['o1'], reason: 'motivo', returnHoursToBillable: true },
+        USER,
+      );
+
+      expect(tx.creditNote.create).toHaveBeenCalledTimes(2);
+      expect(res.number).toMatch(/^NC-\d{4}-00001$/);
+    });
+
+    it('reintenta el P2002 del número de NC también cuando meta.target es ARRAY de columnas', async () => {
+      // Postgres/Prisma puede devolver meta.target como array (['organization_id','number']) en vez del
+      // nombre del índice — el detector debe reconocerlo en AMBOS shapes (regresión: antes exigía 'credit').
+      prisma.clientBillingCycle.findFirst.mockResolvedValue(makeCycle({ status: 'SENT' }) as never);
+      prisma.hoursTransaction.findMany.mockResolvedValue([makeOriginal({ id: 'o1', price: '100', hours: 2 })] as never);
+      tx.creditNote.count.mockResolvedValue(0 as never);
+      const p2002 = new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: '5.22.0',
+        meta: { target: ['organization_id', 'number'] },
+      });
+      tx.creditNote.create
+        .mockRejectedValueOnce(p2002)
+        .mockResolvedValueOnce({ id: 'nc1', totalAmount: new Prisma.Decimal('-100'), totalHours: -2 } as never);
+      tx.creditNoteLine.create.mockResolvedValue({} as never);
+      tx.hoursTransaction.create.mockResolvedValue({} as never);
+
+      const res = await service.emitCreditNote(
+        ORG,
+        CLIENT,
+        'cyc1',
+        { lineIds: ['o1'], reason: 'motivo', returnHoursToBillable: true },
+        USER,
+      );
+
+      expect(tx.creditNote.create).toHaveBeenCalledTimes(2);
+      expect(res.number).toMatch(/^NC-\d{4}-00001$/);
+    });
+
+    it('exige motivo de al menos 3 caracteres EFECTIVOS (post-trim) → 400 CREDIT_NOTE_REASON_REQUIRED', async () => {
+      prisma.clientBillingCycle.findFirst.mockResolvedValue(makeCycle({ status: 'SENT' }) as never);
+      prisma.hoursTransaction.findMany.mockResolvedValue([makeOriginal({ id: 'o1' })] as never);
+
+      await expect(
+        service.emitCreditNote(ORG, CLIENT, 'cyc1', { lineIds: ['o1'], reason: ' a ' }, USER),
+      ).rejects.toMatchObject({ code: 'CREDIT_NOTE_REASON_REQUIRED', statusCode: 400 });
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('P2002 de línea ya acreditada bajo carrera (isLineAlreadyCreditedConflict) → 409 LINE_ALREADY_CREDITED sin retry', async () => {
+      prisma.clientBillingCycle.findFirst.mockResolvedValue(makeCycle({ status: 'SENT' }) as never);
+      prisma.hoursTransaction.findMany.mockResolvedValue([makeOriginal({ id: 'o1' })] as never);
+      tx.creditNote.count.mockResolvedValue(0 as never);
+      tx.creditNote.create.mockResolvedValue({
+        id: 'nc1',
+        totalAmount: new Prisma.Decimal('-100'),
+        totalHours: -2,
+      } as never);
+      const p2002 = new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: '5.22.0',
+        meta: { target: 'credit_note_lines_credited_transaction_id_key' },
+      });
+      tx.creditNoteLine.create.mockRejectedValue(p2002);
+
+      await expect(
+        service.emitCreditNote(
+          ORG,
+          CLIENT,
+          'cyc1',
+          { lineIds: ['o1'], reason: 'motivo', returnHoursToBillable: false },
+          USER,
+        ),
+      ).rejects.toMatchObject({ code: 'LINE_ALREADY_CREDITED', statusCode: 409 });
+      expect(tx.creditNote.create).toHaveBeenCalledTimes(1); // sin retry
+    });
+
+    it('previewCreditNote: dry-run con totales NEGATIVOS + detalle POSITIVO, sin escribir', async () => {
+      prisma.clientBillingCycle.findFirst.mockResolvedValue(
+        makeCycle({ status: 'SENT', invoiceNumber: 'FAC-2026-00009', currency: 'PYG' }) as never,
+      );
+      prisma.hoursTransaction.findMany.mockResolvedValueOnce([
+        makeOriginal({ id: 'o1', price: '100', hours: 2, title: 'Ajuste' }),
+        makeOriginal({ id: 'o2', price: '50', hours: 1 }),
+      ] as never);
+
+      const res = await service.previewCreditNote(ORG, CLIENT, 'cyc1', { lineIds: ['o1', 'o2'], reason: 'x' });
+
+      expect(res.totalAmount).toBe('-150');
+      expect(res.totalHours).toBe(-3);
+      expect(res.lineCount).toBe(2);
+      expect(res.invoiceNumber).toBe('FAC-2026-00009');
+      expect(res.lines[0].priceAmount).toBe('100'); // detalle en positivo
+      expect(res.lines[0].description).toBe('Ajuste');
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('D1 — getClosedMonthKeys cubre el RANGO [periodStart..periodEnd]: un mes intermedio de una ACUMULADA queda cerrado', async () => {
+      // Ciclo ACUMULADO cerrado que cubre mayo→julio (periodStart mayo, periodEnd fin de julio).
+      prisma.clientBillingCycle.findMany.mockResolvedValue([
+        { periodStart: new Date('2026-05-01T03:00:00Z'), periodEnd: new Date('2026-08-01T02:59:59.999Z') },
+      ] as never);
+      prisma.hoursTransaction.findMany
+        .mockResolvedValueOnce([] as never) // sinTarifa
+        .mockResolvedValueOnce([] as never) // sinFecha
+        .mockResolvedValueOnce([{ id: 'jun', workedOn: new Date(Date.UTC(2026, 5, 15)) }] as never); // candidato junio (mid-range)
+      tx.clientBillingCycle.count.mockResolvedValue(0 as never);
+      tx.clientBillingCycle.create.mockResolvedValue({ id: 'cyc9' } as never);
+      tx.hoursTransaction.updateMany.mockResolvedValue({ count: 1 } as never);
+      tx.hoursTransaction.aggregate.mockResolvedValue({
+        _sum: { priceAmount: new Prisma.Decimal('100'), hours: 1 },
+      } as never);
+      tx.clientBillingCycle.update.mockResolvedValue(makeCycle() as never);
+
+      // Cierra agosto: junio (mes intermedio de la acumulada) debe entrar por el rango D1.
+      await service.closeCycle(ORG, CLIENT, '2026-08', {}, USER);
+
+      const stampedIds = (tx.hoursTransaction.updateMany.mock.calls[0][0].where as { id: { in: string[] } }).id.in;
+      expect(stampedIds).toContain('jun');
+    });
+  });
+
+  describe('reopenCycle con NC (H9b)', () => {
+    it('anular una FAC con notas de crédito → 409 CYCLE_HAS_CREDIT_NOTES sin liberar', async () => {
+      prisma.clientBillingCycle.findFirst.mockResolvedValue(makeCycle({ status: 'SENT' }) as never);
+      prisma.creditNote.count.mockResolvedValue(1 as never);
+
+      await expect(
+        service.reopenCycle(ORG, CLIENT, 'cyc1', { cancelReason: 'no aplica' }, USER),
+      ).rejects.toMatchObject({ code: 'CYCLE_HAS_CREDIT_NOTES', statusCode: 409 });
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+  });
 });

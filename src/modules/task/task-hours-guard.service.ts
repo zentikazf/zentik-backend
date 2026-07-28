@@ -154,7 +154,7 @@ export class TaskHoursGuardService {
   async assertNotBilled(taskId: string, tx: PrismaLike = this.prisma): Promise<void> {
     if (await this.hasBilledHours(taskId, tx)) {
       throw new AppException(
-        'Esta tarea ya fue facturada. Para revertirla necesitás emitir una nota de crédito.',
+        'Tiene horas facturadas y no se revierte. Para ajustar el cobro emití una nota de crédito (no reabre la tarea).',
         'TASK_HOURS_BILLED',
         409,
         { taskId },

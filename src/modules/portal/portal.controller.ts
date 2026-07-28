@@ -138,6 +138,18 @@ export class PortalController {
     return this.portalService.downloadMyInvoice(user.id, cycleId, res);
   }
 
+  // H9b: descarga del PDF de una nota de crédito del cliente. Ruta de 3 segmentos con estático inicial
+  // 'credit-notes' → no colisiona con portal/invoices/... `@Res({ passthrough: false })` bypassea el interceptor.
+  @Get('portal/credit-notes/:creditNoteId/pdf')
+  @ApiOperation({ summary: 'Descargar el PDF de una nota de crédito del cliente' })
+  downloadMyCreditNote(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('creditNoteId') creditNoteId: string,
+    @Res({ passthrough: false }) res: Response,
+  ): Promise<void> {
+    return this.portalService.downloadMyCreditNote(user.id, creditNoteId, res);
+  }
+
   // ── Ticket endpoints (Portal) ─────────────────────────────
 
   @Get('portal/tickets')
