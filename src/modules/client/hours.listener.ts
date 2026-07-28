@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
 import { ClientService } from './client.service';
 
@@ -75,18 +76,22 @@ export class HoursListener {
     taskId: string;
     duration: number;
     entryVersion?: number; // H7: si viene, keyea el refund al cobro EXACTO de esta carga.
+    userId?: string; // H9a: viene del spread de domainEvent en los 3 emisores → sella deletedById.
   }) {
     try {
-      const { timeEntryId, taskId, entryVersion } = event;
+      const { timeEntryId, taskId, entryVersion, userId } = event;
 
       // H7: con (timeEntryId, entryVersion) reembolsamos el cobro EXACTO de esta carga MANUAL,
       // no "el más reciente" (que sub-reembolsaría cuando una tarea tiene N cargas). Sin version
       // (carrier legacy pre-H7) caemos al comportamiento anterior: la USAGE/LOAN más reciente.
+      // H9a: deletedAt null → un cargo ya tombstoneado no se re-reembolsa (idempotencia blanda
+      // ante re-entrega del evento; la garantía dura es el único parcial de reversesTransactionId).
       const keyed = !!timeEntryId && entryVersion != null;
       const txn = await this.prisma.hoursTransaction.findFirst({
         where: {
           taskId,
           type: { in: ['USAGE', 'LOAN'] },
+          deletedAt: null,
           ...(keyed ? { timeEntryId, entryVersion } : {}),
         },
         orderBy: { createdAt: 'desc' },
@@ -97,30 +102,63 @@ export class HoursListener {
         return;
       }
 
-      await this.prisma.$transaction(async (tx) => {
-        await tx.hoursTransaction.create({
-          data: {
-            clientId: txn.clientId,
-            type: 'REFUND',
-            hours: txn.hours,
-            taskId,
-            note: `Reversion de cupo por rechazo/reapertura (H7)`,
-            workedOn: txn.workedOn ?? txn.createdAt, // H8a: netea contra el período del cobro original, no la fecha del revert
-          },
-        });
+      try {
+        await this.prisma.$transaction(async (tx) => {
+          await tx.hoursTransaction.create({
+            data: {
+              clientId: txn.clientId,
+              type: 'REFUND',
+              hours: txn.hours,
+              taskId,
+              note: `Reversion de cupo por rechazo/reapertura (H7)`,
+              workedOn: txn.workedOn ?? txn.createdAt, // H8a: netea contra el período del cobro original, no la fecha del revert
+              reversesTransactionId: txn.id, // H9a: link 1:1 al cargo exacto (único parcial anti doble-refund)
+            },
+          });
 
-        if (txn.type === 'LOAN') {
-          await tx.client.update({
-            where: { id: txn.clientId },
-            data: { loanedHours: { decrement: txn.hours } },
+          // H9a: neteo de PLATA. Tombstone del cargo revertido → sale de TODO cálculo facturable
+          // (los 5 consumidores + guards de emisión ya filtran deletedAt:null) sin tocar su
+          // priceAmount (forense intacto, reversible). El REFUND de arriba queda como traza visible
+          // del cupo devuelto; NO lleva priceAmount (el neteo es por desaparición, no por monto
+          // negativo — un REFUND signado double-netearía).
+          await tx.hoursTransaction.update({
+            where: { id: txn.id },
+            data: {
+              deletedAt: new Date(),
+              deletedById: userId ?? null,
+              deleteReason: 'H9a: carga revertida (cupo devuelto via REFUND)',
+            },
           });
-        } else {
-          await tx.client.update({
-            where: { id: txn.clientId },
-            data: { usedHours: { decrement: txn.hours } },
-          });
+
+          if (txn.type === 'LOAN') {
+            await tx.client.update({
+              where: { id: txn.clientId },
+              data: { loanedHours: { decrement: txn.hours } },
+            });
+          } else {
+            await tx.client.update({
+              where: { id: txn.clientId },
+              data: { usedHours: { decrement: txn.hours } },
+            });
+          }
+        });
+      } catch (e) {
+        // H9a: idempotencia DB-forzada. Si dos reverts del MISMO cargo corren en carrera y ambos
+        // pasan el findFirst, el 2º create choca el único parcial de reverses_transaction_id
+        // (P2002) → rollback completo del tx (ni 2º REFUND, ni 2º tombstone, ni 2º decremento).
+        // Guard por target (mismo patrón que isInvoiceNumberConflict): SOLO ese unique se trata
+        // como "ya revertido" — un P2002 futuro de otro índice debe propagarse, no tragarse un
+        // refund legítimo en silencio. Robusto al shape de meta.target (string | string[]).
+        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+          const target = (e.meta as { target?: string[] | string } | undefined)?.target;
+          const hay = Array.isArray(target) ? target.join(',') : target ?? '';
+          if (hay.toLowerCase().includes('reverses')) {
+            this.logger.log(`Cargo ${txn.id} ya revertido (P2002 reverses_transaction_id) — skip idempotente`);
+            return;
+          }
         }
-      });
+        throw e;
+      }
 
       this.logger.log(`Revertidas ${txn.hours}h (${txn.type} → REFUND) para task ${taskId}`);
     } catch (err) {

@@ -1350,10 +1350,17 @@ model HoursTransaction {
   // no romper filas históricas. Una fila pertenece a lo sumo a un ciclo → idempotencia.
   billedCycleId String? @map("billed_cycle_id")
 
+  // ── H9a: link de reversa. El REFUND referencia el cargo EXACTO que revierte (1 reembolso por
+  //    cargo). El único parcial (WHERE reverses_transaction_id IS NOT NULL) va a mano en el
+  //    migration.sql — Prisma 5.x no expresa índices parciales (patrón H2). NO declarar @@unique. ──
+  reversesTransactionId String? @map("reverses_transaction_id")
+
   client      Client              @relation(fields: [clientId], references: [id], onDelete: Cascade)
   task        Task?               @relation(fields: [taskId], references: [id], onDelete: SetNull)
   deletedBy   User?               @relation("HoursDeletedBy", fields: [deletedById], references: [id], onDelete: SetNull)
   billedCycle ClientBillingCycle? @relation("BilledCycle", fields: [billedCycleId], references: [id], onDelete: SetNull)
+  reverses    HoursTransaction?  @relation("HoursReversal", fields: [reversesTransactionId], references: [id], onDelete: SetNull)
+  reversedBy  HoursTransaction[] @relation("HoursReversal")
 
   @@index([clientId])
   @@index([taskId])
@@ -1362,6 +1369,7 @@ model HoursTransaction {
   @@index([billedCycleId])
   @@index([clientId, billedCycleId])
   @@index([workedOn]) // H8a: H8b filtra/ordena el conjunto facturable por este eje
+  @@index([reversesTransactionId])
   @@map("hours_transactions")
 }
 
