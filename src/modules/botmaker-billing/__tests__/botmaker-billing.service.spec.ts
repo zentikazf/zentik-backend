@@ -36,6 +36,8 @@ describe('BotmakerBillingService (#23)', () => {
           { productId: 'SESSIONS', usage: 50, totalSpend: 5 },
           { productId: 'SESSIONS', usage: 25, totalSpend: [{ total: 2.5, currency: 'USD' }] },
           { productId: 'FEE', usage: 1, totalSpend: 100 },
+          // Payload REAL: totalSpend como OBJETO único { total, currency } (el que hacía dar 0).
+          { productId: 'MESSAGES', usage: 500, totalSpend: { total: 42, currency: 'USD' } },
           { productId: 'ZERO', usage: 999, totalSpend: 0 },
         ],
       },
@@ -79,8 +81,11 @@ describe('BotmakerBillingService (#23)', () => {
     expect(sessions!.commercialValue).toBe(0);
     expect(sessions!.source).toBe('BOTMAKER');
 
-    // ZERO (totalSpend 0) se excluye del import; FEE (100) entra.
-    expect(items.map((i) => i.label).sort()).toEqual(['FEE', 'SESSIONS']);
+    // totalSpend como OBJETO único { total, currency } se lee bien (antes daba 0).
+    expect(items.find((i) => i.label === 'MESSAGES')!.rawValue).toBe(42);
+
+    // ZERO (totalSpend 0) se excluye del import; FEE (100) y MESSAGES (42) entran.
+    expect(items.map((i) => i.label).sort()).toEqual(['FEE', 'MESSAGES', 'SESSIONS']);
   });
 
   it('marca cuentas ya mapeadas a un cliente de la org', async () => {

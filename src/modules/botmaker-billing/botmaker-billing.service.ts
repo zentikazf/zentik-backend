@@ -182,13 +182,23 @@ export class BotmakerBillingService {
     };
   }
 
-  /** `balance`/`totalSpend` = array multi-moneda | número | string → total USD. Suma las entradas USD. */
-  private moneyToUsd(value: BotmakerMoney[] | number | string | undefined): number {
+  /**
+   * Monto → total USD. El payload REAL usa DISTINTAS formas según el campo:
+   *  - `accounts[].totalSpend` = ARRAY multi-moneda `[{total,currency}]` (suma las USD)
+   *  - `productUsage[].totalSpend` = OBJETO ÚNICO `{total,currency}` (el que hacía dar 0)
+   *  - a veces número/string plano
+   * Se contemplan las tres.
+   */
+  private moneyToUsd(value: BotmakerMoney | BotmakerMoney[] | number | string | undefined): number {
     if (value == null) return 0;
     if (Array.isArray(value)) {
       const usd = value.filter((m) => (m.currency ?? 'USD').toUpperCase() === 'USD');
       const pool = usd.length > 0 ? usd : value; // sin marca de moneda → asumir USD
       return round2(pool.reduce((s, m) => s + this.toNumber(m.total), 0));
+    }
+    if (typeof value === 'object') {
+      // Objeto único { total, currency } (productUsage[].totalSpend en el payload real).
+      return round2(this.toNumber(value.total));
     }
     return round2(this.toNumber(value));
   }

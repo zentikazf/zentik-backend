@@ -16,16 +16,17 @@ export interface BotmakerMoney {
 export interface BotmakerRawProductUsage {
   productId?: string;
   usage?: number | string;
-  // Puede venir como número plano o como array multi-moneda (defensivo).
-  totalSpend?: number | string | BotmakerMoney[];
+  // Payload REAL: OBJETO único { total, currency }. También toleramos número/array (defensivo).
+  totalSpend?: number | string | BotmakerMoney | BotmakerMoney[];
 }
 
 export interface BotmakerRawAccount {
   accountId?: string;
   accountName?: string;
   accountAlias?: string;
-  balance?: BotmakerMoney[] | number | string;
-  totalSpend?: BotmakerMoney[] | number | string;
+  // Payload REAL: `accounts[].totalSpend` es ARRAY; toleramos objeto único/número (defensivo).
+  balance?: BotmakerMoney | BotmakerMoney[] | number | string;
+  totalSpend?: BotmakerMoney | BotmakerMoney[] | number | string;
   productUsage?: BotmakerRawProductUsage[];
 }
 

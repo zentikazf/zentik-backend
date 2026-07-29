@@ -37,8 +37,12 @@ export class BotmakerClientService {
       });
     } catch (err) {
       const isAbort = (err as { name?: string } | null)?.name === 'AbortError';
-      // Metadata-only: ni el token ni el body. `period` no es sensible.
-      this.logger.warn(`Botmaker transport error period=${period} abort=${isAbort}`);
+      // Metadata-only: el token va en headers, NO en el mensaje de red. `period`/URL no son sensibles.
+      // Se incluye name/message + cause.code (undici envuelve DNS/TLS/URL-inválida ahí) para diagnosticar.
+      const cause = (err as { cause?: { code?: string; message?: string } })?.cause;
+      const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+      const causeStr = cause?.code || cause?.message ? ` cause=${cause.code ?? cause.message}` : '';
+      this.logger.warn(`Botmaker transport error period=${period} abort=${isAbort} — ${detail}${causeStr}`);
       throw new AppException(
         isAbort ? 'Botmaker no respondió a tiempo' : 'No se pudo contactar a Botmaker',
         isAbort ? 'BOTMAKER_TIMEOUT' : 'BOTMAKER_UNREACHABLE',

@@ -133,6 +133,14 @@ export class PortalController {
     return this.portalService.getMyVariables(user.id);
   }
 
+  // #23: detalle de una factura (Consumo + Fee + Tiempo facturado, todo en Gs). Ruta de 3 segmentos con
+  // estático final 'detail' → no colisiona con portal/invoices/:cycleId/pdf.
+  @Get('portal/invoices/:cycleId/detail')
+  @ApiOperation({ summary: 'Detalle de una factura del cliente (consumo, fee y tiempo facturado en Gs)' })
+  getMyInvoiceDetail(@CurrentUser() user: AuthenticatedUser, @Param('cycleId') cycleId: string) {
+    return this.portalService.getMyInvoiceDetail(user.id, cycleId);
+  }
+
   // Ruta de 3 segmentos (invoices/:cycleId/pdf) → no colisiona con GET portal/invoices.
   // `@Res({ passthrough: false })` bypassea el interceptor global (igual que el PDF admin de H8e).
   @Get('portal/invoices/:cycleId/pdf')

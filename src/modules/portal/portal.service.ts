@@ -723,6 +723,62 @@ export class PortalService {
     };
   }
 
+  // #23: detalle de UNA factura del cliente para el portal (Consumo + Fee + Tiempo facturado, TODO en Gs
+  // como se facturó). El consumo/fee salen del estampado `variables_billing` (líneas ya convertidas a Gs);
+  // el tiempo son las horas de soporte del ciclo. Scopeado por user.clientId + solo SENT/PAID (nunca DRAFT).
+  async getMyInvoiceDetail(userId: string, cycleId: string) {
+    const client = await this.getClientByUserId(userId);
+    const cycle = await this.prisma.clientBillingCycle.findFirst({
+      where: { id: cycleId, clientId: client.id, status: { in: ['SENT', 'PAID'] } },
+      select: { invoiceNumber: true, currency: true, totalAmount: true, variablesBilling: true },
+    });
+    if (!cycle) {
+      throw new AppException('Factura no encontrada', 'INVOICE_NOT_FOUND', 404);
+    }
+
+    // Variables estampadas: líneas { label, convertedPyg } (Gs). Se separa el Fee del resto del Consumo.
+    const raw = cycle.variablesBilling as { lines?: Array<{ label?: string; convertedPyg?: string }> } | null;
+    const stampLines = Array.isArray(raw?.lines) ? raw!.lines! : [];
+    const isFee = (label: string) => label.trim().toUpperCase() === 'FEE';
+    const toLine = (l: { label?: string; convertedPyg?: string }) => ({
+      label: String(l.label ?? ''),
+      amount: String(l.convertedPyg ?? '0'), // Gs
+    });
+    const consumo = stampLines.filter((l) => !isFee(String(l.label ?? ''))).map(toLine);
+    const fee = stampLines.filter((l) => isFee(String(l.label ?? ''))).map(toLine);
+    const sumGs = (arr: { amount: string }[]) =>
+      arr.reduce((s, x) => s.plus(x.amount || '0'), new Prisma.Decimal(0)).toString();
+
+    // Tiempo facturado: horas de soporte estampadas en este ciclo (Gs).
+    const txs = await this.prisma.hoursTransaction.findMany({
+      where: { billedCycleId: cycleId },
+      select: { hours: true, note: true, priceAmount: true, workedOn: true, task: { select: { title: true } } },
+      orderBy: { workedOn: 'asc' },
+    });
+    const tiempo = txs.map((t) => ({
+      concepto: t.task?.title ?? t.note ?? '—',
+      hours: t.hours,
+      amount: t.priceAmount != null ? t.priceAmount.toString() : '0', // Gs
+    }));
+    const subtotalTiempo = txs
+      .reduce((s, t) => s.plus(t.priceAmount ?? 0), new Prisma.Decimal(0))
+      .toString();
+    const totalHoras = txs.reduce((s, t) => s + t.hours, 0);
+
+    return {
+      invoiceNumber: cycle.invoiceNumber,
+      currency: cycle.currency, // Gs (PYG)
+      consumo,
+      fee,
+      subtotalConsumo: sumGs(consumo),
+      subtotalFee: sumGs(fee),
+      tiempo,
+      subtotalTiempo,
+      totalHoras,
+      total: cycle.totalAmount.toString(), // gran total facturado (Soporte + Variables), Gs
+    };
+  }
+
   // Descarga del PDF de UNA factura del cliente. Reusa el generador de H8e
   // (ClientBillingPdfService), pero valida ANTES que el ciclo sea del cliente del usuario y
   // esté emitido (SENT/PAID) — nunca DRAFT (interno) ni CANCELLED (sin acción). El org del
