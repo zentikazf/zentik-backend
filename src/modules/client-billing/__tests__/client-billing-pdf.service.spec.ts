@@ -40,6 +40,7 @@ describe('ClientBillingPdfService (#39 H8e)', () => {
       paidAt: null,
       cancelReason: null,
       cancelledAt: null,
+      variablesBilling: null,
       createdAt: new Date('2026-07-31T12:00:00Z'),
       ...over,
     };

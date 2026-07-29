@@ -1064,19 +1064,22 @@ model Client {
   developmentHourlyRate Decimal?     @map("development_hourly_rate") @db.Decimal(12, 2)
   supportHourlyRate     Decimal?     @map("support_hourly_rate") @db.Decimal(12, 2)
   currency              String       @default("PYG")
+  // #23: cuenta Botmaker mapeada (clave del GET de consumo). NULL = sin cuenta → variables 100% manuales.
+  botmakerAccountId     String?      @map("botmaker_account_id")
   createdAt             DateTime     @default(now()) @map("created_at")
   updatedAt             DateTime     @updatedAt @map("updated_at")
 
-  organization      Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  user              User?                @relation("ClientOwner", fields: [userId], references: [id], onDelete: SetNull)
-  users             User[]               @relation("ClientUsers")
+  organization      Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user              User?                    @relation("ClientOwner", fields: [userId], references: [id], onDelete: SetNull)
+  users             User[]                   @relation("ClientUsers")
   projects          Project[]
   suggestions       Suggestion[]
   tickets           Ticket[]
   hoursTransactions HoursTransaction[]
   billingCycles     ClientBillingCycle[]
+  billingStatements ClientBillingStatement[]
   creditNotes       CreditNote[]
-  files             File[]               @relation("ClientFiles")
+  files             File[]                   @relation("ClientFiles")
 
   @@index([organizationId])
   @@index([organizationId, status])
@@ -1415,6 +1418,10 @@ model ClientBillingCycle {
   cancelReason   String?   @map("cancel_reason")
   cancelledAt    DateTime? @map("cancelled_at")
   cancelledById  String?   @map("cancelled_by_id")
+  // #23: estampado inmutable de las Variables (Botmaker) cobradas en esta factura + la tasa USD→PYG
+  //   usada al emitir. JSON: { amountPyg, currency, rate, rateDate, lines:[{label, commercialUsd, convertedPyg}] }
+  //   (montos como string). NULL = factura sin variables. totalAmount ya incluye amountPyg. Aditivo (T0-bis).
+  variablesBilling Json?   @map("variables_billing")
   createdAt      DateTime  @default(now()) @map("created_at")
   updatedAt      DateTime  @updatedAt @map("updated_at")
 
@@ -1429,6 +1436,33 @@ model ClientBillingCycle {
   @@index([organizationId])
   @@index([clientId, periodStart])
   @@map("client_billing_cycles")
+}
+
+// ============================================================================
+// CLIENT BILLING STATEMENTS (Variables de facturación / consumo Botmaker — #23)
+// ============================================================================
+// Set de variables por cliente+período (USD). El admin trae el crudo del GET de Botmaker,
+// le pone precio comercial y guarda el conjunto. Un statement por (client, period). La
+// conversión a Gs y el cobro ocurren en la factura del ciclo (client_billing_cycles).
+
+model ClientBillingStatement {
+  id        String   @id @default(cuid())
+  clientId  String   @map("client_id")
+  period    String // 'YYYY-MM'
+  // [{ label, rawValue?: number, commercialValue: number, source: 'BOTMAKER'|'MANUAL' }] — montos en USD.
+  items     Json     @default("[]")
+  note      String?
+  // #23: candado anti-doble-cobro (mismo patrón que HoursTransaction.billedCycleId). NULL = no facturado;
+  //   al emitir una factura que incluye este período se sella con el cycleId; anular el ciclo lo libera.
+  //   Aditivo (T0-bis). Referencia suelta al ciclo (los ciclos nunca se hard-deletean → keep-data).
+  billedCycleId String? @map("billed_cycle_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@unique([clientId, period], map: "client_billing_statements_client_period_uq")
+  @@map("client_billing_statements")
 }
 
 // ============================================================================

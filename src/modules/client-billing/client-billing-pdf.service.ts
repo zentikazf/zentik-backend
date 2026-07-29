@@ -119,7 +119,11 @@ export function buildInvoiceModel(input: {
       ? monthLabelEs(startKey)
       : `${monthLabelEs(startKey)} – ${monthLabelEs(endKey)}`;
 
-  const multi = grupos.length > 1;
+  // #23: si la factura estampó variables, se muestra una sección "Variables" (Gs convertidos) además de
+  //   Soporte, y se etiquetan TODAS las secciones (aunque el soporte sea de un solo mes) para distinguirlas.
+  const stamp = cycle.variablesBilling;
+  const hasVars = !!stamp && stamp.lines.length > 0;
+  const multi = grupos.length > 1 || hasVars;
   const groups: InvoiceGroup[] = grupos
     .map((g) => {
       const lines: InvoiceLine[] = transactions
@@ -142,6 +146,22 @@ export function buildInvoiceModel(input: {
       };
     })
     .filter((grp) => grp.lines.length > 0);
+
+  if (hasVars && stamp) {
+    groups.push({
+      label: `Variables (Botmaker) — 1 USD ≈ ${fmtMoney(stamp.rate, currency)} (${fmtDateAsuncion(new Date(stamp.rateDate))})`,
+      showHeader: true,
+      subtotal: fmtMoney(stamp.amountPyg, currency),
+      horas: `${stamp.lines.length} ítem(s)`,
+      lines: stamp.lines.map((l) => ({
+        concepto: l.label,
+        tipo: 'Variable',
+        horas: '—',
+        tarifa: `US$ ${l.commercialUsd}`,
+        monto: fmtMoney(l.convertedPyg, currency),
+      })),
+    });
+  }
 
   return {
     orgName: org?.name ?? 'Organización',

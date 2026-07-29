@@ -684,6 +684,45 @@ export class PortalService {
     };
   }
 
+  // ── #23: Variables de facturación (portal) — SOLO comerciales, scopeado por cliente ─────
+  //
+  // El portal NUNCA llama a Botmaker ni ve el crudo/balance madre: lee solo `client_billing_statements`
+  // del cliente del user (scope por user.clientId) y devuelve un DTO ALLOWLIST { label, commercialValue }.
+  // Gated por portalBillingEnabled (defensa en profundidad además del gate de la página).
+  async getMyVariables(userId: string) {
+    const client = await this.getClientByUserId(userId);
+    if (!client.portalBillingEnabled) return { statements: [] };
+
+    const statements = await this.prisma.clientBillingStatement.findMany({
+      where: { clientId: client.id },
+      orderBy: { period: 'desc' },
+      select: { period: true, items: true, note: true, updatedAt: true },
+    });
+
+    const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+    return {
+      statements: statements
+        .map((s) => {
+          const raw = Array.isArray(s.items)
+            ? (s.items as unknown as Array<{ label?: string; commercialValue?: number }>)
+            : [];
+          // ALLOWLIST: SOLO label + commercialValue. Nunca rawValue, source, ni datos de la cuenta Botmaker.
+          const items = raw
+            .filter((i) => Number(i.commercialValue) > 0)
+            .map((i) => ({ label: String(i.label ?? ''), commercialValue: Number(i.commercialValue) }));
+          return {
+            period: s.period,
+            note: s.note,
+            currency: 'USD' as const, // las variables se guardan en USD
+            items,
+            total: round2(items.reduce((sum, l) => sum + l.commercialValue, 0)),
+            updatedAt: s.updatedAt,
+          };
+        })
+        .filter((s) => s.items.length > 0),
+    };
+  }
+
   // Descarga del PDF de UNA factura del cliente. Reusa el generador de H8e
   // (ClientBillingPdfService), pero valida ANTES que el ciclo sea del cliente del usuario y
   // esté emitido (SENT/PAID) — nunca DRAFT (interno) ni CANCELLED (sin acción). El org del

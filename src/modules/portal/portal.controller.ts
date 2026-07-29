@@ -126,6 +126,13 @@ export class PortalController {
     return this.portalService.getMyInvoices(user.id);
   }
 
+  // #23: Variables de facturación del cliente (solo valores comerciales, scopeado por user.clientId).
+  @Get('portal/variables')
+  @ApiOperation({ summary: 'Variables de facturación del cliente (valores comerciales guardados)' })
+  getMyVariables(@CurrentUser() user: AuthenticatedUser) {
+    return this.portalService.getMyVariables(user.id);
+  }
+
   // Ruta de 3 segmentos (invoices/:cycleId/pdf) → no colisiona con GET portal/invoices.
   // `@Res({ passthrough: false })` bypassea el interceptor global (igual que el PDF admin de H8e).
   @Get('portal/invoices/:cycleId/pdf')

@@ -43,6 +43,7 @@ export class ClientService {
         supportHourlyRate: dto.supportHourlyRate,
         ...(dto.currency && { currency: dto.currency }),
         ...(dto.portalBillingEnabled !== undefined && { portalBillingEnabled: dto.portalBillingEnabled }),
+        ...(dto.botmakerAccountId !== undefined && { botmakerAccountId: dto.botmakerAccountId || null }),
       },
     });
 
@@ -154,6 +155,7 @@ export class ClientService {
           ...(dto.supportHourlyRate !== undefined && { supportHourlyRate: dto.supportHourlyRate }),
           ...(dto.currency !== undefined && { currency: dto.currency }),
           ...(dto.portalBillingEnabled !== undefined && { portalBillingEnabled: dto.portalBillingEnabled }),
+          ...(dto.botmakerAccountId !== undefined && { botmakerAccountId: dto.botmakerAccountId || null }),
         },
         include: { user: { select: { id: true, name: true, email: true } } },
       });

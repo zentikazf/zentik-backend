@@ -64,4 +64,13 @@ export class CreateClientDto {
   @IsOptional()
   @IsBoolean({ message: 'portalBillingEnabled debe ser un booleano' })
   portalBillingEnabled?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Cuenta Botmaker mapeada (accountId del GET de consumo). #23. Recambiable; null desmapea.',
+    example: 'IC0XXEN8LOZW38EW2XP2',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  botmakerAccountId?: string;
 }
