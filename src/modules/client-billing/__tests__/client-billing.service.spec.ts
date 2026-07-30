@@ -5,6 +5,8 @@ import { PrismaService } from '../../../database/prisma.service';
 import { AuditService } from '../../audit/audit.service';
 import { AppConfigService } from '../../../config/app.config';
 import { AuthenticatedUser } from '../../../common/interfaces/request.interface';
+import { BillingVariablesService } from '../../botmaker-billing/billing-variables.service';
+import { ExchangeRateProvider } from '../../botmaker-billing/exchange-rate/exchange-rate.provider';
 
 /**
  * Tests unitarios del cierre de ciclo de facturación (#25) + motor de corte por workedOn (H8b).
@@ -19,6 +21,8 @@ describe('ClientBillingService (#25 + H8b)', () => {
   let prisma: DeepMockProxy<PrismaService>;
   let audit: DeepMockProxy<AuditService>;
   let config: DeepMockProxy<AppConfigService>;
+  let variables: DeepMockProxy<BillingVariablesService>;
+  let exchangeRate: DeepMockProxy<ExchangeRateProvider>;
   let tx: DeepMockProxy<Prisma.TransactionClient>;
   let service: ClientBillingService;
 
@@ -77,8 +81,18 @@ describe('ClientBillingService (#25 + H8b)', () => {
     prisma = mockDeep<PrismaService>();
     audit = mockDeep<AuditService>();
     config = mockDeep<AppConfigService>();
+    variables = mockDeep<BillingVariablesService>();
+    exchangeRate = mockDeep<ExchangeRateProvider>();
     tx = mockDeep<Prisma.TransactionClient>();
-    service = new ClientBillingService(prisma, audit, config);
+    service = new ClientBillingService(prisma, audit, config, variables, exchangeRate);
+
+    // #23: defaults sin variables → el motor de ciclos se comporta como antes (solo Soporte).
+    variables.get.mockResolvedValue({
+      period: '2026-07', items: [], note: null, totalCommercial: 0, billed: false, exists: false,
+    } as never);
+    variables.collectCommercial.mockResolvedValue({ lines: [], subtotalUsd: 0, contributingPeriods: [] } as never);
+    variables.unbilledByPeriod.mockResolvedValue(new Map() as never);
+    exchangeRate.getRate.mockResolvedValue(7000 as never);
 
     prisma.client.findFirst.mockResolvedValue({ id: CLIENT, organizationId: ORG, currency: 'PYG' } as never);
     prisma.$transaction.mockImplementation((cb: unknown) =>
@@ -1074,6 +1088,63 @@ describe('ClientBillingService (#25 + H8b)', () => {
         service.reopenCycle(ORG, CLIENT, 'cyc1', { cancelReason: 'no aplica' }, USER),
       ).rejects.toMatchObject({ code: 'CYCLE_HAS_CREDIT_NOTES', statusCode: 409 });
       expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── #23: combinación con Variables (Botmaker) + conversión + candado ──────
+  describe('closeCycle con Variables (#23)', () => {
+    // computeFacturable hace 3 hoursTransaction.findMany (sinTarifa, sinFecha, candidatos) + closedMonthKeys.
+    function stubNoSupport() {
+      prisma.clientBillingCycle.findMany.mockResolvedValue([] as never); // closedMonthKeys
+      prisma.hoursTransaction.findMany
+        .mockResolvedValueOnce([] as never) // sinTarifa
+        .mockResolvedValueOnce([] as never) // sinFecha
+        .mockResolvedValueOnce([] as never) // candidatos (sin soporte → factura solo-variables)
+        .mockResolvedValue([] as never);
+      tx.clientBillingCycle.count.mockResolvedValue(0 as never);
+      tx.clientBillingCycle.create.mockResolvedValue({ id: 'cyc1' } as never);
+      tx.hoursTransaction.updateMany.mockResolvedValue({ count: 0 } as never);
+      tx.clientBillingStatement.updateMany.mockResolvedValue({ count: 1 } as never);
+      tx.hoursTransaction.aggregate.mockResolvedValue({ _sum: { priceAmount: null, hours: null } } as never);
+      tx.clientBillingCycle.update.mockResolvedValue(makeCycle() as never);
+    }
+
+    it('fail-closed: hay variables pero no vino tasa → 409 EXCHANGE_RATE_REQUIRED', async () => {
+      stubNoSupport();
+      variables.collectCommercial.mockResolvedValue({
+        lines: [{ label: 'SESSIONS', commercialValue: 100 }], subtotalUsd: 100, contributingPeriods: ['2026-07'],
+      } as never);
+
+      await expect(
+        service.closeCycle(ORG, CLIENT, '2026-07', { mode: 'MES', period: '2026-07' }, USER),
+      ).rejects.toMatchObject({ code: 'EXCHANGE_RATE_REQUIRED', statusCode: 409 });
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('con tasa: estampa variablesBilling, suma al total y sella el statement (billedCycleId)', async () => {
+      stubNoSupport();
+      variables.collectCommercial.mockResolvedValue({
+        lines: [{ label: 'SESSIONS', commercialValue: 100 }], subtotalUsd: 100, contributingPeriods: ['2026-07'],
+      } as never);
+
+      await service.closeCycle(
+        ORG, CLIENT, '2026-07', { mode: 'MES', period: '2026-07', exchangeRate: 7300 }, USER,
+      );
+
+      // variablesBilling estampado en el create (100 USD * 7300 = 730000 Gs).
+      const createData = tx.clientBillingCycle.create.mock.calls[0][0].data as Record<string, any>;
+      expect(createData.variablesBilling.amountPyg).toBe('730000');
+      expect(createData.variablesBilling.rate).toBe('7300');
+      expect(createData.variablesBilling.lines[0]).toMatchObject({ label: 'SESSIONS', convertedPyg: '730000' });
+
+      // total = Soporte(0) + Variables(730000).
+      const snapData = tx.clientBillingCycle.update.mock.calls[0][0].data as Record<string, any>;
+      expect(snapData.totalAmount.toString()).toBe('730000');
+
+      // statement sellado con el ciclo (candado anti-doble-cobro).
+      const sealArg = tx.clientBillingStatement.updateMany.mock.calls[0][0] as Record<string, any>;
+      expect(sealArg.where).toMatchObject({ clientId: CLIENT, period: { in: ['2026-07'] }, billedCycleId: null });
+      expect(sealArg.data).toEqual({ billedCycleId: 'cyc1' });
     });
   });
 });

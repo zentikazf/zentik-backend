@@ -138,4 +138,32 @@ export class AppConfigService {
   get onnixDlqMaxAgeMin(): number {
     return Number(this.configService.get<string>('ONNIX_DLQ_MAX_AGE_MIN') ?? 1440);
   }
+
+  // === Botmaker Billing (feature #23) ===
+  // Feature flag maestro (molde Onnix). Con `false` (default) los secretos Botmaker son
+  // opcionales y el select de cuentas / import hacen early-return: el boot no falla sin
+  // credenciales. process.env siempre es string; comparamos contra 'true'.
+  get botmakerBillingEnabled(): boolean {
+    return this.configService.get<string>('BOTMAKER_BILLING_ENABLED') === 'true';
+  }
+  // Secretos / base url: OPTIONAL en el boot. Se validan en runtime (al primer uso) solo si el
+  // flag esta on. El access-token NUNCA se loggea.
+  get botmakerBaseUrl(): string | undefined { return this.configService.get<string>('BOTMAKER_BASE_URL'); }
+  get botmakerAccessToken(): string | undefined { return this.configService.get<string>('BOTMAKER_ACCESS_TOKEN'); }
+  // Tunables con default seguro EN EL GETTER (no getOrThrow): validateEnv NO inyecta los defaults
+  // de Zod a process.env, asi que con el flag off la app arranca igual. Number(...) explicito.
+  get botmakerHttpTimeoutMs(): number {
+    return Number(this.configService.get<string>('BOTMAKER_HTTP_TIMEOUT_MS') ?? 15000);
+  }
+  get botmakerCacheTtlSec(): number {
+    return Number(this.configService.get<string>('BOTMAKER_CACHE_TTL_SEC') ?? 1800);
+  }
+  // Tasa USD→PYG simulada (v1). Fallback manual mientras no haya integración DNIT (fase 2). El
+  // preview de generación la muestra editable — nunca se factura con una tasa que el admin no revisó.
+  get exchangeRateSimulated(): number | undefined {
+    const raw = this.configService.get<string>('EXCHANGE_RATE_SIMULATED');
+    if (!raw) return undefined;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  }
 }

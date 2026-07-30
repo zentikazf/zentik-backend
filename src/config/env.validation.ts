@@ -103,6 +103,18 @@ export const envSchema = z.object({
   ONNIX_CATALOG_CACHE_TTL_SEC: z.coerce.number().default(600),
   // Umbral de alerta DLQ por edad del mensaje failed mas viejo (minutos) — R44.
   ONNIX_DLQ_MAX_AGE_MIN: z.coerce.number().default(1440),
+
+  // === Botmaker Billing (feature #23) ===
+  // Feature flag maestro (molde Onnix). Con `false` (default) BASE_URL/ACCESS_TOKEN son opcionales:
+  // el boot NO puede romper sin credenciales Botmaker (dev/CI). La presencia de secretos se valida
+  // en runtime al primer uso SOLO cuando el flag esta on (ver BotmakerClientService).
+  BOTMAKER_BILLING_ENABLED: z.enum(['true', 'false']).default('false'),
+  BOTMAKER_BASE_URL: z.string().url().optional(),
+  BOTMAKER_ACCESS_TOKEN: z.string().optional(),
+  BOTMAKER_HTTP_TIMEOUT_MS: z.coerce.number().default(15000),
+  BOTMAKER_CACHE_TTL_SEC: z.coerce.number().default(1800),
+  // Tasa USD→PYG simulada (v1). Opcional; si falta, el admin la pega a mano en el preview.
+  EXCHANGE_RATE_SIMULATED: z.string().optional(),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;

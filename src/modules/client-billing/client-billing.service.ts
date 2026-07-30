@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
 import { AuditService } from '../audit/audit.service';
@@ -6,6 +6,12 @@ import { AppConfigService } from '../../config/app.config';
 import { AppException } from '../../common/filters/app-exception';
 import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { tzOffsetMinutes } from '../ticket/sla.util';
+import { BillingVariablesService, CommercialLine } from '../botmaker-billing/billing-variables.service';
+import {
+  EXCHANGE_RATE_PROVIDER,
+  ExchangeRateProvider,
+} from '../botmaker-billing/exchange-rate/exchange-rate.provider';
+import { buildVariablesStamp } from '../botmaker-billing/exchange-rate/convert-variables';
 import { CloseCycleDto } from './dto/close-cycle.dto';
 import { CreateCreditNoteDto } from './dto/create-credit-note.dto';
 import { PreviewCycleDto } from './dto/preview-cycle.dto';
@@ -53,6 +59,16 @@ export interface BillingRowDto {
   sinTarifa: boolean;
 }
 
+// #23: estampado inmutable de las Variables (Botmaker) cobradas + la tasa USD→PYG usada al emitir.
+//   Montos como string (exactitud). null = factura sin variables. `totalAmount` YA incluye `amountPyg`.
+export interface VariablesBillingStamp {
+  amountPyg: string;
+  currency: string;
+  rate: string;
+  rateDate: string; // ISO
+  lines: Array<{ label: string; commercialUsd: string; convertedPyg: string }>;
+}
+
 export interface CycleDto {
   id: string;
   status: string;
@@ -70,6 +86,7 @@ export interface CycleDto {
   paidAt: Date | null;
   cancelReason: string | null; // H8d/A3: motivo de anulación (keep-data)
   cancelledAt: Date | null; // H8d/A3: cuándo se anuló
+  variablesBilling: VariablesBillingStamp | null; // #23: variables + tasa estampadas (null = sin variables)
   createdAt: Date;
 }
 
@@ -120,6 +137,10 @@ interface ComputeFacturableResult {
   periodEnd: Date; // borde nominal superior (= cutoffDate)
   cutoffDate: Date; // instante efectivo del corte (= until)
   currency: string;
+  // #23: Variables (Botmaker) NO facturadas de los períodos elegidos — se combinan con Soporte al emitir.
+  variables: CommercialLine[];
+  variablesSubtotalUsd: number;
+  variablePeriods: string[]; // períodos cuyas variables entran (para sellar billedCycleId en la emisión)
   bloqueos: {
     sinTarifaRate: boolean; // SUPPORT_RATE_NOT_CONFIGURED anticipado (flag, no lanza)
     sinFechaTrabajo: { count: number; ids: string[] }; // BILLABLE_WITHOUT_WORKED_ON anticipado
@@ -135,6 +156,8 @@ export class ClientBillingService {
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
     private readonly config: AppConfigService,
+    private readonly billingVariables: BillingVariablesService,
+    @Inject(EXCHANGE_RATE_PROVIDER) private readonly exchangeRateProvider: ExchangeRateProvider,
   ) {}
 
   // ── Helpers de scope / período (T4) ────────────────────────────────────
@@ -391,6 +414,7 @@ export class ClientBillingService {
     paidAt: Date | null;
     cancelReason: string | null;
     cancelledAt: Date | null;
+    variablesBilling?: Prisma.JsonValue | null;
     createdAt: Date;
   }): CycleDto {
     return {
@@ -410,8 +434,34 @@ export class ClientBillingService {
       paidAt: c.paidAt,
       cancelReason: c.cancelReason,
       cancelledAt: c.cancelledAt,
+      variablesBilling: this.parseVariablesStamp(c.variablesBilling),
       createdAt: c.createdAt,
     };
+  }
+
+  /** #23: parsea el JSON estampado `variables_billing` a su tipo (o null si vacío/ausente). */
+  private parseVariablesStamp(v: Prisma.JsonValue | null | undefined): VariablesBillingStamp | null {
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+    const obj = v as Record<string, unknown>;
+    if (!Array.isArray(obj.lines)) return null;
+    return {
+      amountPyg: String(obj.amountPyg ?? '0'),
+      currency: String(obj.currency ?? ''),
+      rate: String(obj.rate ?? ''),
+      rateDate: String(obj.rateDate ?? ''),
+      lines: (obj.lines as Array<Record<string, unknown>>).map((l) => ({
+        label: String(l.label ?? ''),
+        commercialUsd: String(l.commercialUsd ?? '0'),
+        convertedPyg: String(l.convertedPyg ?? '0'),
+      })),
+    };
+  }
+
+  // ── #23: helpers de variables + conversión ──────────────────────────────
+
+  /** Períodos cuyas variables entran a esta factura: el mes nominal (MES) o los meses elegidos (ACUMULADO). */
+  private variablePeriods(mode: FacturableMode, period: string, months?: string[]): string[] {
+    return mode === 'ACUMULADO' ? months ?? [] : period ? [period] : [];
   }
 
   /** H8d: etiqueta de mes es-PY 'YYYY-MM' → 'Abril 2026' (header de grupo del preview). */
@@ -509,11 +559,24 @@ export class ClientBillingService {
       orderBy: { createdAt: 'desc' },
     });
 
+    // #23: Variables (Botmaker) del mes — reemplazan la columna Proyecto/Interno en el builder. Montos
+    //   comerciales USD; la conversión a Gs y el cobro ocurren al generar la factura. DINÁMICO: si el
+    //   statement ya se facturó (billedCycleId) NO se muestran como pendientes — el builder marca
+    //   "factura al día" y linkea a la factura que las incluyó.
+    const statement = await this.billingVariables.get(orgId, clientId, period);
+    const variablesBilled = statement.billed;
+
     return {
       period,
       soporte,
       proyecto,
       interno,
+      variables: variablesBilled
+        ? []
+        : statement.items.map((i) => ({ label: i.label, commercialValue: i.commercialValue })),
+      variablesSubtotalUsd: variablesBilled ? 0 : statement.totalCommercial,
+      variablesBilled, // #23: ya facturadas → "Factura al día"
+      variablesBilledCycleId: statement.billedCycleId, // link a la factura
       subtotalSoporte: subtotalSoporte.toString(),
       subtotalFueraCupo: subtotalFueraCupo.toString(),
       totalFacturable: subtotalSoporte.toString(),
@@ -549,16 +612,21 @@ export class ClientBillingService {
 
     const currentKey = this.asuncionPeriodKey(new Date());
 
+    // #23: variables (Botmaker) NO facturadas por período (USD). Un mes solo-variables (sin soporte) también
+    //   debe ofrecerse a facturar → alimenta hasVars/estado + el field `variablesUsd` del generador.
+    const unbilledVars = await this.billingVariables.unbilledByPeriod(clientId);
+
     interface MonthBucket {
       hasFacturable: boolean;
       remainder: Prisma.Decimal;
+      variablesUsd: number; // #23: comercial USD no facturado del mes
       cycles: CycleDto[];
     }
     const months = new Map<string, MonthBucket>();
     const ensure = (key: string): MonthBucket => {
       let b = months.get(key);
       if (!b) {
-        b = { hasFacturable: false, remainder: new Prisma.Decimal(0), cycles: [] };
+        b = { hasFacturable: false, remainder: new Prisma.Decimal(0), variablesUsd: 0, cycles: [] };
         months.set(key, b);
       }
       return b;
@@ -572,6 +640,9 @@ export class ClientBillingService {
         bucket.remainder = bucket.remainder.plus(r.priceAmount);
       }
     }
+    for (const [period, usd] of unbilledVars) {
+      ensure(period).variablesUsd = usd; // #23
+    }
     for (const c of cycles) {
       ensure(this.asuncionPeriodKey(c.periodStart)).cycles.push(this.toCycleDto(c));
     }
@@ -579,15 +650,18 @@ export class ClientBillingService {
     const result = [...months.entries()].map(([period, b]) => {
       const activeCycles = b.cycles.filter((c) => c.status !== 'CANCELLED');
       const hasRemainder = b.remainder.greaterThan(0);
+      const hasVars = b.variablesUsd > 0; // #23
+      const pending = hasRemainder || hasVars; // #23: queda algo por facturar (soporte o variables)
       let estado: string;
       if (period === currentKey) {
         estado = 'EN_CURSO';
-      } else if (!b.hasFacturable) {
+      } else if (!b.hasFacturable && !hasVars) {
+        // Conserva la convención previa (ciclo sin filas facturables = SIN_TRABAJO); `!hasVars` evita que un
+        // mes solo-variables SIN facturar caiga acá (tiene variablesUsd>0 → NO_FACTURADO, ofrecido a facturar).
         estado = 'SIN_TRABAJO';
-      } else if (!hasRemainder) {
-        // H8d: sin remanente = todo lo facturable del mes ya está estampado, venga de un ciclo mensual
-        //   o de una factura ACUMULADA que barrió este mes (bucketeada bajo su mes más viejo, no acá).
-        //   Antes esto exigía activeCycles>0 y dejaba mayo/junio de una acumulada como "No facturado Gs 0".
+      } else if (!pending) {
+        // H8d: sin pendiente = todo lo facturable del mes ya está estampado (soporte + variables), venga de un
+        //   ciclo mensual o de una factura ACUMULADA que barrió este mes.
         estado = 'FACTURADO';
       } else if (activeCycles.length > 0) {
         estado = 'FACTURADO_PARCIAL';
@@ -598,6 +672,7 @@ export class ClientBillingService {
         period,
         estado,
         totalFacturable: estado === 'SIN_TRABAJO' ? '0' : b.remainder.toString(),
+        variablesUsd: estado === 'SIN_TRABAJO' ? 0 : b.variablesUsd, // #23
         currency: client.currency,
         cycles: b.cycles,
       };
@@ -796,6 +871,11 @@ export class ClientBillingService {
       periodStart = this.parsePeriod(this.workedMonthKey(oldestWorked)).periodStart;
     }
 
+    // #23: Variables (Botmaker) NO facturadas de los períodos elegidos. Mismo cómputo para preview y emisión
+    //   (el preview no puede mentir respecto de lo que se estampa). MES → el mes nominal; ACUMULADO → los meses.
+    const varPeriods = this.variablePeriods(opts.mode, opts.period ?? '', opts.months);
+    const variables = await this.billingVariables.collectCommercial(clientId, varPeriods);
+
     return {
       facturableIds,
       rows,
@@ -803,6 +883,9 @@ export class ClientBillingService {
       periodEnd,
       cutoffDate: until,
       currency: client.currency,
+      variables: variables.lines,
+      variablesSubtotalUsd: variables.subtotalUsd,
+      variablePeriods: variables.contributingPeriods, // solo los períodos que aportan → sellar exactamente esos
       bloqueos: {
         sinTarifaRate,
         sinFechaTrabajo: { count: sinFecha.length, ids: sinFecha.map((r) => r.id) },
@@ -856,13 +939,22 @@ export class ClientBillingService {
 
     const total = grupos.reduce((acc, g) => acc.plus(g.subtotalMes), new Prisma.Decimal(0)).toString();
 
+    // #23: hay algo que facturar si hay Soporte O Variables (un mes solo-variables también se factura).
+    const hayAlgoQueFacturar = comp.facturableIds.length > 0 || comp.variablesSubtotalUsd > 0;
     const puedeEmitir =
-      comp.facturableIds.length > 0 &&
+      hayAlgoQueFacturar &&
       !comp.bloqueos.sinTarifaRate &&
       comp.bloqueos.sinFechaTrabajo.count === 0 &&
       comp.bloqueos.revertidasVivas.count === 0;
 
     const issueYear = this.asuncionYear(new Date());
+
+    // #23: tasa USD→PYG sugerida (simulada v1) para prellenar el campo editable del preview. Solo si hay
+    //   variables; el admin la revisa/corrige antes de emitir (nunca se factura una tasa sin revisar).
+    const suggestedRate =
+      comp.variablesSubtotalUsd > 0
+        ? await this.exchangeRateProvider.getRate(new Date(), 'USD', comp.currency)
+        : null;
 
     return {
       mode,
@@ -872,9 +964,12 @@ export class ClientBillingService {
       grupos,
       total,
       currency: comp.currency,
+      variables: comp.variables, // #23: líneas comerciales USD que se sumarán (convertidas) al total
+      variablesSubtotalUsd: comp.variablesSubtotalUsd,
+      suggestedRate,
       bloqueos: comp.bloqueos,
       puedeEmitir,
-      motivo: comp.facturableIds.length === 0 ? 'NOTHING_TO_BILL' : null, // empty state anticipado
+      motivo: hayAlgoQueFacturar ? null : 'NOTHING_TO_BILL', // empty state anticipado
       nextInvoiceHint: `FAC-${issueYear}-…`,
     };
   }
@@ -917,6 +1012,31 @@ export class ClientBillingService {
       );
     }
 
+    // #23: nada que facturar (ni Soporte ni Variables) → 409 acá afuera (además del guard del tx).
+    if (comp.facturableIds.length === 0 && comp.variablesSubtotalUsd <= 0) {
+      throw new AppException('No hay movimientos facturables en este período', 'NOTHING_TO_BILL', 409);
+    }
+
+    // #23: conversión de Variables (USD→PYG) al emitir. Fail-closed: si hay variables y no vino tasa (o es
+    //   inválida) → 409 (nunca se factura una tasa que el admin no revisó en el preview). La tasa+fecha y las
+    //   líneas convertidas quedan ESTAMPADAS en la factura (reproducible; no se recalcula después).
+    let variablesStamp: VariablesBillingStamp | null = null;
+    let variablesAmountPyg = new Prisma.Decimal(0);
+    if (comp.variablesSubtotalUsd > 0) {
+      const rate = dto.exchangeRate;
+      if (rate == null || !(rate > 0)) {
+        throw new AppException(
+          'Falta la tasa de cambio USD→PYG para convertir las variables. Revisala en el preview antes de emitir.',
+          'EXCHANGE_RATE_REQUIRED',
+          409,
+        );
+      }
+      const rateDate = dto.exchangeRateDate ? new Date(dto.exchangeRateDate) : new Date();
+      const built = buildVariablesStamp(comp.variables, rate, rateDate, comp.currency);
+      variablesStamp = built.stamp;
+      variablesAmountPyg = built.amountPyg;
+    }
+
     const kind = mode === 'ACUMULADO' ? 'ACCUMULATED' : 'MONTH';
     const facturableIds = comp.facturableIds;
     const scopeLabel = mode === 'ACUMULADO' ? (dto.months ?? []).join(',') : period;
@@ -950,6 +1070,10 @@ export class ClientBillingService {
                 invoiceNumber,
                 currency: comp.currency,
                 notes: dto.notes ?? null,
+                // #23: estampado inmutable de variables + tasa (null si la factura no tiene variables).
+                ...(variablesStamp && {
+                  variablesBilling: variablesStamp as unknown as Prisma.InputJsonValue,
+                }),
               },
             });
 
@@ -957,16 +1081,28 @@ export class ClientBillingService {
               where: { id: { in: facturableIds }, billedCycleId: null },
               data: { billedCycleId: cycle.id },
             });
-            if (stamped.count === 0) {
+            // #23: NOTHING_TO_BILL solo si NO hay Soporte estampado NI Variables (un mes solo-variables vale).
+            if (stamped.count === 0 && variablesAmountPyg.lte(0)) {
               // Rollback: revierte también el create del ciclo (R5 AC3).
               throw new AppException('No hay movimientos facturables en este período', 'NOTHING_TO_BILL', 409);
+            }
+
+            // #23: sella los statements de variables incluidos (candado anti-doble-cobro; se libera al anular).
+            //   `billedCycleId: null` en el where hace el update idempotente ante carrera del mismo admin.
+            if (comp.variablePeriods.length > 0) {
+              await tx.clientBillingStatement.updateMany({
+                where: { clientId, period: { in: comp.variablePeriods }, billedCycleId: null },
+                data: { billedCycleId: cycle.id },
+              });
             }
 
             const agg = await tx.hoursTransaction.aggregate({
               where: { billedCycleId: cycle.id },
               _sum: { priceAmount: true, hours: true },
             });
-            const totalAmount = agg._sum.priceAmount ?? new Prisma.Decimal(0);
+            // #23: total de la factura = Soporte(Gs) + Variables(Gs). totalAmount folda ambos (todas las vistas
+            //   —lista, portal, PDF— muestran el gran total); el desglose sale de variablesBilling.amountPyg.
+            const totalAmount = (agg._sum.priceAmount ?? new Prisma.Decimal(0)).plus(variablesAmountPyg);
             const totalHours = agg._sum.hours ?? 0;
 
             await tx.clientBillingCycle.update({
@@ -1078,6 +1214,12 @@ export class ClientBillingService {
     const released = await this.prisma.$transaction(
       async (tx) => {
         const freed = await tx.hoursTransaction.updateMany({
+          where: { billedCycleId: cycleId },
+          data: { billedCycleId: null },
+        });
+        // #23: libera también los statements de variables sellados por este ciclo (vuelven a ser facturables
+        //   y editables). Espeja el release de las horas.
+        await tx.clientBillingStatement.updateMany({
           where: { billedCycleId: cycleId },
           data: { billedCycleId: null },
         });
