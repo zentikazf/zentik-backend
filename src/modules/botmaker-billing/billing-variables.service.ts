@@ -4,12 +4,29 @@ import { PrismaService } from '../../database/prisma.service';
 import { AppException } from '../../common/filters/app-exception';
 import { UpsertVariablesDto } from './dto/upsert-variables.dto';
 
+/** Modo de precio de una variable (contrato del cliente). */
+export type PricingMode = 'DIRECTO' | 'CALCULO' | 'MANUAL';
+
 /** Ítem del statement (JSON) — montos en USD. `rawValue` nullable para variables manuales. */
 export interface StatementItem {
   label: string;
+  usage?: number | null; // #23: cantidad del API (base del cálculo por unidad)
   rawValue?: number | null;
   commercialValue: number;
   source: 'BOTMAKER' | 'MANUAL';
+  // #23: regla de precio persistida. DIRECTO = crudo; CALCULO = (usage−incluidas)×unitPrice; MANUAL = a mano.
+  mode?: PricingMode | null;
+  incluidas?: number | null; // solo CALCULO
+  unitPrice?: number | null; // solo CALCULO
+}
+
+/** Ítem crudo importado de Botmaker (antes de aplicar el contrato). */
+export interface ImportedItem {
+  label: string;
+  usage: number;
+  rawValue: number;
+  commercialValue: number;
+  source: 'BOTMAKER';
 }
 
 /** Línea comercial mínima que consume el motor de ciclos (nunca expone rawValue). */
@@ -45,6 +62,43 @@ export class BillingVariablesService {
   async resolveClientAccount(orgId: string, clientId: string): Promise<{ botmakerAccountId: string | null }> {
     const client = await this.assertClient(orgId, clientId);
     return { botmakerAccountId: client.botmakerAccountId };
+  }
+
+  /**
+   * #23: aplica el CONTRATO del cliente a los ítems recién importados de Botmaker. Toma la última statement
+   * guardada (mes más reciente), matchea por label y ARRASTRA la regla (mode + incluidas + unitPrice),
+   * recalculando el comercial con el usage/crudo NUEVOS. Ítem sin regla previa → comercial 0 (a definir).
+   * Así, seteada la regla una vez, los meses siguientes se calculan solos al abrirlos.
+   */
+  async applyContractRules(clientId: string, imported: ImportedItem[]): Promise<StatementItem[]> {
+    const latest = await this.prisma.clientBillingStatement.findFirst({
+      where: { clientId },
+      orderBy: { period: 'desc' },
+      select: { items: true },
+    });
+    const prior = new Map<string, StatementItem>();
+    for (const it of this.toItems(latest?.items)) prior.set(it.label, it);
+
+    return imported.map((imp) => {
+      const rule = prior.get(imp.label);
+      const base: StatementItem = {
+        label: imp.label,
+        usage: imp.usage,
+        rawValue: imp.rawValue,
+        commercialValue: 0,
+        source: 'BOTMAKER',
+      };
+      if (!rule || !rule.mode) return base; // sin contrato previo → el admin define la regla
+      const item: StatementItem = {
+        ...base,
+        mode: rule.mode,
+        incluidas: rule.incluidas ?? null,
+        unitPrice: rule.unitPrice ?? null,
+      };
+      // MANUAL arrastra el valor previo (fee fijo); DIRECTO/CALCULO recalculan con el usage/crudo nuevos.
+      item.commercialValue = computeCommercial({ ...item, commercialValue: rule.commercialValue });
+      return item;
+    });
   }
 
   private assertPeriod(period: string): void {
@@ -121,12 +175,22 @@ export class BillingVariablesService {
       );
     }
 
-    const items: StatementItem[] = dto.items.map((i) => ({
-      label: i.label.trim(),
-      rawValue: i.rawValue ?? null,
-      commercialValue: i.commercialValue,
-      source: i.source,
-    }));
+    // #23: el valor comercial se RECALCULA en el backend según la regla (DIRECTO/CALCULO); MANUAL se respeta.
+    //   Nunca se confía en el número que manda el cliente para las reglas automáticas.
+    const items: StatementItem[] = dto.items.map((i) => {
+      const item: StatementItem = {
+        label: i.label.trim(),
+        usage: i.usage ?? null,
+        rawValue: i.rawValue ?? null,
+        commercialValue: i.commercialValue,
+        source: i.source,
+        mode: i.mode ?? null,
+        incluidas: i.incluidas ?? null,
+        unitPrice: i.unitPrice ?? null,
+      };
+      item.commercialValue = computeCommercial(item);
+      return item;
+    });
     const note = dto.note?.trim() || null;
 
     const statement = await this.prisma.clientBillingStatement.upsert({
@@ -217,4 +281,27 @@ export class BillingVariablesService {
 /** Redondeo monetario a 2 decimales (USD) evitando el ruido binario. */
 function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+
+/**
+ * #23 — Fórmula ÚNICA del valor comercial según la regla de la variable (fuente de verdad server-side):
+ *  - DIRECTO: comercial = crudo (traspaso directo del costo de Botmaker).
+ *  - CALCULO: comercial = max(0, usage − incluidas) × unitPrice (tarifa por unidad con parte incluida).
+ *  - MANUAL / sin regla: se respeta el comercial tipeado (fee fijo, override).
+ * (El frontend replica esta fórmula para el cálculo en vivo; el backend la re-aplica al guardar/importar.)
+ */
+export function computeCommercial(item: {
+  mode?: PricingMode | null;
+  rawValue?: number | null;
+  usage?: number | null;
+  incluidas?: number | null;
+  unitPrice?: number | null;
+  commercialValue?: number | null;
+}): number {
+  if (item.mode === 'DIRECTO') return round2(Number(item.rawValue) || 0);
+  if (item.mode === 'CALCULO') {
+    const cobrable = Math.max(0, (Number(item.usage) || 0) - (Number(item.incluidas) || 0));
+    return round2(cobrable * (Number(item.unitPrice) || 0));
+  }
+  return round2(Number(item.commercialValue) || 0); // MANUAL / sin regla
 }

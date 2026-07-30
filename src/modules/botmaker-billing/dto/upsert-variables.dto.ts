@@ -20,13 +20,19 @@ export class VariableItemDto {
   @MaxLength(120)
   label: string;
 
+  @ApiPropertyOptional({ description: 'Cantidad (usage) del GET de Botmaker. Base del cálculo por unidad.' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  usage?: number;
+
   @ApiPropertyOptional({ description: 'Valor crudo (USD) del GET de Botmaker. Null en variables manuales.' })
   @IsOptional()
   @Type(() => Number)
   @IsNumber()
   rawValue?: number;
 
-  @ApiProperty({ example: 415.81, description: 'Valor comercial (USD, con markup). ≥ 0.' })
+  @ApiProperty({ example: 415.81, description: 'Valor comercial (USD). El backend lo recalcula según la regla.' })
   @Type(() => Number)
   @IsNumber()
   @Min(0)
@@ -35,6 +41,27 @@ export class VariableItemDto {
   @ApiProperty({ enum: ['BOTMAKER', 'MANUAL'] })
   @IsIn(['BOTMAKER', 'MANUAL'])
   source: 'BOTMAKER' | 'MANUAL';
+
+  // #23: regla de precio persistida (contrato del cliente). DIRECTO = crudo; CALCULO = (usage−incluidas)×precio;
+  //   MANUAL = valor tipeado a mano (fee fijo, override). Se arrastra al re-importar el mes siguiente.
+  @ApiPropertyOptional({ enum: ['DIRECTO', 'CALCULO', 'MANUAL'] })
+  @IsOptional()
+  @IsIn(['DIRECTO', 'CALCULO', 'MANUAL'])
+  mode?: 'DIRECTO' | 'CALCULO' | 'MANUAL';
+
+  @ApiPropertyOptional({ description: 'CALCULO: cantidad incluida/no cobrable antes de aplicar el precio unitario.' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  incluidas?: number;
+
+  @ApiPropertyOptional({ description: 'CALCULO: precio unitario (USD) por unidad cobrable.' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  unitPrice?: number;
 }
 
 export class UpsertVariablesDto {

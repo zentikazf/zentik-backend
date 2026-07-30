@@ -72,7 +72,9 @@ export class BotmakerBillingController {
   ) {
     // Valida el cliente dentro de la org y trae su cuenta mapeada (404 si no existe el cliente).
     const { botmakerAccountId } = await this.variables.resolveClientAccount(orgId, clientId);
-    return this.botmaker.importVariables(botmakerAccountId ?? '', period);
+    const imported = await this.botmaker.importVariables(botmakerAccountId ?? '', period);
+    // #23: arrastra el contrato (reglas de precio) de la última statement → el comercial se calcula solo.
+    return this.variables.applyContractRules(clientId, imported);
   }
 
   @Get('clients/:clientId/billing/variables/:period')

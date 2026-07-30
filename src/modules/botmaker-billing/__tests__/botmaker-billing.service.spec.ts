@@ -78,6 +78,7 @@ describe('BotmakerBillingService (#23)', () => {
     const sessions = items.find((i) => i.label === 'SESSIONS');
     expect(sessions).toBeDefined();
     expect(sessions!.rawValue).toBe(17.5); // 10 + 5 + 2.5
+    expect(sessions!.usage).toBe(175); // #23: 100 + 50 + 25 (suma de usage por productId)
     expect(sessions!.commercialValue).toBe(0);
     expect(sessions!.source).toBe('BOTMAKER');
 

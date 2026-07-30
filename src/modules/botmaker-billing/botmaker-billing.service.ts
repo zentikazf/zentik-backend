@@ -17,6 +17,7 @@ const CACHE_PREFIX = 'botmaker:billing:';
 /** Ítem de variable prellenado desde Botmaker (no persistido; alimenta el editor). */
 export interface ImportedVariableItem {
   label: string;
+  usage: number; // #23: cantidad del API (base del cálculo por unidad)
   rawValue: number; // USD crudo del GET
   commercialValue: number; // 0 — el admin lo edita
   source: 'BOTMAKER';
@@ -115,6 +116,7 @@ export class BotmakerBillingService {
       .filter((p) => p.totalSpend > 0)
       .map((p) => ({
         label: p.productId,
+        usage: p.usage, // #23: cantidad, para el cálculo por unidad del contrato
         rawValue: p.totalSpend,
         commercialValue: 0,
         source: 'BOTMAKER' as const,
