@@ -132,6 +132,7 @@ export class BillingVariablesService {
         totalCommercial: this.totalCommercial(items),
         note: s.note,
         billed: !!s.billedCycleId, // #23: ya facturado (candado) → editor read-only, no re-cobra
+        billedCycleId: s.billedCycleId, // link directo a la factura que lo incluyó
         updatedAt: s.updatedAt,
       };
     });
@@ -151,6 +152,7 @@ export class BillingVariablesService {
       note: statement?.note ?? null,
       totalCommercial: this.totalCommercial(items),
       billed: !!statement?.billedCycleId, // #23: candado — si ya se facturó, el editor es read-only
+      billedCycleId: statement?.billedCycleId ?? null, // link directo a la factura que lo incluyó
       exists: !!statement,
     };
   }

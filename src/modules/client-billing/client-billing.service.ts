@@ -560,16 +560,23 @@ export class ClientBillingService {
     });
 
     // #23: Variables (Botmaker) del mes — reemplazan la columna Proyecto/Interno en el builder. Montos
-    //   comerciales USD; la conversión a Gs y el cobro ocurren al generar la factura.
+    //   comerciales USD; la conversión a Gs y el cobro ocurren al generar la factura. DINÁMICO: si el
+    //   statement ya se facturó (billedCycleId) NO se muestran como pendientes — el builder marca
+    //   "factura al día" y linkea a la factura que las incluyó.
     const statement = await this.billingVariables.get(orgId, clientId, period);
+    const variablesBilled = statement.billed;
 
     return {
       period,
       soporte,
       proyecto,
       interno,
-      variables: statement.items.map((i) => ({ label: i.label, commercialValue: i.commercialValue })),
-      variablesSubtotalUsd: statement.totalCommercial,
+      variables: variablesBilled
+        ? []
+        : statement.items.map((i) => ({ label: i.label, commercialValue: i.commercialValue })),
+      variablesSubtotalUsd: variablesBilled ? 0 : statement.totalCommercial,
+      variablesBilled, // #23: ya facturadas → "Factura al día"
+      variablesBilledCycleId: statement.billedCycleId, // link a la factura
       subtotalSoporte: subtotalSoporte.toString(),
       subtotalFueraCupo: subtotalFueraCupo.toString(),
       totalFacturable: subtotalSoporte.toString(),
