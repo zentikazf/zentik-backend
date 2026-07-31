@@ -7,6 +7,9 @@ import { UpsertVariablesDto } from './dto/upsert-variables.dto';
 /** Modo de precio de una variable (contrato del cliente). */
 export type PricingMode = 'DIRECTO' | 'CALCULO' | 'MANUAL';
 
+/** Operación del modo CALCULO: multiplicar por precio unitario o dividir por un divisor (unidades/USD). */
+export type PricingOp = 'MULT' | 'DIV';
+
 /** Ítem del statement (JSON) — montos en USD. `rawValue` nullable para variables manuales. */
 export interface StatementItem {
   label: string;
@@ -14,10 +17,19 @@ export interface StatementItem {
   rawValue?: number | null;
   commercialValue: number;
   source: 'BOTMAKER' | 'MANUAL';
-  // #23: regla de precio persistida. DIRECTO = crudo; CALCULO = (usage−incluidas)×unitPrice; MANUAL = a mano.
+  // #23: regla de precio persistida. DIRECTO = crudo; CALCULO = op(usage−incluidas, unitPrice); MANUAL = a mano.
   mode?: PricingMode | null;
   incluidas?: number | null; // solo CALCULO
-  unitPrice?: number | null; // solo CALCULO
+  unitPrice?: number | null; // solo CALCULO (precio unitario en MULT; divisor unidades/USD en DIV)
+  op?: PricingOp | null; // solo CALCULO (default MULT)
+  // #23 ojito: false = DESHABILITADA — no suma, no se factura, el portal no la muestra. La regla queda
+  //   guardada (re-habilitar restaura todo). Ausente/null = habilitada (backwards-compat).
+  enabled?: boolean | null;
+}
+
+/** #23: ¿la variable está habilitada? (ausente = sí, backwards-compat con statements viejos). */
+export function isEnabled(item: Pick<StatementItem, 'enabled'>): boolean {
+  return item.enabled !== false;
 }
 
 /** Ítem crudo importado de Botmaker (antes de aplicar el contrato). */
@@ -88,12 +100,14 @@ export class BillingVariablesService {
         commercialValue: 0,
         source: 'BOTMAKER',
       };
-      if (!rule || !rule.mode) return base; // sin contrato previo → el admin define la regla
+      if (!rule || !rule.mode) return { ...base, enabled: rule ? rule.enabled ?? true : true }; // sin regla → el admin la define (el ojito sí se hereda)
       const item: StatementItem = {
         ...base,
         mode: rule.mode,
         incluidas: rule.incluidas ?? null,
         unitPrice: rule.unitPrice ?? null,
+        op: rule.op ?? null,
+        enabled: rule.enabled ?? true, // #23 ojito: deshabilitada por contrato → arranca deshabilitada
       };
       // MANUAL arrastra el valor previo (fee fijo); DIRECTO/CALCULO recalculan con el usage/crudo nuevos.
       item.commercialValue = computeCommercial({ ...item, commercialValue: rule.commercialValue });
@@ -113,7 +127,8 @@ export class BillingVariablesService {
   }
 
   private totalCommercial(items: StatementItem[]): number {
-    return round2(items.reduce((s, i) => s + (Number(i.commercialValue) || 0), 0));
+    // #23 ojito: las deshabilitadas NO suman (no se cobran ni se muestran; la regla queda guardada).
+    return round2(items.filter(isEnabled).reduce((s, i) => s + (Number(i.commercialValue) || 0), 0));
   }
 
   /** R3 AC4: meses con statement (para la lista de meses del editor). */
@@ -189,6 +204,8 @@ export class BillingVariablesService {
         mode: i.mode ?? null,
         incluidas: i.incluidas ?? null,
         unitPrice: i.unitPrice ?? null,
+        op: i.op ?? null,
+        enabled: i.enabled ?? true, // #23 ojito
       };
       item.commercialValue = computeCommercial(item);
       return item;
@@ -251,7 +268,8 @@ export class BillingVariablesService {
     const contributing = new Set<string>();
     for (const s of statements) {
       for (const item of this.toItems(s.items)) {
-        if (Number(item.commercialValue) > 0) {
+        // #23 ojito: las deshabilitadas NUNCA entran a la factura.
+        if (isEnabled(item) && Number(item.commercialValue) > 0) {
           lines.push({ label: item.label, commercialValue: item.commercialValue });
           contributing.add(s.period);
         }
@@ -288,7 +306,9 @@ function round2(n: number): number {
 /**
  * #23 — Fórmula ÚNICA del valor comercial según la regla de la variable (fuente de verdad server-side):
  *  - DIRECTO: comercial = crudo (traspaso directo del costo de Botmaker).
- *  - CALCULO: comercial = max(0, usage − incluidas) × unitPrice (tarifa por unidad con parte incluida).
+ *  - CALCULO: cobrables = max(0, usage − incluidas); MULT (default) → cobrables × unitPrice;
+ *    DIV → cobrables ÷ unitPrice (unitPrice = divisor en unidades por USD, p. ej. tokens por dólar).
+ *    DIV con divisor 0 → 0 (nunca división por cero).
  *  - MANUAL / sin regla: se respeta el comercial tipeado (fee fijo, override).
  * (El frontend replica esta fórmula para el cálculo en vivo; el backend la re-aplica al guardar/importar.)
  */
@@ -298,12 +318,15 @@ export function computeCommercial(item: {
   usage?: number | null;
   incluidas?: number | null;
   unitPrice?: number | null;
+  op?: PricingOp | null;
   commercialValue?: number | null;
 }): number {
   if (item.mode === 'DIRECTO') return round2(Number(item.rawValue) || 0);
   if (item.mode === 'CALCULO') {
     const cobrable = Math.max(0, (Number(item.usage) || 0) - (Number(item.incluidas) || 0));
-    return round2(cobrable * (Number(item.unitPrice) || 0));
+    const factor = Number(item.unitPrice) || 0;
+    if (item.op === 'DIV') return factor > 0 ? round2(cobrable / factor) : 0;
+    return round2(cobrable * factor);
   }
   return round2(Number(item.commercialValue) || 0); // MANUAL / sin regla
 }

@@ -704,11 +704,12 @@ export class PortalService {
       statements: statements
         .map((s) => {
           const raw = Array.isArray(s.items)
-            ? (s.items as unknown as Array<{ label?: string; commercialValue?: number }>)
+            ? (s.items as unknown as Array<{ label?: string; commercialValue?: number; enabled?: boolean }>)
             : [];
           // ALLOWLIST: SOLO label + commercialValue. Nunca rawValue, source, ni datos de la cuenta Botmaker.
+          // #23 ojito: las variables deshabilitadas (enabled=false) NO se muestran al cliente.
           const items = raw
-            .filter((i) => Number(i.commercialValue) > 0)
+            .filter((i) => i.enabled !== false && Number(i.commercialValue) > 0)
             .map((i) => ({ label: String(i.label ?? ''), commercialValue: Number(i.commercialValue) }));
           return {
             period: s.period,

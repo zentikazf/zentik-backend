@@ -1,6 +1,7 @@
 import {
   ArrayMaxSize,
   IsArray,
+  IsBoolean,
   IsIn,
   IsNumber,
   IsOptional,
@@ -62,6 +63,23 @@ export class VariableItemDto {
   @IsNumber()
   @Min(0)
   unitPrice?: number;
+
+  @ApiPropertyOptional({
+    enum: ['MULT', 'DIV'],
+    description: 'CALCULO: operación. MULT (default) = cobrables × precio; DIV = cobrables ÷ divisor (unidades por USD, p. ej. tokens).',
+  })
+  @IsOptional()
+  @IsIn(['MULT', 'DIV'])
+  op?: 'MULT' | 'DIV';
+
+  @ApiPropertyOptional({
+    default: true,
+    description:
+      'Ojito: false = variable DESHABILITADA — no suma al total, no entra en la factura y el cliente no la ve en el portal. La regla queda guardada.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  enabled?: boolean;
 }
 
 export class UpsertVariablesDto {

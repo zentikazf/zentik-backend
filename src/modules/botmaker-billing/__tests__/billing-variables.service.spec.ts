@@ -21,20 +21,21 @@ describe('BillingVariablesService (#23)', () => {
     prisma.client.findFirst.mockResolvedValue({ id: CLIENT, botmakerAccountId: 'ACC' } as never);
   });
 
-  it('get: calcula el total comercial en el backend (suma de commercialValue)', async () => {
+  it('get: calcula el total comercial en el backend (suma de commercialValue, sin deshabilitadas)', async () => {
     prisma.clientBillingStatement.findUnique.mockResolvedValue({
       items: [
         { label: 'A', rawValue: 10, commercialValue: 875.17, source: 'BOTMAKER' },
         { label: 'B', rawValue: null, commercialValue: 124.83, source: 'MANUAL' },
+        { label: 'OFF', rawValue: 5, commercialValue: 500, source: 'BOTMAKER', enabled: false }, // #23 ojito
       ],
       note: 'abril',
       billedCycleId: null,
     } as never);
 
     const res = await service.get(ORG, CLIENT, PERIOD);
-    expect(res.totalCommercial).toBe(1000); // 875.17 + 124.83
+    expect(res.totalCommercial).toBe(1000); // 875.17 + 124.83 — la deshabilitada (500) NO suma
     expect(res.billed).toBe(false);
-    expect(res.items).toHaveLength(2);
+    expect(res.items).toHaveLength(3); // pero SÍ se devuelve (el editor la muestra apagada)
   });
 
   it('upsert: recalcula el total y persiste; bloquea si ya facturado', async () => {
@@ -58,20 +59,21 @@ describe('BillingVariablesService (#23)', () => {
     });
   });
 
-  it('collectCommercial: solo no facturadas + commercial>0, con períodos que aportan', async () => {
+  it('collectCommercial: solo no facturadas + commercial>0 + habilitadas, con períodos que aportan', async () => {
     prisma.clientBillingStatement.findMany.mockResolvedValue([
       {
         period: '2026-04',
         items: [
           { label: 'A', commercialValue: 100, source: 'BOTMAKER' },
           { label: 'Z', commercialValue: 0, source: 'MANUAL' }, // excluida (0)
+          { label: 'OFF', commercialValue: 999, source: 'BOTMAKER', enabled: false }, // #23 ojito: excluida
         ],
       },
       { period: '2026-05', items: [{ label: 'B', commercialValue: 50, source: 'MANUAL' }] },
     ] as never);
 
     const res = await service.collectCommercial(CLIENT, ['2026-04', '2026-05']);
-    expect(res.subtotalUsd).toBe(150);
+    expect(res.subtotalUsd).toBe(150); // el 999 deshabilitado NO entra
     expect(res.lines.map((l) => l.label).sort()).toEqual(['A', 'B']);
     expect(res.contributingPeriods.sort()).toEqual(['2026-04', '2026-05']);
     // filtra por billedCycleId null en la query
@@ -147,6 +149,16 @@ describe('Reglas de precio de variables (#23)', () => {
     it('CALCULO nunca da negativo si usage < incluidas', () => {
       expect(computeCommercial({ mode: 'CALCULO', usage: 100, incluidas: 3000, unitPrice: 0.065 })).toBe(0);
     });
+    it('CALCULO op=DIV → cobrables ÷ divisor (tokens por USD); divisor 0 → 0', () => {
+      // Tokens: 37.409.709 ÷ 625.000 unidades/USD = 59.86
+      expect(computeCommercial({ mode: 'CALCULO', usage: 37409709, incluidas: 0, unitPrice: 625000, op: 'DIV' })).toBe(59.86);
+      // Con incluidas: (1.000.000 − 500.000) ÷ 250.000 = 2
+      expect(computeCommercial({ mode: 'CALCULO', usage: 1000000, incluidas: 500000, unitPrice: 250000, op: 'DIV' })).toBe(2);
+      // Divisor 0 → 0 (nunca división por cero / Infinity)
+      expect(computeCommercial({ mode: 'CALCULO', usage: 100, incluidas: 0, unitPrice: 0, op: 'DIV' })).toBe(0);
+      // op ausente → MULT (backwards-compat con reglas ya guardadas)
+      expect(computeCommercial({ mode: 'CALCULO', usage: 10, incluidas: 0, unitPrice: 2 })).toBe(20);
+    });
     it('MANUAL / sin regla → respeta el comercial tipeado', () => {
       expect(computeCommercial({ mode: 'MANUAL', commercialValue: 299 })).toBe(299);
       expect(computeCommercial({ commercialValue: 149 })).toBe(149);
@@ -167,6 +179,7 @@ describe('Reglas de precio de variables (#23)', () => {
         items: [
           { label: 'SESSIONS', mode: 'CALCULO', incluidas: 3000, unitPrice: 0.065, commercialValue: 628.55, source: 'BOTMAKER' },
           { label: 'FEE', mode: 'MANUAL', commercialValue: 299, source: 'BOTMAKER' },
+          { label: 'TOKENS', mode: 'CALCULO', incluidas: 0, unitPrice: 625000, op: 'DIV', commercialValue: 59.86, source: 'BOTMAKER' },
         ],
       } as never);
 
@@ -174,6 +187,7 @@ describe('Reglas de precio de variables (#23)', () => {
       const imported = [
         { label: 'SESSIONS', usage: 5000, rawValue: 100, commercialValue: 0, source: 'BOTMAKER' as const },
         { label: 'FEE', usage: 1, rawValue: 149, commercialValue: 0, source: 'BOTMAKER' as const },
+        { label: 'TOKENS', usage: 1250000, rawValue: 3, commercialValue: 0, source: 'BOTMAKER' as const },
         { label: 'NUEVA', usage: 10, rawValue: 5, commercialValue: 0, source: 'BOTMAKER' as const }, // sin contrato previo
       ];
       const res = await service.applyContractRules(CLIENT, imported);
@@ -184,9 +198,26 @@ describe('Reglas de precio de variables (#23)', () => {
       const fee = res.find((r) => r.label === 'FEE')!;
       expect(fee.mode).toBe('MANUAL');
       expect(fee.commercialValue).toBe(299); // MANUAL arrastra el valor fijo
+      const tokens = res.find((r) => r.label === 'TOKENS')!;
+      expect(tokens.op).toBe('DIV'); // la operación también se hereda
+      expect(tokens.commercialValue).toBe(2); // 1.250.000 ÷ 625.000 con el usage nuevo
+      expect(tokens.enabled).toBe(true); // sin ojito guardado → habilitada
       const nueva = res.find((r) => r.label === 'NUEVA')!;
       expect(nueva.mode).toBeUndefined(); // sin regla previa → el admin la define
       expect(nueva.commercialValue).toBe(0);
+    });
+
+    it('ojito deshabilitado se hereda al mes siguiente (variable que no se cobra por contrato)', async () => {
+      prisma.clientBillingStatement.findFirst.mockResolvedValue({
+        items: [
+          { label: 'CDN', mode: 'DIRECTO', commercialValue: 0, source: 'BOTMAKER', enabled: false },
+        ],
+      } as never);
+      const res = await service.applyContractRules(CLIENT, [
+        { label: 'CDN', usage: 999, rawValue: 12, commercialValue: 0, source: 'BOTMAKER' as const },
+      ]);
+      expect(res[0].enabled).toBe(false); // sigue apagada el mes nuevo
+      expect(res[0].mode).toBe('DIRECTO'); // la regla queda por si se re-habilita
     });
 
     it('sin statement previa → todo comercial 0 (a definir)', async () => {

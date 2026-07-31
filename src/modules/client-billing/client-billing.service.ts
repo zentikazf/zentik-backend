@@ -573,7 +573,9 @@ export class ClientBillingService {
       interno,
       variables: variablesBilled
         ? []
-        : statement.items.map((i) => ({ label: i.label, commercialValue: i.commercialValue })),
+        : statement.items
+            .filter((i) => i.enabled !== false) // #23 ojito: deshabilitadas no cobran → fuera del builder
+            .map((i) => ({ label: i.label, commercialValue: i.commercialValue })),
       variablesSubtotalUsd: variablesBilled ? 0 : statement.totalCommercial,
       variablesBilled, // #23: ya facturadas → "Factura al día"
       variablesBilledCycleId: statement.billedCycleId, // link a la factura
