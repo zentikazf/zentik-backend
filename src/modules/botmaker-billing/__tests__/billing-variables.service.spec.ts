@@ -147,6 +147,16 @@ describe('Reglas de precio de variables (#23)', () => {
     it('CALCULO nunca da negativo si usage < incluidas', () => {
       expect(computeCommercial({ mode: 'CALCULO', usage: 100, incluidas: 3000, unitPrice: 0.065 })).toBe(0);
     });
+    it('CALCULO op=DIV → cobrables ÷ divisor (tokens por USD); divisor 0 → 0', () => {
+      // Tokens: 37.409.709 ÷ 625.000 unidades/USD = 59.86
+      expect(computeCommercial({ mode: 'CALCULO', usage: 37409709, incluidas: 0, unitPrice: 625000, op: 'DIV' })).toBe(59.86);
+      // Con incluidas: (1.000.000 − 500.000) ÷ 250.000 = 2
+      expect(computeCommercial({ mode: 'CALCULO', usage: 1000000, incluidas: 500000, unitPrice: 250000, op: 'DIV' })).toBe(2);
+      // Divisor 0 → 0 (nunca división por cero / Infinity)
+      expect(computeCommercial({ mode: 'CALCULO', usage: 100, incluidas: 0, unitPrice: 0, op: 'DIV' })).toBe(0);
+      // op ausente → MULT (backwards-compat con reglas ya guardadas)
+      expect(computeCommercial({ mode: 'CALCULO', usage: 10, incluidas: 0, unitPrice: 2 })).toBe(20);
+    });
     it('MANUAL / sin regla → respeta el comercial tipeado', () => {
       expect(computeCommercial({ mode: 'MANUAL', commercialValue: 299 })).toBe(299);
       expect(computeCommercial({ commercialValue: 149 })).toBe(149);
@@ -167,6 +177,7 @@ describe('Reglas de precio de variables (#23)', () => {
         items: [
           { label: 'SESSIONS', mode: 'CALCULO', incluidas: 3000, unitPrice: 0.065, commercialValue: 628.55, source: 'BOTMAKER' },
           { label: 'FEE', mode: 'MANUAL', commercialValue: 299, source: 'BOTMAKER' },
+          { label: 'TOKENS', mode: 'CALCULO', incluidas: 0, unitPrice: 625000, op: 'DIV', commercialValue: 59.86, source: 'BOTMAKER' },
         ],
       } as never);
 
@@ -174,6 +185,7 @@ describe('Reglas de precio de variables (#23)', () => {
       const imported = [
         { label: 'SESSIONS', usage: 5000, rawValue: 100, commercialValue: 0, source: 'BOTMAKER' as const },
         { label: 'FEE', usage: 1, rawValue: 149, commercialValue: 0, source: 'BOTMAKER' as const },
+        { label: 'TOKENS', usage: 1250000, rawValue: 3, commercialValue: 0, source: 'BOTMAKER' as const },
         { label: 'NUEVA', usage: 10, rawValue: 5, commercialValue: 0, source: 'BOTMAKER' as const }, // sin contrato previo
       ];
       const res = await service.applyContractRules(CLIENT, imported);
@@ -184,6 +196,9 @@ describe('Reglas de precio de variables (#23)', () => {
       const fee = res.find((r) => r.label === 'FEE')!;
       expect(fee.mode).toBe('MANUAL');
       expect(fee.commercialValue).toBe(299); // MANUAL arrastra el valor fijo
+      const tokens = res.find((r) => r.label === 'TOKENS')!;
+      expect(tokens.op).toBe('DIV'); // la operación también se hereda
+      expect(tokens.commercialValue).toBe(2); // 1.250.000 ÷ 625.000 con el usage nuevo
       const nueva = res.find((r) => r.label === 'NUEVA')!;
       expect(nueva.mode).toBeUndefined(); // sin regla previa → el admin la define
       expect(nueva.commercialValue).toBe(0);

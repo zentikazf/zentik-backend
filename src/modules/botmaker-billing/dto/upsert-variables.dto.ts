@@ -62,6 +62,14 @@ export class VariableItemDto {
   @IsNumber()
   @Min(0)
   unitPrice?: number;
+
+  @ApiPropertyOptional({
+    enum: ['MULT', 'DIV'],
+    description: 'CALCULO: operación. MULT (default) = cobrables × precio; DIV = cobrables ÷ divisor (unidades por USD, p. ej. tokens).',
+  })
+  @IsOptional()
+  @IsIn(['MULT', 'DIV'])
+  op?: 'MULT' | 'DIV';
 }
 
 export class UpsertVariablesDto {
