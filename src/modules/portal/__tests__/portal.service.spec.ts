@@ -133,6 +133,7 @@ describe('PortalService.getMyVariables (#23)', () => {
           { label: 'SESSIONS', rawValue: 415.81, commercialValue: 500, source: 'BOTMAKER' },
           { label: 'FEE', rawValue: null, commercialValue: 299, source: 'MANUAL' },
           { label: 'ZERO', rawValue: 1, commercialValue: 0, source: 'BOTMAKER' }, // excluido (0)
+          { label: 'OFF', rawValue: 9, commercialValue: 777, source: 'BOTMAKER', enabled: false }, // #23 ojito: oculta al cliente
         ],
       },
     ] as never);
@@ -145,7 +146,7 @@ describe('PortalService.getMyVariables (#23)', () => {
 
     expect(res.statements).toHaveLength(1);
     const s = res.statements[0];
-    expect(s.total).toBe(799); // 500 + 299
+    expect(s.total).toBe(799); // 500 + 299 — la deshabilitada (777) NO aparece ni suma
     expect(s.items).toEqual([
       { label: 'SESSIONS', commercialValue: 500 },
       { label: 'FEE', commercialValue: 299 },

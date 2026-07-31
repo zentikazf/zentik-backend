@@ -21,20 +21,21 @@ describe('BillingVariablesService (#23)', () => {
     prisma.client.findFirst.mockResolvedValue({ id: CLIENT, botmakerAccountId: 'ACC' } as never);
   });
 
-  it('get: calcula el total comercial en el backend (suma de commercialValue)', async () => {
+  it('get: calcula el total comercial en el backend (suma de commercialValue, sin deshabilitadas)', async () => {
     prisma.clientBillingStatement.findUnique.mockResolvedValue({
       items: [
         { label: 'A', rawValue: 10, commercialValue: 875.17, source: 'BOTMAKER' },
         { label: 'B', rawValue: null, commercialValue: 124.83, source: 'MANUAL' },
+        { label: 'OFF', rawValue: 5, commercialValue: 500, source: 'BOTMAKER', enabled: false }, // #23 ojito
       ],
       note: 'abril',
       billedCycleId: null,
     } as never);
 
     const res = await service.get(ORG, CLIENT, PERIOD);
-    expect(res.totalCommercial).toBe(1000); // 875.17 + 124.83
+    expect(res.totalCommercial).toBe(1000); // 875.17 + 124.83 — la deshabilitada (500) NO suma
     expect(res.billed).toBe(false);
-    expect(res.items).toHaveLength(2);
+    expect(res.items).toHaveLength(3); // pero SÍ se devuelve (el editor la muestra apagada)
   });
 
   it('upsert: recalcula el total y persiste; bloquea si ya facturado', async () => {
@@ -58,20 +59,21 @@ describe('BillingVariablesService (#23)', () => {
     });
   });
 
-  it('collectCommercial: solo no facturadas + commercial>0, con períodos que aportan', async () => {
+  it('collectCommercial: solo no facturadas + commercial>0 + habilitadas, con períodos que aportan', async () => {
     prisma.clientBillingStatement.findMany.mockResolvedValue([
       {
         period: '2026-04',
         items: [
           { label: 'A', commercialValue: 100, source: 'BOTMAKER' },
           { label: 'Z', commercialValue: 0, source: 'MANUAL' }, // excluida (0)
+          { label: 'OFF', commercialValue: 999, source: 'BOTMAKER', enabled: false }, // #23 ojito: excluida
         ],
       },
       { period: '2026-05', items: [{ label: 'B', commercialValue: 50, source: 'MANUAL' }] },
     ] as never);
 
     const res = await service.collectCommercial(CLIENT, ['2026-04', '2026-05']);
-    expect(res.subtotalUsd).toBe(150);
+    expect(res.subtotalUsd).toBe(150); // el 999 deshabilitado NO entra
     expect(res.lines.map((l) => l.label).sort()).toEqual(['A', 'B']);
     expect(res.contributingPeriods.sort()).toEqual(['2026-04', '2026-05']);
     // filtra por billedCycleId null en la query
@@ -199,9 +201,23 @@ describe('Reglas de precio de variables (#23)', () => {
       const tokens = res.find((r) => r.label === 'TOKENS')!;
       expect(tokens.op).toBe('DIV'); // la operación también se hereda
       expect(tokens.commercialValue).toBe(2); // 1.250.000 ÷ 625.000 con el usage nuevo
+      expect(tokens.enabled).toBe(true); // sin ojito guardado → habilitada
       const nueva = res.find((r) => r.label === 'NUEVA')!;
       expect(nueva.mode).toBeUndefined(); // sin regla previa → el admin la define
       expect(nueva.commercialValue).toBe(0);
+    });
+
+    it('ojito deshabilitado se hereda al mes siguiente (variable que no se cobra por contrato)', async () => {
+      prisma.clientBillingStatement.findFirst.mockResolvedValue({
+        items: [
+          { label: 'CDN', mode: 'DIRECTO', commercialValue: 0, source: 'BOTMAKER', enabled: false },
+        ],
+      } as never);
+      const res = await service.applyContractRules(CLIENT, [
+        { label: 'CDN', usage: 999, rawValue: 12, commercialValue: 0, source: 'BOTMAKER' as const },
+      ]);
+      expect(res[0].enabled).toBe(false); // sigue apagada el mes nuevo
+      expect(res[0].mode).toBe('DIRECTO'); // la regla queda por si se re-habilita
     });
 
     it('sin statement previa → todo comercial 0 (a definir)', async () => {
