@@ -44,6 +44,7 @@ import { TicketModule } from './modules/ticket/ticket.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { AdminMcpModule } from './modules/admin-mcp/admin-mcp.module';
 import { SyncModule } from './modules/sync/sync.module';
+import { SlaModule } from './modules/sla/sla.module';
 
 @Module({
   imports: [
@@ -105,6 +106,7 @@ import { SyncModule } from './modules/sync/sync.module';
     DashboardModule,
     AdminMcpModule,
     SyncModule,
+    SlaModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

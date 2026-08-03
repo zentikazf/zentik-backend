@@ -5,6 +5,8 @@ import {
   TicketStatus,
   TaskStatus,
   TicketCloseReason,
+  TicketCriticality,
+  SlaSource,
 } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
 import { AppException } from '../../common/filters/app-exception';
@@ -24,6 +26,7 @@ import {
   TaskHoursGuardService,
   HoursGateActorContext,
 } from '../task/task-hours-guard.service';
+import { SlaResolverService } from '../sla/sla-resolver.service';
 
 /**
  * Generates a sequential ticket number per org: YYYYMMDD-NNN
@@ -123,6 +126,8 @@ export class TicketService {
     private readonly config: AppConfigService,
     private readonly outbox: OutboxService,
     private readonly hoursGuard: TaskHoursGuardService,
+    // Feature #42 — Fase 1: solo se usa con `SLA_CASCADE_ENABLED=true`.
+    private readonly slaResolver: SlaResolverService,
   ) {}
 
   // ────────────────────────────────────────────────────────────
@@ -1158,6 +1163,10 @@ export class TicketService {
     let criticality: string | null = null;
     let responseDeadline: Date | null = null;
     let resolutionDeadline: Date | null = null;
+    // SLA v2 (feature #42 — Fase 1): SOLO se llenan con `SLA_CASCADE_ENABLED=true`.
+    let slaPolicyId: string | null = null;
+    let slaSource: SlaSource | null = null;
+    let ticketTypeId: string | null = null;
 
     if (dto.categoryConfigId) {
       categoryConfig = await this.prisma.ticketCategoryConfig.findFirst({
@@ -1167,6 +1176,40 @@ export class TicketService {
 
     if (categoryConfig) {
       criticality = categoryConfig.criticality;
+    }
+
+    if (this.config.slaCascadeEnabled) {
+      // ── PATH NUEVO: cascada contrato → proyecto → cliente → criticidad → "Estándar".
+      // El motor de cálculo (horas hábiles + feriados) es el MISMO; cambia solo de
+      // dónde salen los tiempos. Los deadlines se congelan igual que hoy.
+      if (dto.ticketTypeId) {
+        // Scoping multi-tenant: un tipo de otra org no se persiste ni se resuelve.
+        const type = await this.prisma.ticketType.findFirst({
+          where: { id: dto.ticketTypeId, organizationId: orgId, isActive: true },
+          select: { id: true },
+        });
+        if (!type) {
+          throw new AppException('Tipo de solicitud no encontrado', 'TICKET_TYPE_NOT_FOUND', 404);
+        }
+        ticketTypeId = type.id;
+      }
+
+      const resolved = await this.slaResolver.resolveAndCalculateDeadlines({
+        organizationId: orgId,
+        clientId: dto.clientId,
+        projectId: dto.projectId,
+        ticketTypeId,
+        // `categoryConfig` es `any` (path viejo); el valor ya es un TicketCriticality
+        // válido porque viene de la columna del enum. Cast puntual documentado.
+        criticality: criticality as TicketCriticality | null,
+      });
+
+      slaPolicyId = resolved.policy?.id ?? null;
+      slaSource = resolved.source;
+      responseDeadline = resolved.responseDeadline;
+      resolutionDeadline = resolved.resolutionDeadline;
+    } else if (categoryConfig) {
+      // ── PATH ACTUAL (default): SlaConfig por criticidad. NO se toca una línea.
       const slaConfig = await this.prisma.slaConfig.findUnique({
         where: { organizationId_criticality: { organizationId: orgId, criticality: categoryConfig.criticality } },
       });
@@ -1187,6 +1230,16 @@ export class TicketService {
         resolutionDeadline = calculateBusinessDeadline(now, slaConfig.resolutionTimeMinutes, bhConfig, holidays);
       }
     }
+
+    // Campos SLA v2 del ticket. Con el flag OFF el objeto queda VACÍO → el create es
+    // byte-por-byte el de hoy (ni siquiera se envían las columnas nuevas).
+    const slaCascadeData = this.config.slaCascadeEnabled
+      ? {
+          ...(slaPolicyId && { slaPolicyId }),
+          ...(slaSource && { slaSource }),
+          ...(ticketTypeId && { ticketTypeId }),
+        }
+      : {};
 
     const categoryLabel = dto.category === 'SUPPORT_REQUEST' ? 'Soporte' : 'Desarrollo';
     const channelName = `[${categoryLabel}] ${dto.title}`;
@@ -1286,6 +1339,7 @@ export class TicketService {
           ...(responseDeadline && { responseDeadline }),
           ...(resolutionDeadline && { resolutionDeadline }),
           ...(dto.relatedTicketId && { relatedTicketId: dto.relatedTicketId }),
+          ...slaCascadeData,
         },
         include: {
           project: { select: { id: true, name: true } },

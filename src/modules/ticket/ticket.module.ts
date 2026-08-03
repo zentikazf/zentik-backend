@@ -10,6 +10,7 @@ import { SlaCronService } from './sla-cron.service';
 import { OutboxModule } from '../sync/outbox.module';
 import { SessionValidityModule } from '../auth/session-validity.module';
 import { TaskHoursGuardModule } from '../task/task-hours-guard.module';
+import { SlaModule } from '../sla/sla.module';
 
 @Module({
   // ScheduleModule.forRoot() se movio a AppModule (#19 ALTO-2): debe ser unico y
@@ -17,7 +18,16 @@ import { TaskHoursGuardModule } from '../task/task-hours-guard.module';
   // interval. SlaCronService (@Cron) y los @Interval de los gateways se
   // descubren igual desde el forRoot global.
   // SessionValidityModule (#19 ALTO-2): TicketsGateway revalida la sesion en vivo.
-  imports: [PrismaModule, AppConfigModule, OutboxModule, SessionValidityModule, TaskHoursGuardModule],
+  // SlaModule (#42 Fase 1): expone SlaResolverService para la cascada de SLA. La
+  // dependencia es unidireccional (sla NO importa ticket) → sin ciclo.
+  imports: [
+    PrismaModule,
+    AppConfigModule,
+    OutboxModule,
+    SessionValidityModule,
+    TaskHoursGuardModule,
+    SlaModule,
+  ],
   controllers: [TicketController],
   providers: [
     TicketService,

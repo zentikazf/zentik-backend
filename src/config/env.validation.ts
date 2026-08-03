@@ -115,6 +115,17 @@ export const envSchema = z.object({
   BOTMAKER_CACHE_TTL_SEC: z.coerce.number().default(1800),
   // Tasa USD→PYG simulada (v1). Opcional; si falta, el admin la pega a mano en el preview.
   EXCHANGE_RATE_SIMULATED: z.string().optional(),
+
+  // === Motor de SLA con cascada (feature #42 — Fase 1) ===
+  // Feature flag maestro. Con `false`/ausente (default) ticket.service y portal.service
+  // usan EXACTAMENTE el path de resolución actual (SlaConfig por criticidad) — cero
+  // regresión. Con `true` resuelve la cascada contrato→proyecto→cliente→criticidad→
+  // "Estándar" y congela `slaPolicyId` + `slaSource` en el ticket.
+  // ⚠️ Guardarraíl: NO activar sin una política llamada "Estándar" en la org (ver
+  // GET /organizations/:orgId/sla-readiness) — sin ella, los tickets cuya criticidad
+  // tampoco tenga política quedan SIN deadlines.
+  // `.optional()` (no `.enum`): el flag es opt-in y la app debe arrancar sin la var.
+  SLA_CASCADE_ENABLED: z.string().optional(),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;

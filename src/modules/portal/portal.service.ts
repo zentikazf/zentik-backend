@@ -1,8 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Request, Response } from 'express';
-import { Prisma } from '@prisma/client';
+import { Prisma, SlaSource, TicketCriticality } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
+import { AppConfigService } from '../../config/app.config';
 import { AppException } from '../../common/filters/app-exception';
 import { CreateSuggestionDto } from './dto/create-suggestion.dto';
 import { UpdateSuggestionDto } from './dto/update-suggestion.dto';
@@ -15,6 +16,7 @@ import { FileService } from '../file/file.service';
 import { StorageService } from '../../infrastructure/storage/storage.service';
 import { OutboxService } from '../sync/outbox.service';
 import { ClientBillingPdfService } from '../client-billing/client-billing-pdf.service';
+import { SlaResolverService } from '../sla/sla-resolver.service';
 
 @Injectable()
 export class PortalService {
@@ -28,6 +30,9 @@ export class PortalService {
     private readonly storage: StorageService,
     private readonly outbox: OutboxService,
     private readonly pdfService: ClientBillingPdfService,
+    private readonly config: AppConfigService,
+    // Feature #42 — Fase 1: solo se usa con `SLA_CASCADE_ENABLED=true`.
+    private readonly slaResolver: SlaResolverService,
   ) {}
 
   private async getClientByUserId(userId: string) {
@@ -388,6 +393,9 @@ export class PortalService {
     let criticality: string | undefined;
     let responseDeadline: Date | undefined;
     let resolutionDeadline: Date | undefined;
+    // SLA v2 (feature #42 — Fase 1): SOLO se llenan con `SLA_CASCADE_ENABLED=true`.
+    let slaPolicyId: string | undefined;
+    let slaSource: SlaSource | undefined;
     const rawCategory = dto.category;
 
     if (rawCategory.startsWith('dynamic:')) {
@@ -398,28 +406,57 @@ export class PortalService {
       if (categoryConfig) {
         categoryConfigId = categoryConfig.id;
         criticality = categoryConfig.criticality;
-
-        const slaConfig = await this.prisma.slaConfig.findUnique({
-          where: { organizationId_criticality: { organizationId: project.organizationId, criticality: categoryConfig.criticality } },
-        });
-        if (slaConfig) {
-          const [bhConfig, holidayRows] = await Promise.all([
-            this.prisma.businessHoursConfig.findUnique({ where: { organizationId: project.organizationId } }),
-            this.prisma.holiday.findMany({ where: { organizationId: project.organizationId }, select: { date: true } }),
-          ]);
-          const bh = bhConfig ? {
-            start: bhConfig.businessHoursStart,
-            end: bhConfig.businessHoursEnd,
-            days: parseBusinessDays(bhConfig.businessDays),
-            timezone: bhConfig.timezone,
-          } : undefined;
-          const holidays = holidayRows.map((h) => h.date);
-          const now = new Date();
-          responseDeadline = calculateBusinessDeadline(now, slaConfig.responseTimeMinutes, bh, holidays);
-          resolutionDeadline = calculateBusinessDeadline(now, slaConfig.resolutionTimeMinutes, bh, holidays);
-        }
       }
     }
+
+    if (this.config.slaCascadeEnabled) {
+      // ── PATH NUEVO: cascada. El form del portal NO cambia en Fase 1 (sigue
+      // mandando `dynamic:<configId>`), así que NO hay tipo de solicitud: la
+      // cascada arranca en el paso 2 (SLA del proyecto). El paso 1 (contrato
+      // proyecto+tipo) queda disponible recién con el form nuevo de Fase 2.
+      const resolved = await this.slaResolver.resolveAndCalculateDeadlines({
+        organizationId: project.organizationId,
+        clientId: client.id,
+        projectId,
+        ticketTypeId: null,
+        // Cast puntual: `criticality` sale de la columna del enum (viene tipada
+        // como string por el path viejo).
+        criticality: (criticality as TicketCriticality | undefined) ?? null,
+      });
+      slaPolicyId = resolved.policy?.id ?? undefined;
+      slaSource = resolved.source;
+      responseDeadline = resolved.responseDeadline ?? undefined;
+      resolutionDeadline = resolved.resolutionDeadline ?? undefined;
+    } else if (categoryConfigId && criticality) {
+      // ── PATH ACTUAL (default): SlaConfig por criticidad. NO se toca una línea.
+      const slaConfig = await this.prisma.slaConfig.findUnique({
+        where: { organizationId_criticality: { organizationId: project.organizationId, criticality: criticality as any } },
+      });
+      if (slaConfig) {
+        const [bhConfig, holidayRows] = await Promise.all([
+          this.prisma.businessHoursConfig.findUnique({ where: { organizationId: project.organizationId } }),
+          this.prisma.holiday.findMany({ where: { organizationId: project.organizationId }, select: { date: true } }),
+        ]);
+        const bh = bhConfig ? {
+          start: bhConfig.businessHoursStart,
+          end: bhConfig.businessHoursEnd,
+          days: parseBusinessDays(bhConfig.businessDays),
+          timezone: bhConfig.timezone,
+        } : undefined;
+        const holidays = holidayRows.map((h) => h.date);
+        const now = new Date();
+        responseDeadline = calculateBusinessDeadline(now, slaConfig.responseTimeMinutes, bh, holidays);
+        resolutionDeadline = calculateBusinessDeadline(now, slaConfig.resolutionTimeMinutes, bh, holidays);
+      }
+    }
+
+    // Con el flag OFF el objeto queda VACÍO → el create es exactamente el de hoy.
+    const slaCascadeData = this.config.slaCascadeEnabled
+      ? {
+          ...(slaPolicyId && { slaPolicyId }),
+          ...(slaSource && { slaSource }),
+        }
+      : {};
 
     const categoryLabel = rawCategory === 'SUPPORT_REQUEST' || rawCategory.startsWith('dynamic:') ? 'Soporte' : 'Desarrollo';
     const channelName = `[${categoryLabel}] ${dto.title}`;
@@ -527,6 +564,7 @@ export class PortalService {
           ...(responseDeadline && { responseDeadline }),
           ...(resolutionDeadline && { resolutionDeadline }),
           ...(dto.relatedTicketId && { relatedTicketId: dto.relatedTicketId }),
+          ...slaCascadeData,
         },
         include: {
           project: { select: { id: true, name: true } },
