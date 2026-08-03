@@ -2,11 +2,13 @@ import { Module } from '@nestjs/common';
 import { PrismaModule } from '../../database/prisma.module';
 import { AuthGuard } from '../auth/guards/auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
+import { CriticalityConfigService } from './criticality-config.service';
 import { SlaConfigController } from './sla-config.controller';
 import { SlaContractService } from './sla-contract.service';
 import { SlaPolicyService } from './sla-policy.service';
 import { SlaResolverService } from './sla-resolver.service';
 import { SlaSeedService } from './sla-seed.service';
+import { TicketTypeAvailabilityService } from './ticket-type-availability.service';
 import { TicketTypeService } from './ticket-type.service';
 
 /**
@@ -37,7 +39,11 @@ import { TicketTypeService } from './ticket-type.service';
     SlaContractService,
     SlaResolverService,
     SlaSeedService,
+    CriticalityConfigService,
+    TicketTypeAvailabilityService,
   ],
-  exports: [SlaResolverService],
+  // Fase 2: `portal` consume la config de criticidad y la disponibilidad de tipos
+  // para validar server-side lo que manda el cliente. Sigue siendo unidireccional.
+  exports: [SlaResolverService, CriticalityConfigService, TicketTypeAvailabilityService],
 })
 export class SlaModule {}

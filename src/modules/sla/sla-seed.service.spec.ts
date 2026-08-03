@@ -47,8 +47,13 @@ describe('SlaSeedService', () => {
    * Prepara la foto de la DB para una corrida.
    * @param existingPolicyNames nombres de políticas YA existentes en la org
    * @param existingTypeSlugs slugs de tipos YA existentes en la org
+   * @param existingCriticalities criticidades con config YA existente (Fase 2)
    */
-  function stubRun(existingPolicyNames: string[] = [], existingTypeSlugs: string[] = []) {
+  function stubRun(
+    existingPolicyNames: string[] = [],
+    existingTypeSlugs: string[] = [],
+    existingCriticalities: TicketCriticality[] = [],
+  ) {
     prisma.slaConfig.findMany.mockResolvedValueOnce(slaConfigs as never);
     prisma.ticketCategoryConfig.findMany.mockResolvedValueOnce(categories as never);
     prisma.slaPolicy.findMany.mockResolvedValueOnce(
@@ -56,6 +61,9 @@ describe('SlaSeedService', () => {
     );
     prisma.ticketType.findMany.mockResolvedValueOnce(
       existingTypeSlugs.map((slug) => ({ slug })) as never,
+    );
+    prisma.ticketCriticalityConfig.findMany.mockResolvedValueOnce(
+      existingCriticalities.map((criticality) => ({ criticality })) as never,
     );
   }
 
@@ -75,7 +83,12 @@ describe('SlaSeedService', () => {
 
       const result = await service.importCurrentConfig(ORG, USER);
 
-      expect(result).toEqual({ policiesCreated: 2, typesCreated: 2, alreadyExisting: 0 });
+      expect(result).toEqual({
+        policiesCreated: 2,
+        typesCreated: 2,
+        criticalityConfigsCreated: 3,
+        alreadyExisting: 0,
+      });
 
       const policyData = tx.slaPolicy.createMany.mock.calls[0][0].data;
       expect(policyData).toEqual([
@@ -124,6 +137,7 @@ describe('SlaSeedService', () => {
       prisma.ticketCategoryConfig.findMany.mockResolvedValueOnce([] as never);
       prisma.slaPolicy.findMany.mockResolvedValueOnce([] as never);
       prisma.ticketType.findMany.mockResolvedValueOnce([] as never);
+      prisma.ticketCriticalityConfig.findMany.mockResolvedValueOnce([] as never);
 
       const result = await service.importCurrentConfig(ORG, USER);
 
@@ -142,16 +156,73 @@ describe('SlaSeedService', () => {
     it('segunda corrida: 0 creadas, todo reportado como alreadyExisting', async () => {
       stubRun();
       const first = await service.importCurrentConfig(ORG, USER);
-      expect(first).toEqual({ policiesCreated: 2, typesCreated: 2, alreadyExisting: 0 });
+      expect(first).toEqual({
+        policiesCreated: 2,
+        typesCreated: 2,
+        criticalityConfigsCreated: 3,
+        alreadyExisting: 0,
+      });
 
       // La DB ahora tiene lo que creó la primera corrida.
-      stubRun(['Crítico', 'Estándar'], ['incidencia-critica', 'consulta']);
+      stubRun(
+        ['Crítico', 'Estándar'],
+        ['incidencia-critica', 'consulta'],
+        [TicketCriticality.HIGH, TicketCriticality.MEDIUM, TicketCriticality.LOW],
+      );
       const second = await service.importCurrentConfig(ORG, USER);
 
-      expect(second).toEqual({ policiesCreated: 0, typesCreated: 0, alreadyExisting: 4 });
+      expect(second).toEqual({
+        policiesCreated: 0,
+        typesCreated: 0,
+        criticalityConfigsCreated: 0,
+        alreadyExisting: 7, // 2 políticas + 2 tipos + 3 criticidades
+      });
       // Una sola transacción con createMany: la de la primera corrida.
       expect(tx.slaPolicy.createMany).toHaveBeenCalledTimes(1);
       expect(tx.ticketType.createMany).toHaveBeenCalledTimes(1);
+      expect(tx.ticketCriticalityConfig.createMany).toHaveBeenCalledTimes(1);
+    });
+
+    it('siembra las 3 criticidades (Alta/Media/Baja) con MEDIUM como default y todas visibles', async () => {
+      stubRun();
+
+      await service.importCurrentConfig(ORG, USER);
+
+      expect(tx.ticketCriticalityConfig.createMany.mock.calls[0][0].data).toEqual([
+        {
+          organizationId: ORG,
+          criticality: TicketCriticality.HIGH,
+          displayName: 'Alta',
+          clientVisible: true,
+          level: 3,
+          isDefault: false,
+        },
+        {
+          organizationId: ORG,
+          criticality: TicketCriticality.MEDIUM,
+          displayName: 'Media',
+          clientVisible: true,
+          level: 2,
+          isDefault: true,
+        },
+        {
+          organizationId: ORG,
+          criticality: TicketCriticality.LOW,
+          displayName: 'Baja',
+          clientVisible: true,
+          level: 1,
+          isDefault: false,
+        },
+      ]);
+    });
+
+    it('con UNA sola criticidad ya configurada NO siembra ninguna (el admin ya opinó)', async () => {
+      stubRun([], [], [TicketCriticality.HIGH]);
+
+      const result = await service.importCurrentConfig(ORG, USER);
+
+      expect(result.criticalityConfigsCreated).toBe(0);
+      expect(tx.ticketCriticalityConfig.createMany).not.toHaveBeenCalled();
     });
 
     it('NO borra ni modifica nada existente (solo createMany, nunca update/delete)', async () => {

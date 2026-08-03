@@ -3,6 +3,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Prisma, TicketCriticality } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
 import { domainEvent } from '../../common/events/domain-event.helper';
+import { CRITICALITY_DEFAULTS } from './criticality-config.service';
 import { slugifyTicketTypeName } from './ticket-type.service';
 import {
   SlaReadiness,
@@ -50,21 +51,26 @@ export class SlaSeedService {
   ) {}
 
   async importCurrentConfig(orgId: string, userId: string): Promise<SlaSeedResult> {
-    const [slaConfigs, categories, existingPolicies, existingTypes] = await Promise.all([
-      this.prisma.slaConfig.findMany({ where: { organizationId: orgId } }),
-      this.prisma.ticketCategoryConfig.findMany({
-        where: { organizationId: orgId, isActive: true },
-        orderBy: { createdAt: 'asc' },
-      }),
-      this.prisma.slaPolicy.findMany({
-        where: { organizationId: orgId },
-        select: { name: true },
-      }),
-      this.prisma.ticketType.findMany({
-        where: { organizationId: orgId },
-        select: { slug: true },
-      }),
-    ]);
+    const [slaConfigs, categories, existingPolicies, existingTypes, existingCriticalities] =
+      await Promise.all([
+        this.prisma.slaConfig.findMany({ where: { organizationId: orgId } }),
+        this.prisma.ticketCategoryConfig.findMany({
+          where: { organizationId: orgId, isActive: true },
+          orderBy: { createdAt: 'asc' },
+        }),
+        this.prisma.slaPolicy.findMany({
+          where: { organizationId: orgId },
+          select: { name: true },
+        }),
+        this.prisma.ticketType.findMany({
+          where: { organizationId: orgId },
+          select: { slug: true },
+        }),
+        this.prisma.ticketCriticalityConfig.findMany({
+          where: { organizationId: orgId },
+          select: { criticality: true },
+        }),
+      ]);
 
     // Los sets crecen a medida que se encolan filas: sirven de dedupe DENTRO de la
     // misma corrida (dos categorías que normalizan al mismo slug, por ejemplo).
@@ -126,7 +132,31 @@ export class SlaSeedService {
       typesToCreate.push({ organizationId: orgId, name, slug });
     }
 
+    // ── Config de criticidades (Fase 2) ──────────────────────────────────────
+    // Solo se siembra si la org NO tiene NINGUNA fila: una vez que el admin las
+    // editó, el seed no vuelve a opinar (idempotente y no destructivo, igual que
+    // políticas y tipos). Sin estas filas el portal no muestra el selector de
+    // criticidad (modo 2B) y entra el default MEDIUM.
+    const criticalityConfigsToCreate: Prisma.TicketCriticalityConfigCreateManyInput[] =
+      existingCriticalities.length > 0
+        ? []
+        : Object.entries(CRITICALITY_DEFAULTS).map(([criticality, config]) => ({
+            organizationId: orgId,
+            criticality: criticality as TicketCriticality,
+            displayName: config.displayName,
+            clientVisible: true,
+            level: config.level,
+            isDefault: config.isDefault,
+          }));
+    const alreadyExistingCriticalities = existingCriticalities.length;
+
     await this.prisma.$transaction(async (tx) => {
+      if (criticalityConfigsToCreate.length > 0) {
+        await tx.ticketCriticalityConfig.createMany({
+          data: criticalityConfigsToCreate,
+          skipDuplicates: true,
+        });
+      }
       if (policiesToCreate.length > 0) {
         // `skipDuplicates`: red contra dos imports simultáneos (la unique de la DB
         // manda; sin esto el segundo request rompería con P2002).
@@ -142,19 +172,22 @@ export class SlaSeedService {
         organizationId: orgId,
         policiesCreated: policiesToCreate.length,
         typesCreated: typesToCreate.length,
+        criticalityConfigsCreated: criticalityConfigsToCreate.length,
         userId,
       });
     });
 
     this.logger.log(
       `Import de configuración SLA org=${orgId}: ${policiesToCreate.length} política(s), ` +
-        `${typesToCreate.length} tipo(s), ${alreadyExisting} ya existían`,
+        `${typesToCreate.length} tipo(s), ${criticalityConfigsToCreate.length} criticidad(es), ` +
+        `${alreadyExisting + alreadyExistingCriticalities} ya existían`,
     );
 
     return {
       policiesCreated: policiesToCreate.length,
       typesCreated: typesToCreate.length,
-      alreadyExisting,
+      criticalityConfigsCreated: criticalityConfigsToCreate.length,
+      alreadyExisting: alreadyExisting + alreadyExistingCriticalities,
     };
   }
 

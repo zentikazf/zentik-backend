@@ -17,14 +17,22 @@ import { CurrentUser } from '../../common/decorators';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { AuthGuard, RolesGuard } from '../auth/guards';
+import {
+  CriticalityConfigService,
+  parseCriticality,
+  requireCriticality,
+} from './criticality-config.service';
 import { SlaContractService } from './sla-contract.service';
 import { SlaPolicyService } from './sla-policy.service';
 import { SlaSeedService } from './sla-seed.service';
+import { TicketTypeAvailabilityService } from './ticket-type-availability.service';
 import { TicketTypeService } from './ticket-type.service';
 import {
   AssignSlaDto,
+  AvailableTicketTypesQueryDto,
   CreateSlaPolicyDto,
   CreateTicketTypeDto,
+  UpdateCriticalityConfigDto,
   UpdateSlaPolicyDto,
   UpdateTicketTypeDto,
   UpsertProjectContractDto,
@@ -51,6 +59,8 @@ export class SlaConfigController {
     private readonly types: TicketTypeService,
     private readonly contracts: SlaContractService,
     private readonly seed: SlaSeedService,
+    private readonly criticalities: CriticalityConfigService,
+    private readonly availability: TicketTypeAvailabilityService,
   ) {}
 
   // ── Políticas SLA ────────────────────────────────────────────────────────
@@ -95,7 +105,13 @@ export class SlaConfigController {
 
   // ── Tipos de solicitud ───────────────────────────────────────────────────
 
+  // LECTURA del catálogo: incluye Developer. El @Roles de la clase es Owner/PM
+  // (escritura), pero `PATCH tickets/:id/classification` permite Developer — sin
+  // este override, un Developer podría reclasificar pero no listar los tipos para
+  // elegir uno (403 y selector muerto). `getAllAndOverride` hace que el decorador
+  // de método pise al de la clase. Escritura de tipos sigue siendo Owner/PM.
   @Get('ticket-types')
+  @Roles('Owner', 'Project Manager', 'Developer')
   @ApiOperation({ summary: 'Listar tipos de solicitud' })
   @ApiQuery({ name: 'includeInactive', required: false, type: Boolean })
   listTypes(@Param('orgId') orgId: string, @Query('includeInactive') includeInactive?: string) {
@@ -124,6 +140,29 @@ export class SlaConfigController {
     return this.types.deactivate(orgId, typeId);
   }
 
+  // ── Criticidades: presentación y visibilidad (Fase 2) ────────────────────
+
+  // LECTURA: incluye Developer por el mismo motivo que `GET ticket-types` — el
+  // diálogo de reclasificación necesita las criticidades para poblar el selector.
+  @Get('criticality-configs')
+  @Roles('Owner', 'Project Manager', 'Developer')
+  @ApiOperation({ summary: 'Config de criticidades de la organización (etiqueta, visibilidad, orden)' })
+  listCriticalityConfigs(@Param('orgId') orgId: string) {
+    return this.criticalities.list(orgId);
+  }
+
+  @Patch('criticality-configs/:criticality')
+  @ApiOperation({ summary: 'Editar etiqueta / visibilidad / orden / default de una criticidad' })
+  upsertCriticalityConfig(
+    @Param('orgId') orgId: string,
+    @Param('criticality') criticality: string,
+    @Body() dto: UpdateCriticalityConfigDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    // El path param NO pasa por el ValidationPipe global: se valida acá contra el enum.
+    return this.criticalities.upsert(orgId, requireCriticality(criticality), dto, user.id);
+  }
+
   // ── Contratos por proyecto ───────────────────────────────────────────────
 
   @Get('projects/:projectId/sla-contracts')
@@ -141,6 +180,19 @@ export class SlaConfigController {
     @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.contracts.upsertForProject(orgId, projectId, dto, user.id);
+  }
+
+  @Get('projects/:projectId/available-ticket-types')
+  @ApiOperation({
+    summary: 'Tipos disponibles del proyecto (contratados; permisivo + fallback si no hay contratos)',
+  })
+  @ApiQuery({ name: 'criticality', required: false, enum: ['HIGH', 'MEDIUM', 'LOW'] })
+  getAvailableTicketTypes(
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Query() query: AvailableTicketTypesQueryDto,
+  ) {
+    return this.availability.getAvailableTypes(orgId, projectId, parseCriticality(query.criticality));
   }
 
   @Patch('projects/:projectId/sla-policy')

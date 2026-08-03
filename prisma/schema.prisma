@@ -180,6 +180,10 @@ enum TicketEventType {
   SLA_WARNING
   FIRST_RESPONSE
   RESOLVED
+  // #42 Fase 2: el equipo tipifica/reclasifica tipo, criticidad o categoria
+  // interna de un ticket. Guarda from/to + el motivo en metadata. NO recalcula
+  // deadlines (quedan congelados, igual que en OSD).
+  RECLASSIFIED
 }
 
 enum TicketEventSource {
@@ -362,6 +366,7 @@ model Organization {
   creditNotes           CreditNote[]
   slaPolicies           SlaPolicy[]
   ticketTypes           TicketType[]
+  criticalityConfigs    TicketCriticalityConfig[]
 
   @@index([slug])
   @@map("organizations")
@@ -1386,6 +1391,36 @@ model SlaPolicy {
   @@unique([organizationId, name])
   @@index([organizationId, criticality])
   @@map("sla_policies")
+}
+
+/// Configuracion de PRESENTACION y VISIBILIDAD de cada criticidad, por organizacion.
+///
+/// NO crea una identidad nueva para la criticidad: el enum `TicketCriticality`
+/// sigue siendo la fuente (migrarlo a catalogo no tiene red del compilador —
+/// 1 import real + 6 `as any` en el codebase). Esta tabla solo agrega el "como se
+/// muestra" y el "quien lo elige", indexado por el valor del enum.
+///
+/// Clave del diseño (#42 Fase 2, decision 2A del dev): si NINGUNA fila tiene
+/// `clientVisible=true`, el portal NO renderiza el selector de criticidad y usa la
+/// fila `isDefault` → eso ES el modo 2B. Cambiar de 2A a 2B = desmarcar un
+/// checkbox: cero migracion, cero deploy.
+model TicketCriticalityConfig {
+  id             String            @id @default(cuid())
+  organizationId String            @map("organization_id")
+  criticality    TicketCriticality
+  displayName    String            @map("display_name") // nombre interno (lo ve el equipo)
+  clientLabel    String?           @map("client_label") // como lo ve el cliente ("Urgente")
+  clientVisible  Boolean           @default(true) @map("client_visible")
+  level          Int // orden de urgencia (1 = menor)
+  isDefault      Boolean           @default(false) @map("is_default") // entra si el cliente no elige
+  createdAt      DateTime          @default(now()) @map("created_at")
+  updatedAt      DateTime          @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, criticality])
+  @@index([organizationId, clientVisible])
+  @@map("ticket_criticality_configs")
 }
 
 /// Tipo de solicitud (Incidencia, Consulta, Mejora...). Fase 1: lista plana.

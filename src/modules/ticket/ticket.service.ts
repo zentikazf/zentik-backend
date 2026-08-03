@@ -17,6 +17,7 @@ import { ListTicketsQueryDto } from './dto/list-tickets-query.dto';
 import { CreateCategoryConfigDto, UpdateCategoryConfigDto } from './dto/create-category-config.dto';
 import { UpsertSlaConfigDto } from './dto/upsert-sla-config.dto';
 import { UpsertBusinessHoursDto } from './dto/upsert-business-hours.dto';
+import { ReclassifyTicketDto } from './dto/reclassify-ticket.dto';
 import { domainEvent } from '../../common/events/domain-event.helper';
 import { calculateBusinessDeadline, parseBusinessDays } from './sla.util';
 import { TicketEventsService } from './ticket-events.service';
@@ -91,6 +92,33 @@ const ALLOWED_TRANSITIONS: Record<TicketStatus, TicketStatus[]> = {
   RESOLVED:    ['IN_PROGRESS'],
   CLOSED:      [],
 };
+
+// ─── Reclasificación interna (feature #42 — Fase 2) ────────────────────
+/** Un campo de clasificación que cambió, ya legible para el timeline. */
+export interface ClassificationChange {
+  field: 'ticketTypeId' | 'criticality' | 'categoryConfigId';
+  label: string;
+  from: string | null;
+  to: string;
+}
+
+/**
+ * Proyección devuelta por `reclassify`: solo la clasificación + los campos de SLA
+ * que quedan CONGELADOS (van en la respuesta justamente para que el front pueda
+ * verificar que no se movieron).
+ */
+const TICKET_CLASSIFICATION_SELECT = {
+  id: true,
+  ticketTypeId: true,
+  criticality: true,
+  categoryConfigId: true,
+  responseDeadline: true,
+  resolutionDeadline: true,
+  slaPolicyId: true,
+  slaSource: true,
+  ticketType: { select: { id: true, name: true } },
+  categoryConfig: { select: { id: true, name: true, criticality: true } },
+} satisfies Prisma.TicketSelect;
 
 // ─── Mapping: estado del ticket → estado del task en kanban ────────────
 function mapTicketStatusToTaskStatus(
@@ -1395,6 +1423,172 @@ export class TicketService {
     });
 
     return ticket;
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // Tipificación interna (feature #42 — Fase 2)
+  // ────────────────────────────────────────────────────────────
+
+  /**
+   * Reclasifica un ticket: tipo de solicitud, criticidad y/o categoría interna.
+   *
+   * El cliente reporta con SU vocabulario; el equipo tipifica con el propio. Todo
+   * ocurre en UNA `$transaction`: el cambio, el `TicketEvent` de tipo `RECLASSIFIED`
+   * (con from/to legibles y el motivo en `metadata`) y el evento de dominio.
+   *
+   * ⚠️ POR DISEÑO **NO se tocan** `responseDeadline`, `resolutionDeadline`,
+   * `slaPolicyId` ni `slaSource`: los deadlines quedan **CONGELADOS** con lo que se
+   * resolvió al crear el ticket (misma regla que OSD). Recalcularlos permitiría
+   * "arreglar" un SLA vencido reclasificando, y rompería el histórico de
+   * cumplimiento. Si algún día se decide recalcular, es una decisión de negocio
+   * nueva — no un detalle de implementación de esta función.
+   *
+   * @param orgId scoping multi-tenant: el ticket y los valores nuevos deben ser de
+   *   esta organización.
+   */
+  async reclassify(orgId: string, ticketId: string, dto: ReclassifyTicketDto, userId: string) {
+    // Defensa además del DTO: el motivo con solo espacios no es un motivo.
+    const reason = dto.reason?.trim();
+    if (!reason) {
+      throw new AppException(
+        'El motivo de la reclasificación es obligatorio',
+        'RECLASSIFY_REASON_REQUIRED',
+        400,
+      );
+    }
+
+    const ticket = await this.prisma.ticket.findFirst({
+      where: { id: ticketId, organizationId: orgId },
+      select: {
+        id: true,
+        ticketTypeId: true,
+        criticality: true,
+        categoryConfigId: true,
+        ticketType: { select: { name: true } },
+        categoryConfig: { select: { name: true } },
+      },
+    });
+    if (!ticket) {
+      throw new AppException('Ticket no encontrado', 'TICKET_NOT_FOUND', 404);
+    }
+
+    // Los valores nuevos tienen que existir, estar activos y ser de la MISMA org.
+    let newType: { id: string; name: string } | null = null;
+    if (dto.ticketTypeId) {
+      newType = await this.prisma.ticketType.findFirst({
+        where: { id: dto.ticketTypeId, organizationId: orgId, isActive: true },
+        select: { id: true, name: true },
+      });
+      if (!newType) {
+        throw new AppException('Tipo de solicitud no encontrado', 'TICKET_TYPE_NOT_FOUND', 404);
+      }
+    }
+
+    let newCategory: { id: string; name: string } | null = null;
+    if (dto.categoryConfigId) {
+      newCategory = await this.prisma.ticketCategoryConfig.findFirst({
+        where: { id: dto.categoryConfigId, organizationId: orgId, isActive: true },
+        select: { id: true, name: true },
+      });
+      if (!newCategory) {
+        throw new AppException('Categoría de ticket no encontrada', 'TICKET_CATEGORY_NOT_FOUND', 404);
+      }
+    }
+
+    // Cast puntual documentado: el DTO espeja el enum de Prisma (mismos valores),
+    // pero TS no considera asignable un string-enum a la unión que genera Prisma.
+    const newCriticality = (dto.criticality as TicketCriticality | undefined) ?? null;
+
+    const changes: ClassificationChange[] = [];
+    if (newType && newType.id !== ticket.ticketTypeId) {
+      changes.push({
+        field: 'ticketTypeId',
+        label: 'Tipo',
+        from: ticket.ticketType?.name ?? null,
+        to: newType.name,
+      });
+    }
+    if (newCriticality && newCriticality !== ticket.criticality) {
+      const labels = await this.getCriticalityLabels(orgId);
+      changes.push({
+        field: 'criticality',
+        label: 'Criticidad',
+        from: ticket.criticality ? labels.get(ticket.criticality) ?? ticket.criticality : null,
+        to: labels.get(newCriticality) ?? newCriticality,
+      });
+    }
+    if (newCategory && newCategory.id !== ticket.categoryConfigId) {
+      changes.push({
+        field: 'categoryConfigId',
+        label: 'Categoría',
+        from: ticket.categoryConfig?.name ?? null,
+        to: newCategory.name,
+      });
+    }
+
+    if (changes.length === 0) {
+      // Se mandaron los mismos valores que ya tenía: no se escribe evento para no
+      // ensuciar el timeline con ruido, y el ticket se devuelve tal cual está.
+      return this.getTicketClassification(ticketId);
+    }
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.ticket.update({
+        where: { id: ticketId },
+        data: {
+          ...(newType && { ticketTypeId: newType.id }),
+          ...(newCriticality && { criticality: newCriticality }),
+          ...(newCategory && { categoryConfigId: newCategory.id }),
+          // ⚠️ Deliberadamente ausentes: responseDeadline / resolutionDeadline /
+          // slaPolicyId / slaSource. Ver el comentario del método.
+        },
+        select: TICKET_CLASSIFICATION_SELECT,
+      });
+
+      await this.events.writeEventTx(tx, {
+        ticketId,
+        type: 'RECLASSIFIED',
+        fromValue: changes.map((c) => `${c.label}: ${c.from ?? '—'}`).join(' · '),
+        toValue: changes.map((c) => `${c.label}: ${c.to}`).join(' · '),
+        source: 'TICKET',
+        userId,
+        metadata: { reason, changes },
+      });
+
+      // Evento de dominio dentro de la transacción (checklist del blueprint).
+      this.eventEmitter.emit('ticket.reclassified', {
+        ...domainEvent('ticket.reclassified', 'ticket', ticketId, orgId, userId),
+        ticketId,
+        organizationId: orgId,
+        changes,
+        reason,
+        userId,
+      });
+
+      return result;
+    });
+
+    this.logger.log(
+      `Ticket ${ticketId} reclasificado por ${userId} org=${orgId}: ` +
+        `${changes.map((c) => c.field).join(', ')}`,
+    );
+    return updated;
+  }
+
+  /** `criticality` → `displayName` configurado por la org (vacío = no configurado). */
+  private async getCriticalityLabels(orgId: string): Promise<Map<TicketCriticality, string>> {
+    const configs = await this.prisma.ticketCriticalityConfig.findMany({
+      where: { organizationId: orgId },
+      select: { criticality: true, displayName: true },
+    });
+    return new Map(configs.map((c) => [c.criticality, c.displayName]));
+  }
+
+  private getTicketClassification(ticketId: string) {
+    return this.prisma.ticket.findUnique({
+      where: { id: ticketId },
+      select: TICKET_CLASSIFICATION_SELECT,
+    });
   }
 
   // ────────────────────────────────────────────────────────────

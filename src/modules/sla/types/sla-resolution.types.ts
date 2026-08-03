@@ -61,5 +61,7 @@ export interface SlaReadiness {
 export interface SlaSeedResult {
   policiesCreated: number;
   typesCreated: number;
+  /** Filas de `TicketCriticalityConfig` sembradas (Fase 2). Solo si la org no tenía ninguna. */
+  criticalityConfigsCreated: number;
   alreadyExisting: number;
 }

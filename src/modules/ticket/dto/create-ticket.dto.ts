@@ -13,6 +13,17 @@ export enum TicketPriorityDto {
   HIGH = 'HIGH',
 }
 
+/**
+ * Criticidad elegible por el cliente (feature #42 — Fase 2). Espeja el enum
+ * `TicketCriticality` de Prisma; el servidor valida ADEMAS que esté marcada
+ * `clientVisible` en la organización (no alcanza con que el enum la admita).
+ */
+export enum TicketCriticalityDto {
+  HIGH = 'HIGH',
+  MEDIUM = 'MEDIUM',
+  LOW = 'LOW',
+}
+
 export class CreateTicketDto {
   @ApiProperty({ example: 'Error al cargar la factura', description: 'Titulo del ticket' })
   @IsString()
@@ -26,11 +37,27 @@ export class CreateTicketDto {
   @MaxLength(5000, { message: 'La descripcion no puede exceder 5000 caracteres' })
   description?: string;
 
-  @ApiProperty({ description: 'Categoria del ticket (enum o dynamic:<configId>)' })
+  /**
+   * CONTRATO VIEJO (feature #42 — Fase 2: pasa a OPCIONAL; se deprecia en Fase 3).
+   *
+   * El form nuevo del portal manda `ticketTypeId` + `criticality` y NO manda
+   * `category`. Se sigue aceptando el enum y el prefijo `dynamic:<configId>` para
+   * que el front se despliegue sin coordinación exacta y un cliente con la página
+   * cacheada no rompa.
+   *
+   * `@ValidateIf` gobierna TODA la propiedad: con `undefined` o con `dynamic:` no
+   * se valida nada (mismo comportamiento que Fase 1); con un valor de enum se exige
+   * que sea uno válido.
+   */
+  @ApiPropertyOptional({
+    description:
+      'DEPRECADO — categoria del ticket (enum o dynamic:<configId>). Usar ticketTypeId + criticality.',
+    deprecated: true,
+  })
+  @ValidateIf((o) => typeof o.category === 'string' && !o.category.startsWith('dynamic:'))
   @IsString()
-  @ValidateIf((o) => !o.category?.startsWith('dynamic:'))
   @IsEnum(TicketCategoryDto, { message: 'La categoria no es valida' })
-  category: string;
+  category?: string;
 
   @ApiPropertyOptional({ enum: TicketPriorityDto, default: TicketPriorityDto.MEDIUM, description: 'Prioridad del ticket' })
   @IsOptional()
@@ -42,4 +69,24 @@ export class CreateTicketDto {
   @IsString()
   @MaxLength(30, { message: 'relatedTicketId inválido' })
   relatedTicketId?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Tipo de solicitud elegido por el cliente (feature #42 — Fase 2). Se valida server-side ' +
+      'contra los contratos del proyecto y alimenta el paso 1 de la cascada de SLA.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(30, { message: 'ticketTypeId inválido' })
+  ticketTypeId?: string;
+
+  @ApiPropertyOptional({
+    enum: TicketCriticalityDto,
+    description:
+      'Criticidad elegida por el cliente (feature #42 — Fase 2). Debe estar marcada ' +
+      'clientVisible en la organización. Si no viene, entra la criticidad por defecto.',
+  })
+  @IsOptional()
+  @IsEnum(TicketCriticalityDto, { message: 'La criticidad debe ser HIGH, MEDIUM o LOW' })
+  criticality?: TicketCriticalityDto;
 }
