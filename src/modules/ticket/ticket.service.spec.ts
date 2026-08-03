@@ -205,4 +205,118 @@ describe('TicketService — gate por categoría del outbox (feature #13)', () =>
       expect(slaResolver.resolveAndCalculateDeadlines).not.toHaveBeenCalled();
     });
   });
+
+  // ── Feature #42 (Fase 2.1): declaración del cliente ───────────────────────
+  describe('el alta por ADMIN no produce declaración del cliente', () => {
+    it('NO escribe reportedTicketTypeId / reportedCriticality (quedan null)', async () => {
+      config.slaCascadeEnabled = true;
+      prisma.ticketType.findFirst.mockResolvedValue({ id: 'type-1' } as never);
+      slaResolver.resolveAndCalculateDeadlines.mockResolvedValue({
+        policy: { id: 'policy-1' },
+        source: 'CONTRACT',
+        responseDeadline: null,
+        resolutionDeadline: null,
+      } as never);
+
+      await service.createTicket(
+        ORG_ID,
+        { ...makeDto(TicketCategoryDto.SUPPORT_REQUEST), ticketTypeId: 'type-1' },
+        CREATED_BY,
+      );
+
+      const data = lastTx.ticket.create.mock.calls[0][0].data as Record<string, unknown>;
+      // el equipo sí clasifica…
+      expect(data).toMatchObject({ ticketTypeId: 'type-1' });
+      // …pero no hay cliente declarando nada
+      expect(data).not.toHaveProperty('reportedTicketTypeId');
+      expect(data).not.toHaveProperty('reportedCriticality');
+    });
+  });
+});
+
+/**
+ * Feature #42 — Fase 2.1: el panel interno ve la clasificación COMPLETA.
+ *
+ * Prisma MOCKEADO (jest-mock-extended). NUNCA toca DATABASE_URL (prod).
+ *
+ * Lo que custodian estos tests: el bloque de clasificación (`ticketType`,
+ * `reportedTicketType`, `slaPolicy`, `categoryConfig`) es UNO SOLO y viaja en las
+ * rutas que alimentan el panel. Antes eran 4 copias sueltas del mismo select y
+ * agregar un campo en una sola era el bug esperando a pasar.
+ */
+describe('TicketService — clasificación en el detalle del panel (#42 Fase 2.1)', () => {
+  let service: TicketService;
+  let prisma: DeepMockProxy<PrismaService>;
+
+  const ORG_ID = 'org-test';
+  const TICKET_ID = 'ticket-1';
+
+  /** Forma esperada del bloque compartido. */
+  const CLASSIFICATION = {
+    ticketType: { select: { id: true, name: true } },
+    reportedTicketType: { select: { id: true, name: true } },
+    slaPolicy: {
+      select: {
+        id: true,
+        name: true,
+        criticality: true,
+        firstResponseHours: true,
+        resolutionHours: true,
+      },
+    },
+    categoryConfig: { select: { id: true, name: true, criticality: true } },
+  };
+
+  beforeEach(() => {
+    prisma = mockDeep<PrismaService>();
+    service = new TicketService(
+      prisma,
+      mockDeep<EventEmitter2>(),
+      mockDeep<TicketEventsService>(),
+      mockDeep<AppConfigService>(),
+      mockDeep<OutboxService>(),
+      mockDeep<TaskHoursGuardService>(),
+      mockDeep<SlaResolverService>(),
+    );
+  });
+
+  it('getTicketDetail trae tipo tipificado, tipo reportado, política de SLA y categoría interna', async () => {
+    prisma.ticket.findUnique.mockResolvedValue({
+      id: TICKET_ID,
+      criticality: 'HIGH',
+      reportedCriticality: 'MEDIUM',
+      slaSource: 'CONTRACT',
+      ticketType: { id: 'type-error', name: 'Error del sistema' },
+      reportedTicketType: { id: 'type-consulta', name: 'Consulta' },
+      slaPolicy: {
+        id: 'policy-1',
+        name: 'Crítico contrato',
+        criticality: 'HIGH',
+        firstResponseHours: 2,
+        resolutionHours: 8,
+      },
+      categoryConfig: { id: 'cfg-1', name: 'Bug productivo', criticality: 'HIGH' },
+    } as never);
+
+    await expect(service.getTicketDetail(TICKET_ID)).resolves.toMatchObject({
+      ticketType: { id: 'type-error', name: 'Error del sistema' },
+      reportedTicketType: { id: 'type-consulta', name: 'Consulta' },
+      reportedCriticality: 'MEDIUM',
+      slaSource: 'CONTRACT',
+      slaPolicy: { id: 'policy-1', firstResponseHours: 2, resolutionHours: 8 },
+      categoryConfig: { id: 'cfg-1', name: 'Bug productivo' },
+    });
+    expect(prisma.ticket.findUnique.mock.calls[0][0].include).toMatchObject(CLASSIFICATION);
+  });
+
+  it('el listado de la org y el del proyecto usan el MISMO bloque de clasificación', async () => {
+    prisma.ticket.findMany.mockResolvedValue([] as never);
+    prisma.ticket.count.mockResolvedValue(0 as never);
+
+    await service.getOrgTickets(ORG_ID, {});
+    await service.getProjectTickets('project-1');
+
+    expect(prisma.ticket.findMany.mock.calls[0][0]!.include).toMatchObject(CLASSIFICATION);
+    expect(prisma.ticket.findMany.mock.calls[1][0]!.include).toMatchObject(CLASSIFICATION);
+  });
 });

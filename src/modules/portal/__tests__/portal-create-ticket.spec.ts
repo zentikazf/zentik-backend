@@ -205,6 +205,72 @@ describe('PortalService.createTicket (feature #42 — Fase 2)', () => {
     });
   });
 
+  describe('declaración del cliente congelada (#42 Fase 2.1)', () => {
+    it('graba reportedTicketTypeId + reportedCriticality con lo que mandó el cliente', async () => {
+      criticalityConfig.getClientVisible.mockResolvedValue([
+        { criticality: TicketCriticality.HIGH, label: 'Urgente', level: 3 },
+      ]);
+
+      await service.createTicket(
+        USER,
+        PROJECT,
+        makeDto({ ticketTypeId: 'type-1', criticality: TicketCriticalityDto.HIGH }),
+      );
+
+      expect(createdTicketData()).toMatchObject({
+        // lo que el equipo va a poder reclasificar…
+        ticketTypeId: 'type-1',
+        criticality: TicketCriticality.HIGH,
+        // …y el espejo congelado de lo que declaró el cliente
+        reportedTicketTypeId: 'type-1',
+        reportedCriticality: TicketCriticality.HIGH,
+      });
+    });
+
+    it('sin ticketTypeId no escribe reportedTicketTypeId (queda null en la fila)', async () => {
+      await service.createTicket(USER, PROJECT, makeDto());
+
+      const data = createdTicketData();
+      expect(data).not.toHaveProperty('reportedTicketTypeId');
+      expect(data).not.toHaveProperty('ticketTypeId');
+    });
+
+    it('sin criticidad congela la DEFAULT resuelta, no un null', async () => {
+      criticalityConfig.getDefault.mockResolvedValue(TicketCriticality.LOW);
+
+      await service.createTicket(USER, PROJECT, makeDto({ ticketTypeId: 'type-1' }));
+
+      expect(createdTicketData()).toMatchObject({
+        criticality: TicketCriticality.LOW,
+        reportedCriticality: TicketCriticality.LOW,
+      });
+    });
+
+    it('contrato viejo (dynamic:): congela la criticidad que traía la categoría', async () => {
+      prisma.ticketCategoryConfig.findFirst.mockResolvedValue({
+        id: 'cfg-1',
+        criticality: TicketCriticality.HIGH,
+      } as never);
+
+      await service.createTicket(USER, PROJECT, makeDto({ category: 'dynamic:cfg-1' }));
+
+      expect(createdTicketData()).toMatchObject({
+        reportedCriticality: TicketCriticality.HIGH,
+      });
+    });
+
+    it('el flag SLA_CASCADE_ENABLED no las gatea: son clasificación, no SLA', async () => {
+      config.slaCascadeEnabled = false;
+
+      await service.createTicket(USER, PROJECT, makeDto({ ticketTypeId: 'type-1' }));
+
+      expect(createdTicketData()).toMatchObject({
+        reportedTicketTypeId: 'type-1',
+        reportedCriticality: TicketCriticality.MEDIUM,
+      });
+    });
+  });
+
   describe('cascada de SLA', () => {
     it('flag OFF: NO invoca la cascada ni escribe slaPolicyId/slaSource (paridad con hoy)', async () => {
       await service.createTicket(USER, PROJECT, makeDto({ ticketTypeId: 'type-1' }));
@@ -327,6 +393,55 @@ describe('PortalService — criticidades y tipos del portal (#42 Fase 2)', () =>
     await expect(service.getProjectTicketTypes(USER, PROJECT, 'CRITICAL')).rejects.toMatchObject({
       code: 'CRITICALITY_INVALID',
       statusCode: 400,
+    });
+  });
+
+  describe('getTicketDetail — qué ve el cliente (#42 Fase 2.1)', () => {
+    /** `include` con el que el portal pide el detalle. */
+    function detailInclude(): Record<string, unknown> {
+      return prisma.ticket.findFirst.mock.calls[0][0]!.include as Record<string, unknown>;
+    }
+
+    beforeEach(() => {
+      prisma.ticket.findFirst.mockResolvedValue({
+        id: 'ticket-1',
+        criticality: TicketCriticality.HIGH,
+        reportedCriticality: TicketCriticality.HIGH,
+        ticketType: { id: 'type-error', name: 'Error del sistema' },
+        reportedTicketType: { id: 'type-consulta', name: 'Consulta' },
+      } as never);
+    });
+
+    it('trae el tipo tipificado por el equipo y el que declaró el cliente', async () => {
+      await expect(service.getTicketDetail(USER, 'ticket-1')).resolves.toMatchObject({
+        ticketType: { id: 'type-error', name: 'Error del sistema' },
+        reportedTicketType: { id: 'type-consulta', name: 'Consulta' },
+        reportedCriticality: TicketCriticality.HIGH,
+      });
+      expect(detailInclude()).toMatchObject({
+        ticketType: { select: { id: true, name: true } },
+        reportedTicketType: { select: { id: true, name: true } },
+      });
+    });
+
+    it('NO expone la categoría interna ni la política de SLA al cliente', async () => {
+      await service.getTicketDetail(USER, 'ticket-1');
+
+      const include = detailInclude();
+      expect(include).not.toHaveProperty('categoryConfig');
+      expect(include).not.toHaveProperty('slaPolicy');
+    });
+
+    it('sigue scopeado al cliente logueado (un ticket ajeno es 404)', async () => {
+      prisma.ticket.findFirst.mockResolvedValue(null as never);
+
+      await expect(service.getTicketDetail(USER, 'ticket-ajeno')).rejects.toMatchObject({
+        code: 'TICKET_NOT_FOUND',
+        statusCode: 404,
+      });
+      expect(prisma.ticket.findFirst.mock.calls[0][0]).toMatchObject({
+        where: { id: 'ticket-ajeno', clientId: CLIENT },
+      });
     });
   });
 });

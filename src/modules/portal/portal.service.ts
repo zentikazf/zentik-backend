@@ -358,6 +358,20 @@ export class PortalService {
     };
   }
 
+  /**
+   * Detalle del ticket para el CLIENTE.
+   *
+   * Qué ve (#42 Fase 2.1): el tipo con el que el equipo lo tipificó (`ticketType`),
+   * su criticidad, y su propia declaración (`reportedTicketType` + el escalar
+   * `reportedCriticality`) — así el portal puede mostrar "reportaste X · el equipo
+   * lo clasificó como Y" sin inventar datos.
+   *
+   * Qué NO ve, a propósito:
+   * - `categoryConfig`: la categoría es clasificación INTERNA del equipo.
+   * - `slaPolicy`: los plazos comprometidos son información contractual y hoy no
+   *   existe un ajuste por organización que habilite mostrarla en el portal. Se
+   *   expone recién cuando ese ajuste exista (decisión de negocio, no de código).
+   */
   async getTicketDetail(userId: string, ticketId: string) {
     const client = await this.getClientByUserId(userId);
 
@@ -368,6 +382,8 @@ export class PortalService {
         task: { select: { id: true, title: true, status: true } },
         channel: { select: { id: true, name: true } },
         createdByUser: { select: { id: true, name: true } },
+        ticketType: { select: { id: true, name: true } },
+        reportedTicketType: { select: { id: true, name: true } },
       },
     });
 
@@ -617,6 +633,19 @@ export class PortalService {
           // también con `SLA_CASCADE_ENABLED` apagado (si no, se perdería lo que
           // el cliente eligió en el form). `slaPolicyId`/`slaSource` sí van gateados.
           ...(ticketTypeId && { ticketTypeId }),
+          // ── #42 Fase 2.1: DECLARACIÓN DEL CLIENTE, congelada ────────────────
+          // Espejo de `ticketTypeId` / `criticality` en el instante del alta desde
+          // el PORTAL. Se escriben UNA sola vez, acá, y NO se modifican NUNCA
+          // (ver `reclassify` en ticket.service.ts): cuando el equipo reclasifica,
+          // `ticketTypeId`/`criticality` pasan a ser lo que el equipo determinó y
+          // estas dos siguen respondiendo "¿qué reportó el cliente?" sin tener que
+          // reconstruirlo leyendo el timeline de eventos.
+          // Quedan en null en el alta por admin (no hay declaración de cliente) y
+          // en todo lo histórico anterior a esta fase.
+          ...(ticketTypeId && { reportedTicketTypeId: ticketTypeId }),
+          // Cast puntual: `criticality` es `string` por el path viejo (`dynamic:`),
+          // pero siempre sale del enum (categoría, elección validada o default).
+          ...(criticality && { reportedCriticality: criticality as TicketCriticality }),
           ...slaCascadeData,
         },
         include: {

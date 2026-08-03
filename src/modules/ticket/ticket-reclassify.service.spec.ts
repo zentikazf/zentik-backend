@@ -27,6 +27,8 @@ describe('TicketService.reclassify (feature #42 — Fase 2)', () => {
   let eventEmitter: DeepMockProxy<EventEmitter2>;
   let events: DeepMockProxy<TicketEventsService>;
   let lastTx: DeepMockProxy<Prisma.TransactionClient>;
+  /** Fila que devuelve el `update` de la tx (la proyección TICKET_CLASSIFICATION_SELECT). */
+  let lastTxResult: Record<string, unknown>;
 
   const ORG = 'org-1';
   const TICKET = 'ticket-1';
@@ -80,9 +82,10 @@ describe('TicketService.reclassify (feature #42 — Fase 2)', () => {
       { criticality: TicketCriticality.MEDIUM, displayName: 'Media' },
     ] as never);
 
+    lastTxResult = { id: TICKET };
     prisma.$transaction.mockImplementation(async (cb: unknown) => {
       const tx = mockDeep<Prisma.TransactionClient>();
-      tx.ticket.update.mockResolvedValue({ id: TICKET } as never);
+      tx.ticket.update.mockResolvedValue(lastTxResult as never);
       lastTx = tx;
       return (cb as (t: Prisma.TransactionClient) => Promise<unknown>)(tx);
     });
@@ -153,6 +156,51 @@ describe('TicketService.reclassify (feature #42 — Fase 2)', () => {
       expect(data).not.toHaveProperty('resolutionDeadline');
       expect(data).not.toHaveProperty('slaPolicyId');
       expect(data).not.toHaveProperty('slaSource');
+    });
+
+    it('NO modifica la declaración del cliente: reportedTicketTypeId / reportedCriticality', async () => {
+      // El ticket entró declarado por el cliente como "Consulta" + MEDIA.
+      stubCurrentTicket({
+        reportedTicketTypeId: 'type-consulta',
+        reportedCriticality: TicketCriticality.MEDIUM,
+        reportedTicketType: { id: 'type-consulta', name: 'Consulta' },
+      });
+      lastTxResult = {
+        id: TICKET,
+        ticketTypeId: 'type-error',
+        criticality: TicketCriticality.HIGH,
+        reportedCriticality: TicketCriticality.MEDIUM,
+        reportedTicketType: { id: 'type-consulta', name: 'Consulta' },
+      };
+
+      // El equipo lo reclasifica a "Error del sistema" + ALTA.
+      const updated = await service.reclassify(
+        ORG,
+        TICKET,
+        { ticketTypeId: 'type-error', criticality: TicketCriticalityDto.HIGH, reason: REASON },
+        USER,
+      );
+
+      const data = updateData();
+      expect(data).not.toHaveProperty('reportedTicketTypeId');
+      expect(data).not.toHaveProperty('reportedCriticality');
+      // Y la respuesta sigue mostrando lo que reportó el cliente, no lo nuevo.
+      expect(updated).toMatchObject({
+        ticketTypeId: 'type-error',
+        criticality: TicketCriticality.HIGH,
+        reportedCriticality: TicketCriticality.MEDIUM,
+        reportedTicketType: { id: 'type-consulta', name: 'Consulta' },
+      });
+    });
+
+    it('la proyección devuelta incluye la declaración del cliente (para poder contrastarla)', async () => {
+      await service.reclassify(ORG, TICKET, { ticketTypeId: 'type-error', reason: REASON }, USER);
+
+      const select = lastTx.ticket.update.mock.calls[0][0].select as Record<string, unknown>;
+      expect(select).toMatchObject({
+        reportedCriticality: true,
+        reportedTicketType: { select: { id: true, name: true } },
+      });
     });
 
     it('no invoca la cascada de SLA en ningún caso', async () => {

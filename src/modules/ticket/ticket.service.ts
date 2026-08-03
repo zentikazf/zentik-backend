@@ -106,6 +106,10 @@ export interface ClassificationChange {
  * Proyección devuelta por `reclassify`: solo la clasificación + los campos de SLA
  * que quedan CONGELADOS (van en la respuesta justamente para que el front pueda
  * verificar que no se movieron).
+ *
+ * `reportedTicketType` / `reportedCriticality` viajan por el mismo motivo: son la
+ * declaración del cliente y tienen que verse IGUALES antes y después de
+ * reclasificar (#42 Fase 2.1).
  */
 const TICKET_CLASSIFICATION_SELECT = {
   id: true,
@@ -116,9 +120,41 @@ const TICKET_CLASSIFICATION_SELECT = {
   resolutionDeadline: true,
   slaPolicyId: true,
   slaSource: true,
+  reportedCriticality: true,
   ticketType: { select: { id: true, name: true } },
+  reportedTicketType: { select: { id: true, name: true } },
   categoryConfig: { select: { id: true, name: true, criticality: true } },
 } satisfies Prisma.TicketSelect;
+
+/**
+ * Clasificación del ticket para el panel interno (#42 Fase 2.1).
+ *
+ * Única fuente del bloque que antes estaba COPIADO en los 4 puntos que alimentan
+ * el panel (listado de la org, tickets del proyecto, detalle y respuesta del alta):
+ * agregar un campo de clasificación en uno solo y olvidarse de los otros tres era
+ * el bug esperando a pasar. Los escalares (`criticality`, `reportedCriticality`,
+ * `slaSource`, `ticketTypeId`…) los trae el `include` sin declararlos.
+ *
+ * - `ticketType`: lo que el equipo tipificó.
+ * - `reportedTicketType`: lo que declaró el cliente al crear (congelado).
+ * - `slaPolicy`: qué política se aplicó y con qué plazos, junto con `slaSource`
+ *   (en qué paso de la cascada se detuvo) → badge "por contrato" / "por criticidad".
+ * - `categoryConfig`: categoría interna del equipo.
+ */
+const TICKET_CLASSIFICATION_INCLUDE = {
+  ticketType: { select: { id: true, name: true } },
+  reportedTicketType: { select: { id: true, name: true } },
+  slaPolicy: {
+    select: {
+      id: true,
+      name: true,
+      criticality: true,
+      firstResponseHours: true,
+      resolutionHours: true,
+    },
+  },
+  categoryConfig: { select: { id: true, name: true, criticality: true } },
+} satisfies Prisma.TicketInclude;
 
 // ─── Mapping: estado del ticket → estado del task en kanban ────────────
 function mapTicketStatusToTaskStatus(
@@ -572,7 +608,7 @@ export class TicketService {
             },
           },
           channel: { select: { id: true, name: true, _count: { select: { messages: true } } } },
-          categoryConfig: { select: { id: true, name: true, criticality: true } },
+          ...TICKET_CLASSIFICATION_INCLUDE,
           createdByUser: { select: { id: true, name: true } },
         },
         orderBy: this.buildOrderBy(query.sortBy, query.sortOrder),
@@ -609,7 +645,7 @@ export class TicketService {
           },
         },
         channel: { select: { id: true, name: true, _count: { select: { messages: true } } } },
-        categoryConfig: { select: { id: true, name: true, criticality: true } },
+        ...TICKET_CLASSIFICATION_INCLUDE,
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -636,7 +672,7 @@ export class TicketService {
         channel: {
           select: { id: true, name: true, _count: { select: { messages: true } } },
         },
-        categoryConfig: { select: { id: true, name: true, criticality: true } },
+        ...TICKET_CLASSIFICATION_INCLUDE,
         createdByUser: { select: { id: true, name: true } },
         closedByUser: { select: { id: true, name: true } },
       },
@@ -1367,6 +1403,11 @@ export class TicketService {
           ...(responseDeadline && { responseDeadline }),
           ...(resolutionDeadline && { resolutionDeadline }),
           ...(dto.relatedTicketId && { relatedTicketId: dto.relatedTicketId }),
+          // #42 Fase 2.1: el alta por ADMIN no escribe `reportedTicketTypeId` ni
+          // `reportedCriticality` — quedan en null a propósito. Esas columnas son
+          // la declaración del CLIENTE (solo el portal la produce); llenarlas acá
+          // con lo que cargó el equipo las volvería inútiles para distinguir
+          // "lo que reportó el cliente" de "lo que determinó el equipo".
           ...slaCascadeData,
         },
         include: {
@@ -1374,7 +1415,7 @@ export class TicketService {
           client: { select: { id: true, name: true } },
           task: { select: { id: true, title: true, status: true } },
           channel: { select: { id: true, name: true } },
-          categoryConfig: { select: { id: true, name: true, criticality: true } },
+          ...TICKET_CLASSIFICATION_INCLUDE,
         },
       });
 
@@ -1541,6 +1582,11 @@ export class TicketService {
           ...(newCategory && { categoryConfigId: newCategory.id }),
           // ⚠️ Deliberadamente ausentes: responseDeadline / resolutionDeadline /
           // slaPolicyId / slaSource. Ver el comentario del método.
+          // ⚠️ Y TAMPOCO reportedTicketTypeId / reportedCriticality (#42 Fase 2.1):
+          // son la declaración del cliente, se escriben UNA vez al crear desde el
+          // portal. Reclasificar es justamente el caso en que el equipo dice algo
+          // DISTINTO de lo que reportó el cliente; pisarlas borraría la única
+          // evidencia directa de esa diferencia.
         },
         select: TICKET_CLASSIFICATION_SELECT,
       });

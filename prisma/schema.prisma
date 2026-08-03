@@ -1233,6 +1233,17 @@ model Ticket {
   slaSource    SlaSource? @map("sla_source")
   ticketTypeId String?    @map("ticket_type_id")
 
+  // #42 Fase 2.1 — DECLARACION DEL CLIENTE, congelada.
+  // Se graban UNA sola vez, al crear el ticket desde el portal, con lo que el
+  // cliente eligio. El equipo despues puede reclasificar `ticketTypeId` y
+  // `criticality` (lo que el equipo determina), pero estas dos NO se tocan nunca:
+  // preservan "que reporto el cliente" para el detalle y para auditoria, sin
+  // depender de reconstruirlo leyendo el historial de eventos.
+  // Null en tickets creados por admin (no hay declaracion de cliente) y en todo
+  // lo historico anterior a esta fase.
+  reportedTicketTypeId String?            @map("reported_ticket_type_id")
+  reportedCriticality  TicketCriticality? @map("reported_criticality")
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -1241,6 +1252,7 @@ model Ticket {
   client         Client                @relation(fields: [clientId], references: [id], onDelete: Cascade)
   slaPolicy      SlaPolicy?            @relation("TicketSlaPolicy", fields: [slaPolicyId], references: [id], onDelete: SetNull)
   ticketType     TicketType?           @relation("TicketTicketType", fields: [ticketTypeId], references: [id], onDelete: SetNull)
+  reportedTicketType TicketType?       @relation("TicketReportedType", fields: [reportedTicketTypeId], references: [id], onDelete: SetNull)
   task           Task?                 @relation(fields: [taskId], references: [id], onDelete: SetNull)
   channel        Channel?              @relation(fields: [channelId], references: [id], onDelete: SetNull)
   categoryConfig TicketCategoryConfig? @relation(fields: [categoryConfigId], references: [id], onDelete: SetNull)
@@ -1434,9 +1446,10 @@ model TicketType {
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
 
-  organization Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  contracts    ProjectTicketTypeSla[]
-  tickets      Ticket[]               @relation("TicketTicketType")
+  organization    Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  contracts       ProjectTicketTypeSla[]
+  tickets         Ticket[]               @relation("TicketTicketType")
+  reportedTickets Ticket[]               @relation("TicketReportedType")
 
   @@unique([organizationId, slug])
   @@index([organizationId, isActive])
