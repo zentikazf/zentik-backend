@@ -46,7 +46,11 @@ async function bootstrap() {
       }
     },
     credentials: true,
-    methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+    // PUT se agrego con la matriz de contratos SLA (#42 Fase 1): es el UNICO PUT
+    // de la app, y sin el en esta lista el navegador bloquea el request en el
+    // preflight OPTIONS — el PUT nunca sale del browser y en el backend no queda
+    // ni rastro en los logs (sintoma: "no guarda" sin error del lado servidor).
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Correlation-ID'],
   });
 
