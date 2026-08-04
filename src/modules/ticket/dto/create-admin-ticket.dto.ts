@@ -42,4 +42,14 @@ export class CreateAdminTicketDto {
   @IsString()
   @MaxLength(30, { message: 'relatedTicketId inválido' })
   relatedTicketId?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'ID del tipo de solicitud (feature #42). Solo se usa/persiste con SLA_CASCADE_ENABLED=true: ' +
+      'es la clave del paso 1 de la cascada (contrato proyecto+tipo).',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(30, { message: 'ticketTypeId inválido' })
+  ticketTypeId?: string;
 }

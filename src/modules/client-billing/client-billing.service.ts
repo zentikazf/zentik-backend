@@ -5,7 +5,7 @@ import { AuditService } from '../audit/audit.service';
 import { AppConfigService } from '../../config/app.config';
 import { AppException } from '../../common/filters/app-exception';
 import { AuthenticatedUser } from '../../common/interfaces/request.interface';
-import { tzOffsetMinutes } from '../ticket/sla.util';
+import { tzOffsetMinutes } from '../sla/sla.util';
 import { BillingVariablesService, CommercialLine } from '../botmaker-billing/billing-variables.service';
 import {
   EXCHANGE_RATE_PROVIDER,

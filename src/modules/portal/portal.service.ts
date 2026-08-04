@@ -1,20 +1,27 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Request, Response } from 'express';
-import { Prisma } from '@prisma/client';
+import { Prisma, SlaSource, TicketCriticality } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
+import { AppConfigService } from '../../config/app.config';
 import { AppException } from '../../common/filters/app-exception';
 import { CreateSuggestionDto } from './dto/create-suggestion.dto';
 import { UpdateSuggestionDto } from './dto/update-suggestion.dto';
 import { domainEvent } from '../../common/events/domain-event.helper';
 import { CreateTicketDto } from '../ticket/dto/create-ticket.dto';
 import { AuditService } from '../audit/audit.service';
-import { calculateBusinessDeadline, parseBusinessDays } from '../ticket/sla.util';
+import { calculateBusinessDeadline, parseBusinessDays } from '../sla/sla.util';
 import { generateTicketNumber } from '../ticket/ticket.service';
 import { FileService } from '../file/file.service';
 import { StorageService } from '../../infrastructure/storage/storage.service';
 import { OutboxService } from '../sync/outbox.service';
 import { ClientBillingPdfService } from '../client-billing/client-billing-pdf.service';
+import { SlaResolverService } from '../sla/sla-resolver.service';
+import {
+  CriticalityConfigService,
+  parseCriticality,
+} from '../sla/criticality-config.service';
+import { TicketTypeAvailabilityService } from '../sla/ticket-type-availability.service';
 
 @Injectable()
 export class PortalService {
@@ -28,6 +35,13 @@ export class PortalService {
     private readonly storage: StorageService,
     private readonly outbox: OutboxService,
     private readonly pdfService: ClientBillingPdfService,
+    private readonly config: AppConfigService,
+    // Feature #42 — Fase 1: solo se usa con `SLA_CASCADE_ENABLED=true`.
+    private readonly slaResolver: SlaResolverService,
+    // Feature #42 — Fase 2: validación server-side de lo que elige el cliente
+    // (criticidad visible + tipo disponible). Independiente del feature flag.
+    private readonly criticalityConfig: CriticalityConfigService,
+    private readonly ticketTypeAvailability: TicketTypeAvailabilityService,
   ) {}
 
   private async getClientByUserId(userId: string) {
@@ -344,6 +358,20 @@ export class PortalService {
     };
   }
 
+  /**
+   * Detalle del ticket para el CLIENTE.
+   *
+   * Qué ve (#42 Fase 2.1): el tipo con el que el equipo lo tipificó (`ticketType`),
+   * su criticidad, y su propia declaración (`reportedTicketType` + el escalar
+   * `reportedCriticality`) — así el portal puede mostrar "reportaste X · el equipo
+   * lo clasificó como Y" sin inventar datos.
+   *
+   * Qué NO ve, a propósito:
+   * - `categoryConfig`: la categoría es clasificación INTERNA del equipo.
+   * - `slaPolicy`: los plazos comprometidos son información contractual y hoy no
+   *   existe un ajuste por organización que habilite mostrarla en el portal. Se
+   *   expone recién cuando ese ajuste exista (decisión de negocio, no de código).
+   */
   async getTicketDetail(userId: string, ticketId: string) {
     const client = await this.getClientByUserId(userId);
 
@@ -354,6 +382,8 @@ export class PortalService {
         task: { select: { id: true, title: true, status: true } },
         channel: { select: { id: true, name: true } },
         createdByUser: { select: { id: true, name: true } },
+        ticketType: { select: { id: true, name: true } },
+        reportedTicketType: { select: { id: true, name: true } },
       },
     });
 
@@ -388,7 +418,11 @@ export class PortalService {
     let criticality: string | undefined;
     let responseDeadline: Date | undefined;
     let resolutionDeadline: Date | undefined;
-    const rawCategory = dto.category;
+    // SLA v2 (feature #42 — Fase 1): SOLO se llenan con `SLA_CASCADE_ENABLED=true`.
+    let slaPolicyId: string | undefined;
+    let slaSource: SlaSource | undefined;
+    // Contrato viejo: `category` ahora es opcional (el form de Fase 2 no la manda).
+    const rawCategory = dto.category ?? '';
 
     if (rawCategory.startsWith('dynamic:')) {
       const configId = rawCategory.slice('dynamic:'.length);
@@ -398,30 +432,115 @@ export class PortalService {
       if (categoryConfig) {
         categoryConfigId = categoryConfig.id;
         criticality = categoryConfig.criticality;
-
-        const slaConfig = await this.prisma.slaConfig.findUnique({
-          where: { organizationId_criticality: { organizationId: project.organizationId, criticality: categoryConfig.criticality } },
-        });
-        if (slaConfig) {
-          const [bhConfig, holidayRows] = await Promise.all([
-            this.prisma.businessHoursConfig.findUnique({ where: { organizationId: project.organizationId } }),
-            this.prisma.holiday.findMany({ where: { organizationId: project.organizationId }, select: { date: true } }),
-          ]);
-          const bh = bhConfig ? {
-            start: bhConfig.businessHoursStart,
-            end: bhConfig.businessHoursEnd,
-            days: parseBusinessDays(bhConfig.businessDays),
-            timezone: bhConfig.timezone,
-          } : undefined;
-          const holidays = holidayRows.map((h) => h.date);
-          const now = new Date();
-          responseDeadline = calculateBusinessDeadline(now, slaConfig.responseTimeMinutes, bh, holidays);
-          resolutionDeadline = calculateBusinessDeadline(now, slaConfig.resolutionTimeMinutes, bh, holidays);
-        }
       }
     }
 
-    const categoryLabel = rawCategory === 'SUPPORT_REQUEST' || rawCategory.startsWith('dynamic:') ? 'Soporte' : 'Desarrollo';
+    // ── Fase 2: tipo + criticidad elegidos por el cliente ────────────────────
+    // Validación SERVER-SIDE, nunca confiando en el front (checklist de seguridad
+    // del blueprint): el form puede estar cacheado, manipulado o desactualizado.
+    let ticketTypeId: string | null = null;
+    if (dto.ticketTypeId) {
+      const available = await this.ticketTypeAvailability.isTypeAvailable(
+        project.organizationId,
+        projectId,
+        dto.ticketTypeId,
+      );
+      if (!available) {
+        throw new AppException(
+          'El tipo de solicitud no está disponible para este proyecto',
+          'TICKET_TYPE_NOT_AVAILABLE',
+          400,
+        );
+      }
+      ticketTypeId = dto.ticketTypeId;
+    }
+
+    if (dto.criticality) {
+      const visibles = await this.criticalityConfig.getClientVisible(project.organizationId);
+      if (!visibles.some((v) => v.criticality === dto.criticality)) {
+        throw new AppException(
+          'La criticidad elegida no está habilitada para clientes',
+          'CRITICALITY_NOT_CLIENT_VISIBLE',
+          400,
+        );
+      }
+      criticality = dto.criticality;
+    } else if (!criticality) {
+      // Sin criticidad elegida (form viejo sin `dynamic:`, o modo 2B donde ninguna
+      // es visible): entra la criticidad por defecto de la organización.
+      criticality = await this.criticalityConfig.getDefault(project.organizationId);
+    }
+
+    if (this.config.slaCascadeEnabled) {
+      // ── PATH NUEVO: cascada. Con el form de Fase 2 el cliente elige el tipo, así
+      // que el paso 1 (contrato proyecto+tipo) POR FIN aplica desde el portal; sin
+      // tipo (contrato viejo) la cascada sigue arrancando en el paso 2.
+      const resolved = await this.slaResolver.resolveAndCalculateDeadlines({
+        organizationId: project.organizationId,
+        clientId: client.id,
+        projectId,
+        ticketTypeId,
+        // Cast puntual: `criticality` sale de la columna del enum (viene tipada
+        // como string por el path viejo).
+        criticality: (criticality as TicketCriticality | undefined) ?? null,
+      });
+      slaPolicyId = resolved.policy?.id ?? undefined;
+      slaSource = resolved.source;
+      responseDeadline = resolved.responseDeadline ?? undefined;
+      resolutionDeadline = resolved.resolutionDeadline ?? undefined;
+    } else if (criticality) {
+      // ── PATH ACTUAL (default): SlaConfig por criticidad.
+      //
+      // ⚠️ NO agregar `categoryConfigId &&` a esta condición (#42, hallazgo C1 del
+      // review). El form nuevo del portal dejo de mandar `category`, y por lo tanto
+      // `categoryConfigId` queda undefined: con el gate viejo, un ticket creado con
+      // el flag APAGADO no entraba ni a la cascada ni aca, y se guardaba SIN
+      // deadlines — en silencio y para siempre (los deadlines se congelan al crear).
+      // Era una regresion del 100% sobre el canal de mayor volumen, y ademas dejaba
+      // el rollback del ADR sin efecto: apagar el flag no restauraba nada.
+      //
+      // `categoryConfigId` nunca fue una dependencia real de este path: la query de
+      // abajo busca por `organizationId_criticality`, no usa la categoria. Era solo
+      // el vehiculo historico por el que llegaba la criticidad. Hoy `criticality`
+      // SIEMPRE queda resuelta (elegida y validada contra clientVisible, o el
+      // default de la organizacion), asi que gatear por ella alcanza y sobra.
+      // Con fallback + log: sin fila para esta criticidad el ticket quedaba sin
+      // deadlines en silencio (hallazgo C1' del review — ver findLegacySlaConfig).
+      const slaConfig = await this.slaResolver.findLegacySlaConfig(
+        project.organizationId,
+        criticality as TicketCriticality,
+      );
+      if (slaConfig) {
+        const [bhConfig, holidayRows] = await Promise.all([
+          this.prisma.businessHoursConfig.findUnique({ where: { organizationId: project.organizationId } }),
+          this.prisma.holiday.findMany({ where: { organizationId: project.organizationId }, select: { date: true } }),
+        ]);
+        const bh = bhConfig ? {
+          start: bhConfig.businessHoursStart,
+          end: bhConfig.businessHoursEnd,
+          days: parseBusinessDays(bhConfig.businessDays),
+          timezone: bhConfig.timezone,
+        } : undefined;
+        const holidays = holidayRows.map((h) => h.date);
+        const now = new Date();
+        responseDeadline = calculateBusinessDeadline(now, slaConfig.responseTimeMinutes, bh, holidays);
+        resolutionDeadline = calculateBusinessDeadline(now, slaConfig.resolutionTimeMinutes, bh, holidays);
+      }
+    }
+
+    // Con el flag OFF el objeto queda VACÍO → el create es exactamente el de hoy.
+    const slaCascadeData = this.config.slaCascadeEnabled
+      ? {
+          ...(slaPolicyId && { slaPolicyId }),
+          ...(slaSource && { slaSource }),
+        }
+      : {};
+
+    // Sin `category` (form de Fase 2) el ticket del portal es de Soporte, igual que
+    // el `category: 'SUPPORT_REQUEST'` que se persiste más abajo. Solo las categorías
+    // de desarrollo cambian la etiqueta del canal (paridad con el comportamiento actual).
+    const categoryLabel =
+      rawCategory === 'NEW_DEVELOPMENT' || rawCategory === 'NEW_PROJECT' ? 'Desarrollo' : 'Soporte';
     const channelName = `[${categoryLabel}] ${dto.title}`;
     const taskTitle = `[Ticket] ${dto.title}`;
 
@@ -527,6 +646,24 @@ export class PortalService {
           ...(responseDeadline && { responseDeadline }),
           ...(resolutionDeadline && { resolutionDeadline }),
           ...(dto.relatedTicketId && { relatedTicketId: dto.relatedTicketId }),
+          // El tipo es CLASIFICACIÓN, no salida del motor de SLA: se persiste
+          // también con `SLA_CASCADE_ENABLED` apagado (si no, se perdería lo que
+          // el cliente eligió en el form). `slaPolicyId`/`slaSource` sí van gateados.
+          ...(ticketTypeId && { ticketTypeId }),
+          // ── #42 Fase 2.1: DECLARACIÓN DEL CLIENTE, congelada ────────────────
+          // Espejo de `ticketTypeId` / `criticality` en el instante del alta desde
+          // el PORTAL. Se escriben UNA sola vez, acá, y NO se modifican NUNCA
+          // (ver `reclassify` en ticket.service.ts): cuando el equipo reclasifica,
+          // `ticketTypeId`/`criticality` pasan a ser lo que el equipo determinó y
+          // estas dos siguen respondiendo "¿qué reportó el cliente?" sin tener que
+          // reconstruirlo leyendo el timeline de eventos.
+          // Quedan en null en el alta por admin (no hay declaración de cliente) y
+          // en todo lo histórico anterior a esta fase.
+          ...(ticketTypeId && { reportedTicketTypeId: ticketTypeId }),
+          // Cast puntual: `criticality` es `string` por el path viejo (`dynamic:`),
+          // pero siempre sale del enum (categoría, elección validada o default).
+          ...(criticality && { reportedCriticality: criticality as TicketCriticality }),
+          ...slaCascadeData,
         },
         include: {
           project: { select: { id: true, name: true } },
@@ -559,19 +696,64 @@ export class PortalService {
       action: 'ticket.created',
       resource: 'ticket',
       resourceId: ticket.id,
-      newData: { title: dto.title, category: dto.category, projectId, clientName: client.name },
+      newData: {
+        title: dto.title,
+        category: dto.category ?? null,
+        ticketTypeId,
+        criticality: criticality ?? null,
+        projectId,
+        clientName: client.name,
+      },
     });
 
     this.eventEmitter.emit('ticket.created', {
       ...domainEvent('ticket.created', 'ticket', ticket.id, project.organizationId, userId),
       ticketId: ticket.id,
       title: dto.title,
-      category: dto.category,
+      category: dto.category ?? null,
       projectId,
       clientName: client.name,
     });
 
     return ticket;
+  }
+
+  // ── Criticidad + tipo (feature #42 — Fase 2) ───────────────
+
+  /**
+   * Criticidades que el cliente puede elegir, con su etiqueta de cara al cliente.
+   *
+   * Devolver `[]` es un estado VÁLIDO: el front no renderiza el selector y el
+   * ticket entra con la criticidad por defecto de la organización (modo 2B, se
+   * activa desmarcando checkboxes — sin deploy).
+   */
+  async getCriticalities(userId: string) {
+    const client = await this.getClientByUserId(userId);
+    return this.criticalityConfig.getClientVisible(client.organizationId);
+  }
+
+  /**
+   * Tipos de solicitud ofrecibles en un proyecto del cliente.
+   * `fallback: true` = el proyecto no tiene contratos → modo permisivo.
+   */
+  async getProjectTicketTypes(userId: string, projectId: string, criticality?: string) {
+    const client = await this.getClientByUserId(userId);
+
+    // El proyecto tiene que ser DEL cliente logueado (mismo scoping que el resto
+    // del portal): uno de otro cliente se trata como inexistente.
+    const project = await this.prisma.project.findFirst({
+      where: { id: projectId, clientId: client.id },
+      select: { id: true, organizationId: true },
+    });
+    if (!project) {
+      throw new AppException('Proyecto no encontrado', 'PROJECT_NOT_FOUND', 404);
+    }
+
+    return this.ticketTypeAvailability.getAvailableTypes(
+      project.organizationId,
+      project.id,
+      parseCriticality(criticality),
+    );
   }
 
   async getMyHours(userId: string) {

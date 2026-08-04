@@ -22,6 +22,7 @@ import { CreateSuggestionDto } from './dto/create-suggestion.dto';
 import { UpdateSuggestionDto } from './dto/update-suggestion.dto';
 import { CreateTicketDto } from '../ticket/dto/create-ticket.dto';
 import { CreateProjectRequestDto } from './dto/create-project-request.dto';
+import { AvailableTicketTypesQueryDto } from '../sla/dto';
 
 @ApiTags('Portal')
 @ApiBearerAuth()
@@ -203,6 +204,28 @@ export class PortalController {
   @ApiOperation({ summary: 'Listar categorías activas de tickets para el portal' })
   getTicketCategories(@CurrentUser() user: AuthenticatedUser) {
     return this.portalService.getActiveTicketCategories(user.id);
+  }
+
+  // ── Criticidad + tipo del form nuevo (feature #42 — Fase 2) ──
+
+  @Get('portal/criticalities')
+  @ApiOperation({
+    summary: 'Criticidades que el cliente puede elegir (vacío ⇒ el front no muestra el selector)',
+  })
+  getCriticalities(@CurrentUser() user: AuthenticatedUser) {
+    return this.portalService.getCriticalities(user.id);
+  }
+
+  @Get('portal/projects/:projectId/ticket-types')
+  @ApiOperation({
+    summary: 'Tipos de solicitud disponibles en el proyecto (+ fallback si no hay contratos)',
+  })
+  getProjectTicketTypes(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('projectId') projectId: string,
+    @Query() query: AvailableTicketTypesQueryDto,
+  ) {
+    return this.portalService.getProjectTicketTypes(user.id, projectId, query.criticality);
   }
 
   @Get('portal/business-hours')

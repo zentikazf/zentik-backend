@@ -14,12 +14,14 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { Response } from 'express';
-import { AuthGuard, PermissionsGuard } from '../auth/guards';
+import { AuthGuard, PermissionsGuard, RolesGuard } from '../auth/guards';
 import { CurrentUser } from '../../common/decorators';
 import { Permissions } from '../../common/decorators/permissions.decorator';
+import { Roles } from '../../common/decorators/roles.decorator';
 import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { TicketService } from './ticket.service';
 import { UpdateTicketDto } from './dto/update-ticket.dto';
+import { ReclassifyTicketDto } from './dto/reclassify-ticket.dto';
 import { CreateAdminTicketDto } from './dto/create-admin-ticket.dto';
 import { ListTicketsQueryDto } from './dto/list-tickets-query.dto';
 import { CreateCategoryConfigDto, UpdateCategoryConfigDto } from './dto/create-category-config.dto';
@@ -95,6 +97,28 @@ export class TicketController {
     @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.ticketService.createTicket(orgId, dto, user.id);
+  }
+
+  /**
+   * Tipificación / reclasificación interna (feature #42 — Fase 2).
+   *
+   * Solo roles INTERNOS: el cliente reporta, el equipo tipifica. `AuthGuard` ya
+   * está a nivel de clase; acá se suma `RolesGuard`. El motivo es obligatorio
+   * (lo exige el DTO y lo revalida el service).
+   */
+  @Patch('organizations/:orgId/tickets/:ticketId/classification')
+  @UseGuards(RolesGuard)
+  @Roles('Owner', 'Project Manager', 'Developer')
+  @ApiOperation({
+    summary: 'Reclasificar tipo / criticidad / categoría interna (motivo obligatorio, NO recalcula deadlines)',
+  })
+  reclassifyTicket(
+    @Param('orgId') orgId: string,
+    @Param('ticketId') ticketId: string,
+    @Body() dto: ReclassifyTicketDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.ticketService.reclassify(orgId, ticketId, dto, user.id);
   }
 
   @Get('projects/:projectId/tickets')

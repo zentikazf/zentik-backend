@@ -162,3 +162,39 @@ describe('calculateBusinessDeadline — fix timezone (feature #17, bug F-C)', ()
     expect(deadline.toISOString()).toBe('2026-06-19T20:05:00.000Z');
   });
 });
+
+/**
+ * REGRESIÓN A1 (review #42): horario hábil degenerado (start >= end) implicaba
+ * CERO minutos hábiles por día, y el `while` avanzaba el cursor un día por
+ * iteración sin bajar `remaining` NUNCA → bucle infinito que bloquea el event
+ * loop de Node y tumba toda la API (no solo ese request).
+ *
+ * El guard devuelve el instante de inicio: sin horario hábil no hay plazo que
+ * calcular, y un SLA vencido visible es preferible a una API caída.
+ *
+ * `jest.setTimeout` bajo a propósito: si el guard desaparece, el test NO cuelga
+ * la suite — falla por timeout, que es la señal correcta.
+ */
+describe('calculateBusinessDeadline — horario hábil degenerado (guard anti-bucle)', () => {
+  const start = new Date('2026-08-04T12:00:00Z');
+
+  it('start > end (17:30-08:30): corta y devuelve el instante de inicio', () => {
+    const out = calculateBusinessDeadline(start, 120, {
+      start: '17:30',
+      end: '08:30',
+      days: [1, 2, 3, 4, 5],
+      timezone: 'America/Asuncion',
+    });
+    expect(out.getTime()).toBe(start.getTime());
+  }, 5000);
+
+  it('start == end (09:00-09:00): mismo guard, no hay minutos hábiles', () => {
+    const out = calculateBusinessDeadline(start, 60, {
+      start: '09:00',
+      end: '09:00',
+      days: [1, 2, 3, 4, 5],
+      timezone: 'America/Asuncion',
+    });
+    expect(out.getTime()).toBe(start.getTime());
+  }, 5000);
+});

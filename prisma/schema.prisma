@@ -153,10 +153,19 @@ enum TicketCategory {
   NEW_PROJECT
 }
 
+/// Criticidad del ticket. El ORDEN de urgencia NO lo define este enum: lo define
+/// `TicketCriticalityConfig.level` por organizacion (CRITICAL = 4, HIGH = 3,
+/// MEDIUM = 2, LOW = 1). Aca el orden es historico y no significa nada.
+///
+/// #42 Fase 3: se agrega CRITICAL para paridad con OSD (Baja/Media/Alta/Critica).
+/// Aditivo — `ALTER TYPE ... ADD VALUE` no toca ninguna fila existente. Nota: en
+/// Postgres quitar un valor de un enum exige recrear el tipo, asi que agregar es
+/// una via de una sola direccion (asumido).
 enum TicketCriticality {
   HIGH
   MEDIUM
   LOW
+  CRITICAL
 }
 
 enum TicketStatus {
@@ -180,6 +189,10 @@ enum TicketEventType {
   SLA_WARNING
   FIRST_RESPONSE
   RESOLVED
+  // #42 Fase 2: el equipo tipifica/reclasifica tipo, criticidad o categoria
+  // interna de un ticket. Guarda from/to + el motivo en metadata. NO recalcula
+  // deadlines (quedan congelados, igual que en OSD).
+  RECLASSIFIED
 }
 
 enum TicketEventSource {
@@ -360,6 +373,9 @@ model Organization {
   businessHoursConfig   BusinessHoursConfig?
   holidays              Holiday[]
   creditNotes           CreditNote[]
+  slaPolicies           SlaPolicy[]
+  ticketTypes           TicketType[]
+  criticalityConfigs    TicketCriticalityConfig[]
 
   @@index([slug])
   @@map("organizations")
@@ -503,11 +519,17 @@ model Project {
   alcanceFileId       String?                @unique @map("alcance_file_id")
   pendingClientReview Boolean                @default(false) @map("pending_client_review")
 
-  organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  createdBy    User            @relation("ProjectCreator", fields: [createdById], references: [id])
-  client       Client?         @relation(fields: [clientId], references: [id], onDelete: SetNull)
-  responsible  User?           @relation("projectResponsible", fields: [responsibleId], references: [id], onDelete: SetNull)
-  alcanceFile  File?           @relation("ProjectAlcanceFile", fields: [alcanceFileId], references: [id], onDelete: SetNull)
+  // SLA v2 (feature #42): politica propia del proyecto — paso 2 de la cascada.
+  // Nullable: si no se asigna, la cascada sigue al SLA default del cliente.
+  slaPolicyId String? @map("sla_policy_id")
+
+  organization Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy    User                   @relation("ProjectCreator", fields: [createdById], references: [id])
+  client       Client?                @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  slaPolicy    SlaPolicy?             @relation("ProjectSlaPolicy", fields: [slaPolicyId], references: [id], onDelete: SetNull)
+  slaContracts ProjectTicketTypeSla[]
+  responsible  User?                  @relation("projectResponsible", fields: [responsibleId], references: [id], onDelete: SetNull)
+  alcanceFile  File?                  @relation("ProjectAlcanceFile", fields: [alcanceFileId], references: [id], onDelete: SetNull)
   members      ProjectMember[]
   boards       Board[]
   sprints      Sprint[]
@@ -518,7 +540,7 @@ model Project {
   suggestions  Suggestion[]
   tickets      Ticket[]
   meetings     Meeting[]
-  documents    File[]          @relation("ProjectDocuments")
+  documents    File[]                 @relation("ProjectDocuments")
 
   @@unique([organizationId, slug])
   @@index([organizationId])
@@ -1069,8 +1091,12 @@ model Client {
   createdAt             DateTime     @default(now()) @map("created_at")
   updatedAt             DateTime     @updatedAt @map("updated_at")
 
+  // SLA v2 (feature #42): politica por defecto del cliente — paso 3 de la cascada.
+  defaultSlaPolicyId String? @map("default_sla_policy_id")
+
   organization      Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   user              User?                    @relation("ClientOwner", fields: [userId], references: [id], onDelete: SetNull)
+  defaultSlaPolicy  SlaPolicy?               @relation("ClientDefaultSlaPolicy", fields: [defaultSlaPolicyId], references: [id], onDelete: SetNull)
   users             User[]                   @relation("ClientUsers")
   projects          Project[]
   suggestions       Suggestion[]
@@ -1206,12 +1232,36 @@ model Ticket {
   // para que borrar el ticket padre no rompa el follow-up. SQL aditivo (NO migrate).
   relatedTicketId String? @map("related_ticket_id")
 
+  // SLA v2 (feature #42): resultado CONGELADO de la cascada al crear el ticket.
+  // slaPolicyId = que politica se aplico; slaSource = en que paso se detuvo la
+  // resolucion (permite mostrar "por contrato"/"por criticidad" y detectar config
+  // incompleta); ticketTypeId = tipo de solicitud elegido. Los 3 nullable: los
+  // tickets historicos y los creados con el flag apagado quedan en null.
+  // NO se recalculan nunca (igual que responseDeadline/resolutionDeadline).
+  slaPolicyId  String?    @map("sla_policy_id")
+  slaSource    SlaSource? @map("sla_source")
+  ticketTypeId String?    @map("ticket_type_id")
+
+  // #42 Fase 2.1 — DECLARACION DEL CLIENTE, congelada.
+  // Se graban UNA sola vez, al crear el ticket desde el portal, con lo que el
+  // cliente eligio. El equipo despues puede reclasificar `ticketTypeId` y
+  // `criticality` (lo que el equipo determina), pero estas dos NO se tocan nunca:
+  // preservan "que reporto el cliente" para el detalle y para auditoria, sin
+  // depender de reconstruirlo leyendo el historial de eventos.
+  // Null en tickets creados por admin (no hay declaracion de cliente) y en todo
+  // lo historico anterior a esta fase.
+  reportedTicketTypeId String?            @map("reported_ticket_type_id")
+  reportedCriticality  TicketCriticality? @map("reported_criticality")
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
   organization   Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   project        Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
   client         Client                @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  slaPolicy      SlaPolicy?            @relation("TicketSlaPolicy", fields: [slaPolicyId], references: [id], onDelete: SetNull)
+  ticketType     TicketType?           @relation("TicketTicketType", fields: [ticketTypeId], references: [id], onDelete: SetNull)
+  reportedTicketType TicketType?       @relation("TicketReportedType", fields: [reportedTicketTypeId], references: [id], onDelete: SetNull)
   task           Task?                 @relation(fields: [taskId], references: [id], onDelete: SetNull)
   channel        Channel?              @relation(fields: [channelId], references: [id], onDelete: SetNull)
   categoryConfig TicketCategoryConfig? @relation(fields: [categoryConfigId], references: [id], onDelete: SetNull)
@@ -1318,6 +1368,143 @@ model Holiday {
 }
 
 // ============================================================================
+// SLA v2 — Politicas nombradas + cascada estilo OSD (feature #42, Fase 1)
+// ----------------------------------------------------------------------------
+// Modelo ADITIVO: convive con SlaConfig/TicketCategoryConfig (legacy) sin
+// tocarlos. La resolucion nueva se activa con el flag SLA_CASCADE_ENABLED.
+// El calculo del deadline SIGUE usando sla.util.ts (horas habiles + feriados);
+// estas entidades solo deciden QUE politica aplica, no COMO se calcula.
+// Ver: docs/project/features/2026-07-31-motor-sla-politicas-nombradas-cascada-fase-1/
+// ============================================================================
+
+/// De donde salio la politica aplicada a un ticket (paso de la cascada en el que
+/// se detuvo la resolucion). Se congela en el ticket al crear — permite mostrar
+/// "por contrato" / "por criticidad" y detectar configuracion incompleta.
+enum SlaSource {
+  CONTRACT // 1. contrato del proyecto para ese tipo
+  PROJECT // 2. SLA propio del proyecto
+  CLIENT // 3. SLA default del cliente
+  CRITICALITY // 4. politica de la criticidad del ticket (red de seguridad)
+  STANDARD // 5. politica "Estandar" (fallback global)
+  NONE // no se pudo resolver (sin deadlines, como hoy)
+}
+
+/// Politica SLA con nombre. Existe de forma INDEPENDIENTE (catalogo por org) y
+/// declara a que criticidad pertenece. Cliente/proyecto/contrato la referencian.
+model SlaPolicy {
+  id                 String            @id @default(cuid())
+  organizationId     String            @map("organization_id")
+  name               String
+  criticality        TicketCriticality // Fase 3: pasa a catalogo con level/client_visible
+  firstResponseHours Int               @map("first_response_hours")
+  resolutionHours    Int               @map("resolution_hours")
+  pausesOnWaiting    Boolean           @default(false) @map("pauses_on_waiting")
+  isActive           Boolean           @default(true) @map("is_active")
+  createdAt          DateTime          @default(now()) @map("created_at")
+  updatedAt          DateTime          @updatedAt @map("updated_at")
+
+  organization Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  contracts    ProjectTicketTypeSla[]
+  projects     Project[]              @relation("ProjectSlaPolicy")
+  clients      Client[]               @relation("ClientDefaultSlaPolicy")
+  tickets      Ticket[]               @relation("TicketSlaPolicy")
+
+  @@unique([organizationId, name])
+  @@index([organizationId, criticality])
+  @@map("sla_policies")
+}
+
+/// Configuracion de PRESENTACION y VISIBILIDAD de cada criticidad, por organizacion.
+///
+/// NO crea una identidad nueva para la criticidad: el enum `TicketCriticality`
+/// sigue siendo la fuente (migrarlo a catalogo no tiene red del compilador —
+/// 1 import real + 6 `as any` en el codebase). Esta tabla solo agrega el "como se
+/// muestra" y el "quien lo elige", indexado por el valor del enum.
+///
+/// Clave del diseño (#42 Fase 2, decision 2A del dev): si NINGUNA fila tiene
+/// `clientVisible=true`, el portal NO renderiza el selector de criticidad y usa la
+/// fila `isDefault` → eso ES el modo 2B. Cambiar de 2A a 2B = desmarcar un
+/// checkbox: cero migracion, cero deploy.
+model TicketCriticalityConfig {
+  id             String            @id @default(cuid())
+  organizationId String            @map("organization_id")
+  criticality    TicketCriticality
+  displayName    String            @map("display_name") // nombre interno (lo ve el equipo)
+  clientLabel    String?           @map("client_label") // como lo ve el cliente ("Urgente")
+  clientVisible  Boolean           @default(true) @map("client_visible")
+  level          Int // orden de urgencia (1 = menor)
+  isDefault      Boolean           @default(false) @map("is_default") // entra si el cliente no elige
+  createdAt      DateTime          @default(now()) @map("created_at")
+  updatedAt      DateTime          @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, criticality])
+  @@index([organizationId, clientVisible])
+  @@map("ticket_criticality_configs")
+}
+
+/// Tipo de solicitud (Incidencia, Consulta, Mejora...). Fase 1: lista plana.
+/// Fase 3: arbol (parentId / path / level).
+model TicketType {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  name           String
+  slug           String
+  isActive       Boolean  @default(true) @map("is_active")
+
+  // ── #42 Fase 3: ARBOL de tipos (paridad con OSD) ────────────────────────────
+  // `parentId` null = raiz. `path` y `level` son DERIVADOS: los calcula el service
+  // al crear/mover, nunca los manda el cliente. Se persisten (en vez de calcularse
+  // al leer) para poder ordenar el arbol y buscar por rama con un solo query.
+  //
+  // onDelete: Restrict a proposito — borrar un padre que tiene hijos debe fallar
+  // ruidoso, no dejar huerfanos ni borrar en cascada una rama entera sin querer.
+  // La baja normal es logica (`isActive=false`, que desactiva la rama completa).
+  parentId String? @map("parent_id")
+  /// Ruta de slugs desde la raiz: "incidencia/error-del-sistema". Orden y busqueda por rama.
+  path     String  @default("")
+  /// Profundidad: 0 = raiz. Tope de 3 niveles (guardarrail del service, no del schema).
+  level    Int     @default(0)
+
+  organization    Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  parent          TicketType?            @relation("TicketTypeTree", fields: [parentId], references: [id], onDelete: Restrict)
+  children        TicketType[]           @relation("TicketTypeTree")
+  contracts       ProjectTicketTypeSla[]
+  tickets         Ticket[]               @relation("TicketTicketType")
+  reportedTickets Ticket[]               @relation("TicketReportedType")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([organizationId, slug])
+  @@index([organizationId, isActive])
+  @@index([organizationId, parentId])
+  @@map("ticket_types")
+}
+
+/// Contrato: "en ESTE proyecto, ESTE tipo se atiende con ESTA politica".
+/// Es el lazo mas fino y el primer paso de la cascada. Un solo contrato por par.
+model ProjectTicketTypeSla {
+  id            String   @id @default(cuid())
+  projectId     String   @map("project_id")
+  ticketTypeId  String   @map("ticket_type_id")
+  slaPolicyId   String   @map("sla_policy_id")
+  contractNotes String?  @map("contract_notes")
+  isActive      Boolean  @default(true) @map("is_active")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  project    Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  ticketType TicketType @relation(fields: [ticketTypeId], references: [id], onDelete: Cascade)
+  slaPolicy  SlaPolicy  @relation(fields: [slaPolicyId], references: [id], onDelete: Restrict)
+
+  @@unique([projectId, ticketTypeId])
+  @@index([projectId, isActive])
+  @@map("project_ticket_type_slas")
+}
+
+// ============================================================================
 // HOURS TRACKING (Horas Contratadas)
 // ============================================================================
 
@@ -1391,39 +1578,39 @@ model HoursTransaction {
 // ============================================================================
 
 model ClientBillingCycle {
-  id             String    @id @default(cuid())
-  organizationId String    @map("organization_id") // denormalizado: scope + espejo MCP futuro
-  clientId       String    @map("client_id")
-  periodStart    DateTime  @map("period_start") // 1º del mes 00:00 (America/Asuncion → instante UTC)
-  periodEnd      DateTime  @map("period_end") // último día 23:59:59.999 (America/Asuncion → instante UTC)
+  id               String    @id @default(cuid())
+  organizationId   String    @map("organization_id") // denormalizado: scope + espejo MCP futuro
+  clientId         String    @map("client_id")
+  periodStart      DateTime  @map("period_start") // 1º del mes 00:00 (America/Asuncion → instante UTC)
+  periodEnd        DateTime  @map("period_end") // último día 23:59:59.999 (America/Asuncion → instante UTC)
   // ── H8a: punto de corte parcial. DORMIDA — nace en H8a, la escribe H8b (persistir "hasta
   //    dónde se facturó" cuando un ciclo cierra a mitad de mes). TIMESTAMP(3) con hora
   //    (coherente con periodStart/periodEnd), NO @db.Date. ──
-  cutoffDate     DateTime? @map("cutoff_date")
-  status         String    @default("DRAFT") // DRAFT | SENT | PAID | CANCELLED
+  cutoffDate       DateTime? @map("cutoff_date")
+  status           String    @default("DRAFT") // DRAFT | SENT | PAID | CANCELLED
   // H8d: tipo de factura. MONTH = un mes nominal; ACCUMULATED = varios meses elegidos a mano en una
   //   sola factura. Aditivo con default → todo lo histórico queda MONTH sin backfill.
-  kind           String    @default("MONTH") @map("kind") // MONTH | ACCUMULATED
-  invoiceNumber  String    @map("invoice_number") // FAC-YYYY-NNNNN (secuencia POR-ORG, §6.1)
-  totalHours     Float     @default(0) @map("total_hours")
-  totalAmount    Decimal   @default(0) @map("total_amount") @db.Decimal(15, 2)
-  currency       String
-  notes          String?
-  closedAt       DateTime? @map("closed_at")
-  closedById     String?   @map("closed_by_id")
-  sentAt         DateTime? @map("sent_at")
-  paidAt         DateTime? @map("paid_at")
+  kind             String    @default("MONTH") @map("kind") // MONTH | ACCUMULATED
+  invoiceNumber    String    @map("invoice_number") // FAC-YYYY-NNNNN (secuencia POR-ORG, §6.1)
+  totalHours       Float     @default(0) @map("total_hours")
+  totalAmount      Decimal   @default(0) @map("total_amount") @db.Decimal(15, 2)
+  currency         String
+  notes            String?
+  closedAt         DateTime? @map("closed_at")
+  closedById       String?   @map("closed_by_id")
+  sentAt           DateTime? @map("sent_at")
+  paidAt           DateTime? @map("paid_at")
   // H8d/A3: anulación como REGISTRO permanente (keep-data). reopenCycle exige motivo obligatorio y
   //   sella quién/cuándo. La factura anulada NUNCA se borra ni se oculta del listado — se marca "Anulada".
-  cancelReason   String?   @map("cancel_reason")
-  cancelledAt    DateTime? @map("cancelled_at")
-  cancelledById  String?   @map("cancelled_by_id")
+  cancelReason     String?   @map("cancel_reason")
+  cancelledAt      DateTime? @map("cancelled_at")
+  cancelledById    String?   @map("cancelled_by_id")
   // #23: estampado inmutable de las Variables (Botmaker) cobradas en esta factura + la tasa USD→PYG
   //   usada al emitir. JSON: { amountPyg, currency, rate, rateDate, lines:[{label, commercialUsd, convertedPyg}] }
   //   (montos como string). NULL = factura sin variables. totalAmount ya incluye amountPyg. Aditivo (T0-bis).
-  variablesBilling Json?   @map("variables_billing")
-  createdAt      DateTime  @default(now()) @map("created_at")
-  updatedAt      DateTime  @updatedAt @map("updated_at")
+  variablesBilling Json?     @map("variables_billing")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
 
   client             Client             @relation(fields: [clientId], references: [id], onDelete: Cascade)
   closedBy           User?              @relation("CycleClosedBy", fields: [closedById], references: [id], onDelete: SetNull)
@@ -1446,18 +1633,18 @@ model ClientBillingCycle {
 // conversión a Gs y el cobro ocurren en la factura del ciclo (client_billing_cycles).
 
 model ClientBillingStatement {
-  id        String   @id @default(cuid())
-  clientId  String   @map("client_id")
-  period    String // 'YYYY-MM'
+  id            String   @id @default(cuid())
+  clientId      String   @map("client_id")
+  period        String // 'YYYY-MM'
   // [{ label, rawValue?: number, commercialValue: number, source: 'BOTMAKER'|'MANUAL' }] — montos en USD.
-  items     Json     @default("[]")
-  note      String?
+  items         Json     @default("[]")
+  note          String?
   // #23: candado anti-doble-cobro (mismo patrón que HoursTransaction.billedCycleId). NULL = no facturado;
   //   al emitir una factura que incluye este período se sella con el cycleId; anular el ciclo lo libera.
   //   Aditivo (T0-bis). Referencia suelta al ciclo (los ciclos nunca se hard-deletean → keep-data).
-  billedCycleId String? @map("billed_cycle_id")
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  billedCycleId String?  @map("billed_cycle_id")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
 
   client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
 

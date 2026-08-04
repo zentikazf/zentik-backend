@@ -166,4 +166,14 @@ export class AppConfigService {
     const n = Number(raw);
     return Number.isFinite(n) && n > 0 ? n : undefined;
   }
+
+  // === Motor de SLA con cascada (feature #42 — Fase 1) ===
+  // Con `false` (default, incluye la var ausente) la resolución de SLA al crear un
+  // ticket es EXACTAMENTE la de hoy. Con `true` corre la cascada del SlaResolverService.
+  // process.env siempre es string → comparamos contra 'true' (molde Onnix/Botmaker).
+  // ⚠️ Activarlo sin una política "Estándar" en la org deja tickets SIN SLA: la cascada
+  // termina en `NONE` y los deadlines quedan null. Verificar antes con `sla-readiness`.
+  get slaCascadeEnabled(): boolean {
+    return this.configService.get<string>('SLA_CASCADE_ENABLED') === 'true';
+  }
 }

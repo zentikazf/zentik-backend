@@ -5,18 +5,21 @@ import {
   TicketStatus,
   TaskStatus,
   TicketCloseReason,
+  TicketCriticality,
+  SlaSource,
 } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
 import { AppException } from '../../common/filters/app-exception';
 import { UpdateTicketDto } from './dto/update-ticket.dto';
 import { CreateAdminTicketDto } from './dto/create-admin-ticket.dto';
 import { CloseTicketDto } from './dto/close-ticket.dto';
-import { ListTicketsQueryDto } from './dto/list-tickets-query.dto';
+import { ListTicketsQueryDto, SlaOutcome } from './dto/list-tickets-query.dto';
 import { CreateCategoryConfigDto, UpdateCategoryConfigDto } from './dto/create-category-config.dto';
 import { UpsertSlaConfigDto } from './dto/upsert-sla-config.dto';
 import { UpsertBusinessHoursDto } from './dto/upsert-business-hours.dto';
+import { ReclassifyTicketDto } from './dto/reclassify-ticket.dto';
 import { domainEvent } from '../../common/events/domain-event.helper';
-import { calculateBusinessDeadline, parseBusinessDays } from './sla.util';
+import { calculateBusinessDeadline, parseBusinessDays } from '../sla/sla.util';
 import { TicketEventsService } from './ticket-events.service';
 import { AppConfigService } from '../../config/app.config';
 import { OutboxService } from '../sync/outbox.service';
@@ -24,6 +27,7 @@ import {
   TaskHoursGuardService,
   HoursGateActorContext,
 } from '../task/task-hours-guard.service';
+import { SlaResolverService } from '../sla/sla-resolver.service';
 
 /**
  * Generates a sequential ticket number per org: YYYYMMDD-NNN
@@ -89,6 +93,69 @@ const ALLOWED_TRANSITIONS: Record<TicketStatus, TicketStatus[]> = {
   CLOSED:      [],
 };
 
+// ─── Reclasificación interna (feature #42 — Fase 2) ────────────────────
+/** Un campo de clasificación que cambió, ya legible para el timeline. */
+export interface ClassificationChange {
+  field: 'ticketTypeId' | 'criticality' | 'categoryConfigId';
+  label: string;
+  from: string | null;
+  to: string;
+}
+
+/**
+ * Proyección devuelta por `reclassify`: solo la clasificación + los campos de SLA
+ * que quedan CONGELADOS (van en la respuesta justamente para que el front pueda
+ * verificar que no se movieron).
+ *
+ * `reportedTicketType` / `reportedCriticality` viajan por el mismo motivo: son la
+ * declaración del cliente y tienen que verse IGUALES antes y después de
+ * reclasificar (#42 Fase 2.1).
+ */
+const TICKET_CLASSIFICATION_SELECT = {
+  id: true,
+  ticketTypeId: true,
+  criticality: true,
+  categoryConfigId: true,
+  responseDeadline: true,
+  resolutionDeadline: true,
+  slaPolicyId: true,
+  slaSource: true,
+  reportedCriticality: true,
+  ticketType: { select: { id: true, name: true } },
+  reportedTicketType: { select: { id: true, name: true } },
+  categoryConfig: { select: { id: true, name: true, criticality: true } },
+} satisfies Prisma.TicketSelect;
+
+/**
+ * Clasificación del ticket para el panel interno (#42 Fase 2.1).
+ *
+ * Única fuente del bloque que antes estaba COPIADO en los 4 puntos que alimentan
+ * el panel (listado de la org, tickets del proyecto, detalle y respuesta del alta):
+ * agregar un campo de clasificación en uno solo y olvidarse de los otros tres era
+ * el bug esperando a pasar. Los escalares (`criticality`, `reportedCriticality`,
+ * `slaSource`, `ticketTypeId`…) los trae el `include` sin declararlos.
+ *
+ * - `ticketType`: lo que el equipo tipificó.
+ * - `reportedTicketType`: lo que declaró el cliente al crear (congelado).
+ * - `slaPolicy`: qué política se aplicó y con qué plazos, junto con `slaSource`
+ *   (en qué paso de la cascada se detuvo) → badge "por contrato" / "por criticidad".
+ * - `categoryConfig`: categoría interna del equipo.
+ */
+const TICKET_CLASSIFICATION_INCLUDE = {
+  ticketType: { select: { id: true, name: true } },
+  reportedTicketType: { select: { id: true, name: true } },
+  slaPolicy: {
+    select: {
+      id: true,
+      name: true,
+      criticality: true,
+      firstResponseHours: true,
+      resolutionHours: true,
+    },
+  },
+  categoryConfig: { select: { id: true, name: true, criticality: true } },
+} satisfies Prisma.TicketInclude;
+
 // ─── Mapping: estado del ticket → estado del task en kanban ────────────
 function mapTicketStatusToTaskStatus(
   ticketStatus: TicketStatus,
@@ -123,6 +190,8 @@ export class TicketService {
     private readonly config: AppConfigService,
     private readonly outbox: OutboxService,
     private readonly hoursGuard: TaskHoursGuardService,
+    // Feature #42 — Fase 1: solo se usa con `SLA_CASCADE_ENABLED=true`.
+    private readonly slaResolver: SlaResolverService,
   ) {}
 
   // ────────────────────────────────────────────────────────────
@@ -323,6 +392,7 @@ export class TicketService {
       organizationId: orgId,
       ...(query.status && { status: query.status as TicketStatus }),
       ...(query.clientId && { clientId: query.clientId }),
+      ...(query.projectId && { projectId: query.projectId }),
       ...(query.createdByUserId && { createdByUserId: query.createdByUserId }),
       ...(query.categoryConfigId && { categoryConfigId: query.categoryConfigId }),
       ...(query.assigneeId && {
@@ -351,36 +421,43 @@ export class TicketService {
 
     // slaOutcome → cláusulas sobre flags + deadlines.
     // Las reglas se alinean con classifySlaOutcome (sla.util.ts).
-    if (query.slaOutcome) {
-      switch (query.slaOutcome) {
-        case 'COMPLIED':
-          // Sin breaches Y al menos una deadline definida Y status RESOLVED.
-          where.slaResponseBreached = false;
-          where.slaResolutionBreached = false;
-          where.status = 'RESOLVED';
-          where.OR = [
-            ...(Array.isArray(where.OR) ? where.OR : []),
-            { responseDeadline: { not: null } },
-            { resolutionDeadline: { not: null } },
-          ];
-          break;
-        case 'BREACHED_RESPONSE':
-          where.slaResponseBreached = true;
-          where.slaResolutionBreached = false;
-          break;
-        case 'BREACHED_RESOLUTION':
-          where.slaResponseBreached = false;
-          where.slaResolutionBreached = true;
-          break;
-        case 'BREACHED_BOTH':
-          where.slaResponseBreached = true;
-          where.slaResolutionBreached = true;
-          break;
-        case 'NO_SLA':
-          where.responseDeadline = null;
-          where.resolutionDeadline = null;
-          break;
-      }
+    //
+    // Cada desenlace se arma como una cláusula AUTOCONTENIDA y se combinan con OR
+    // dentro de un `AND`. Dos motivos:
+    //  1. El panel deja marcar varios desenlaces a la vez (antes: 400).
+    //  2. `COMPLIED` escribía en `where.OR`, que es el MISMO array que usa el
+    //     buscador. Con búsqueda + COMPLIED las cláusulas se mezclaban en un solo
+    //     OR: "titulo coincide O id coincide O tiene deadline" → el buscador
+    //     quedaba anulado y aparecían tickets que no coincidían con el texto.
+    //     Metiéndolo en `AND` los dos filtros vuelven a ser independientes.
+    if (query.slaOutcome?.length) {
+      const clauseFor = (outcome: SlaOutcome): Prisma.TicketWhereInput => {
+        switch (outcome) {
+          case 'COMPLIED':
+            // Sin breaches Y al menos una deadline definida Y status RESOLVED.
+            return {
+              slaResponseBreached: false,
+              slaResolutionBreached: false,
+              status: 'RESOLVED',
+              OR: [{ responseDeadline: { not: null } }, { resolutionDeadline: { not: null } }],
+            };
+          case 'BREACHED_RESPONSE':
+            return { slaResponseBreached: true, slaResolutionBreached: false };
+          case 'BREACHED_RESOLUTION':
+            return { slaResponseBreached: false, slaResolutionBreached: true };
+          case 'BREACHED_BOTH':
+            return { slaResponseBreached: true, slaResolutionBreached: true };
+          case 'NO_SLA':
+            return { responseDeadline: null, resolutionDeadline: null };
+          default:
+            return {};
+        }
+      };
+      const clauses = query.slaOutcome.map(clauseFor);
+      where.AND = [
+        ...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []),
+        clauses.length === 1 ? clauses[0] : { OR: clauses },
+      ];
     }
 
     // Overshoot (feature #12): filtro nativo sobre la columna generada
@@ -539,7 +616,7 @@ export class TicketService {
             },
           },
           channel: { select: { id: true, name: true, _count: { select: { messages: true } } } },
-          categoryConfig: { select: { id: true, name: true, criticality: true } },
+          ...TICKET_CLASSIFICATION_INCLUDE,
           createdByUser: { select: { id: true, name: true } },
         },
         orderBy: this.buildOrderBy(query.sortBy, query.sortOrder),
@@ -576,7 +653,7 @@ export class TicketService {
           },
         },
         channel: { select: { id: true, name: true, _count: { select: { messages: true } } } },
-        categoryConfig: { select: { id: true, name: true, criticality: true } },
+        ...TICKET_CLASSIFICATION_INCLUDE,
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -603,7 +680,7 @@ export class TicketService {
         channel: {
           select: { id: true, name: true, _count: { select: { messages: true } } },
         },
-        categoryConfig: { select: { id: true, name: true, criticality: true } },
+        ...TICKET_CLASSIFICATION_INCLUDE,
         createdByUser: { select: { id: true, name: true } },
         closedByUser: { select: { id: true, name: true } },
       },
@@ -1158,6 +1235,10 @@ export class TicketService {
     let criticality: string | null = null;
     let responseDeadline: Date | null = null;
     let resolutionDeadline: Date | null = null;
+    // SLA v2 (feature #42 — Fase 1): SOLO se llenan con `SLA_CASCADE_ENABLED=true`.
+    let slaPolicyId: string | null = null;
+    let slaSource: SlaSource | null = null;
+    let ticketTypeId: string | null = null;
 
     if (dto.categoryConfigId) {
       categoryConfig = await this.prisma.ticketCategoryConfig.findFirst({
@@ -1167,9 +1248,44 @@ export class TicketService {
 
     if (categoryConfig) {
       criticality = categoryConfig.criticality;
-      const slaConfig = await this.prisma.slaConfig.findUnique({
-        where: { organizationId_criticality: { organizationId: orgId, criticality: categoryConfig.criticality } },
+    }
+
+    if (this.config.slaCascadeEnabled) {
+      // ── PATH NUEVO: cascada contrato → proyecto → cliente → criticidad → "Estándar".
+      // El motor de cálculo (horas hábiles + feriados) es el MISMO; cambia solo de
+      // dónde salen los tiempos. Los deadlines se congelan igual que hoy.
+      if (dto.ticketTypeId) {
+        // Scoping multi-tenant: un tipo de otra org no se persiste ni se resuelve.
+        const type = await this.prisma.ticketType.findFirst({
+          where: { id: dto.ticketTypeId, organizationId: orgId, isActive: true },
+          select: { id: true },
+        });
+        if (!type) {
+          throw new AppException('Tipo de solicitud no encontrado', 'TICKET_TYPE_NOT_FOUND', 404);
+        }
+        ticketTypeId = type.id;
+      }
+
+      const resolved = await this.slaResolver.resolveAndCalculateDeadlines({
+        organizationId: orgId,
+        clientId: dto.clientId,
+        projectId: dto.projectId,
+        ticketTypeId,
+        // `categoryConfig` es `any` (path viejo); el valor ya es un TicketCriticality
+        // válido porque viene de la columna del enum. Cast puntual documentado.
+        criticality: criticality as TicketCriticality | null,
       });
+
+      slaPolicyId = resolved.policy?.id ?? null;
+      slaSource = resolved.source;
+      responseDeadline = resolved.responseDeadline;
+      resolutionDeadline = resolved.resolutionDeadline;
+    } else if (categoryConfig) {
+      // ── PATH ACTUAL (default): SlaConfig por criticidad. NO se toca una línea.
+      const slaConfig = await this.slaResolver.findLegacySlaConfig(
+        orgId,
+        categoryConfig.criticality,
+      );
 
       if (slaConfig) {
         const [businessHours, holidayRows] = await Promise.all([
@@ -1187,6 +1303,16 @@ export class TicketService {
         resolutionDeadline = calculateBusinessDeadline(now, slaConfig.resolutionTimeMinutes, bhConfig, holidays);
       }
     }
+
+    // Campos SLA v2 del ticket. Con el flag OFF el objeto queda VACÍO → el create es
+    // byte-por-byte el de hoy (ni siquiera se envían las columnas nuevas).
+    const slaCascadeData = this.config.slaCascadeEnabled
+      ? {
+          ...(slaPolicyId && { slaPolicyId }),
+          ...(slaSource && { slaSource }),
+          ...(ticketTypeId && { ticketTypeId }),
+        }
+      : {};
 
     const categoryLabel = dto.category === 'SUPPORT_REQUEST' ? 'Soporte' : 'Desarrollo';
     const channelName = `[${categoryLabel}] ${dto.title}`;
@@ -1286,13 +1412,19 @@ export class TicketService {
           ...(responseDeadline && { responseDeadline }),
           ...(resolutionDeadline && { resolutionDeadline }),
           ...(dto.relatedTicketId && { relatedTicketId: dto.relatedTicketId }),
+          // #42 Fase 2.1: el alta por ADMIN no escribe `reportedTicketTypeId` ni
+          // `reportedCriticality` — quedan en null a propósito. Esas columnas son
+          // la declaración del CLIENTE (solo el portal la produce); llenarlas acá
+          // con lo que cargó el equipo las volvería inútiles para distinguir
+          // "lo que reportó el cliente" de "lo que determinó el equipo".
+          ...slaCascadeData,
         },
         include: {
           project: { select: { id: true, name: true } },
           client: { select: { id: true, name: true } },
           task: { select: { id: true, title: true, status: true } },
           channel: { select: { id: true, name: true } },
-          categoryConfig: { select: { id: true, name: true, criticality: true } },
+          ...TICKET_CLASSIFICATION_INCLUDE,
         },
       });
 
@@ -1341,6 +1473,177 @@ export class TicketService {
     });
 
     return ticket;
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // Tipificación interna (feature #42 — Fase 2)
+  // ────────────────────────────────────────────────────────────
+
+  /**
+   * Reclasifica un ticket: tipo de solicitud, criticidad y/o categoría interna.
+   *
+   * El cliente reporta con SU vocabulario; el equipo tipifica con el propio. Todo
+   * ocurre en UNA `$transaction`: el cambio, el `TicketEvent` de tipo `RECLASSIFIED`
+   * (con from/to legibles y el motivo en `metadata`) y el evento de dominio.
+   *
+   * ⚠️ POR DISEÑO **NO se tocan** `responseDeadline`, `resolutionDeadline`,
+   * `slaPolicyId` ni `slaSource`: los deadlines quedan **CONGELADOS** con lo que se
+   * resolvió al crear el ticket (misma regla que OSD). Recalcularlos permitiría
+   * "arreglar" un SLA vencido reclasificando, y rompería el histórico de
+   * cumplimiento. Si algún día se decide recalcular, es una decisión de negocio
+   * nueva — no un detalle de implementación de esta función.
+   *
+   * @param orgId scoping multi-tenant: el ticket y los valores nuevos deben ser de
+   *   esta organización.
+   */
+  async reclassify(orgId: string, ticketId: string, dto: ReclassifyTicketDto, userId: string) {
+    // Defensa además del DTO: el motivo con solo espacios no es un motivo.
+    const reason = dto.reason?.trim();
+    if (!reason) {
+      throw new AppException(
+        'El motivo de la reclasificación es obligatorio',
+        'RECLASSIFY_REASON_REQUIRED',
+        400,
+      );
+    }
+
+    const ticket = await this.prisma.ticket.findFirst({
+      where: { id: ticketId, organizationId: orgId },
+      select: {
+        id: true,
+        ticketTypeId: true,
+        criticality: true,
+        categoryConfigId: true,
+        ticketType: { select: { name: true } },
+        categoryConfig: { select: { name: true } },
+      },
+    });
+    if (!ticket) {
+      throw new AppException('Ticket no encontrado', 'TICKET_NOT_FOUND', 404);
+    }
+
+    // Los valores nuevos tienen que existir, estar activos y ser de la MISMA org.
+    let newType: { id: string; name: string } | null = null;
+    if (dto.ticketTypeId) {
+      newType = await this.prisma.ticketType.findFirst({
+        where: { id: dto.ticketTypeId, organizationId: orgId, isActive: true },
+        select: { id: true, name: true },
+      });
+      if (!newType) {
+        throw new AppException('Tipo de solicitud no encontrado', 'TICKET_TYPE_NOT_FOUND', 404);
+      }
+    }
+
+    let newCategory: { id: string; name: string } | null = null;
+    if (dto.categoryConfigId) {
+      newCategory = await this.prisma.ticketCategoryConfig.findFirst({
+        where: { id: dto.categoryConfigId, organizationId: orgId, isActive: true },
+        select: { id: true, name: true },
+      });
+      if (!newCategory) {
+        throw new AppException('Categoría de ticket no encontrada', 'TICKET_CATEGORY_NOT_FOUND', 404);
+      }
+    }
+
+    // Cast puntual documentado: el DTO espeja el enum de Prisma (mismos valores),
+    // pero TS no considera asignable un string-enum a la unión que genera Prisma.
+    const newCriticality = (dto.criticality as TicketCriticality | undefined) ?? null;
+
+    const changes: ClassificationChange[] = [];
+    if (newType && newType.id !== ticket.ticketTypeId) {
+      changes.push({
+        field: 'ticketTypeId',
+        label: 'Tipo',
+        from: ticket.ticketType?.name ?? null,
+        to: newType.name,
+      });
+    }
+    if (newCriticality && newCriticality !== ticket.criticality) {
+      const labels = await this.getCriticalityLabels(orgId);
+      changes.push({
+        field: 'criticality',
+        label: 'Criticidad',
+        from: ticket.criticality ? labels.get(ticket.criticality) ?? ticket.criticality : null,
+        to: labels.get(newCriticality) ?? newCriticality,
+      });
+    }
+    if (newCategory && newCategory.id !== ticket.categoryConfigId) {
+      changes.push({
+        field: 'categoryConfigId',
+        label: 'Categoría',
+        from: ticket.categoryConfig?.name ?? null,
+        to: newCategory.name,
+      });
+    }
+
+    if (changes.length === 0) {
+      // Se mandaron los mismos valores que ya tenía: no se escribe evento para no
+      // ensuciar el timeline con ruido, y el ticket se devuelve tal cual está.
+      return this.getTicketClassification(ticketId);
+    }
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.ticket.update({
+        where: { id: ticketId },
+        data: {
+          ...(newType && { ticketTypeId: newType.id }),
+          ...(newCriticality && { criticality: newCriticality }),
+          ...(newCategory && { categoryConfigId: newCategory.id }),
+          // ⚠️ Deliberadamente ausentes: responseDeadline / resolutionDeadline /
+          // slaPolicyId / slaSource. Ver el comentario del método.
+          // ⚠️ Y TAMPOCO reportedTicketTypeId / reportedCriticality (#42 Fase 2.1):
+          // son la declaración del cliente, se escriben UNA vez al crear desde el
+          // portal. Reclasificar es justamente el caso en que el equipo dice algo
+          // DISTINTO de lo que reportó el cliente; pisarlas borraría la única
+          // evidencia directa de esa diferencia.
+        },
+        select: TICKET_CLASSIFICATION_SELECT,
+      });
+
+      await this.events.writeEventTx(tx, {
+        ticketId,
+        type: 'RECLASSIFIED',
+        fromValue: changes.map((c) => `${c.label}: ${c.from ?? '—'}`).join(' · '),
+        toValue: changes.map((c) => `${c.label}: ${c.to}`).join(' · '),
+        source: 'TICKET',
+        userId,
+        metadata: { reason, changes },
+      });
+
+      // Evento de dominio dentro de la transacción (checklist del blueprint).
+      this.eventEmitter.emit('ticket.reclassified', {
+        ...domainEvent('ticket.reclassified', 'ticket', ticketId, orgId, userId),
+        ticketId,
+        organizationId: orgId,
+        changes,
+        reason,
+        userId,
+      });
+
+      return result;
+    });
+
+    this.logger.log(
+      `Ticket ${ticketId} reclasificado por ${userId} org=${orgId}: ` +
+        `${changes.map((c) => c.field).join(', ')}`,
+    );
+    return updated;
+  }
+
+  /** `criticality` → `displayName` configurado por la org (vacío = no configurado). */
+  private async getCriticalityLabels(orgId: string): Promise<Map<TicketCriticality, string>> {
+    const configs = await this.prisma.ticketCriticalityConfig.findMany({
+      where: { organizationId: orgId },
+      select: { criticality: true, displayName: true },
+    });
+    return new Map(configs.map((c) => [c.criticality, c.displayName]));
+  }
+
+  private getTicketClassification(ticketId: string) {
+    return this.prisma.ticket.findUnique({
+      where: { id: ticketId },
+      select: TICKET_CLASSIFICATION_SELECT,
+    });
   }
 
   // ────────────────────────────────────────────────────────────
