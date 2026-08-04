@@ -137,7 +137,12 @@ export class SlaSeedService {
         continue;
       }
       existingSlugs.add(slug);
-      typesToCreate.push({ organizationId: orgId, name, slug });
+      // #42 Fase 3 (árbol): el seed siembra RAÍCES, y el `path` de una raíz es su
+      // propio slug (`level` 0 y `parentId` null son los defaults del schema). Sin
+      // esto quedarían con `path: ""` y romperían el orden del árbol y el prefijo
+      // que usa el recálculo de rama en `TicketTypeService`. El dev arma la
+      // jerarquía después, desde la UI.
+      typesToCreate.push({ organizationId: orgId, name, slug, path: slug });
     }
 
     // ── Config de criticidades (Fase 2) ──────────────────────────────────────

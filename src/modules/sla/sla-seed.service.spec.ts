@@ -108,10 +108,17 @@ describe('SlaSeedService', () => {
         },
       ]);
 
+      // #42 Fase 3: los tipos sembrados son RAÍCES → `path` = su propio slug
+      // (`level` 0 / `parentId` null son defaults del schema).
       const typeData = tx.ticketType.createMany.mock.calls[0][0].data;
       expect(typeData).toEqual([
-        { organizationId: ORG, name: 'Incidencia Crítica', slug: 'incidencia-critica' },
-        { organizationId: ORG, name: 'Consulta', slug: 'consulta' },
+        {
+          organizationId: ORG,
+          name: 'Incidencia Crítica',
+          slug: 'incidencia-critica',
+          path: 'incidencia-critica',
+        },
+        { organizationId: ORG, name: 'Consulta', slug: 'consulta', path: 'consulta' },
       ]);
     });
 

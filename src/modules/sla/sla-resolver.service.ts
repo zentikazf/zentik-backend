@@ -49,6 +49,12 @@ export class SlaResolverService {
     const { organizationId, clientId, projectId, ticketTypeId, criticality } = input;
 
     // ── Paso 1: contrato (proyecto + tipo) ──────────────────────────────────
+    // ⚠️ MATCH EXACTO por tipo. Desde la Fase 3 los tipos son un ÁRBOL
+    // (`parentId`/`path`/`level`) y este paso NO trepa por los ancestros: un
+    // contrato sobre el PADRE no cubre a los hijos. Es deliberado y espeja a OSD —
+    // con herencia, crear un hijo cambiaría en silencio el SLA resuelto de tickets
+    // que ya estaban cubiertos por otro paso de la cascada. Si el tipo hijo no tiene
+    // contrato propio, el ticket cae al paso 2 (SLA del proyecto), como siempre.
     if (projectId && ticketTypeId) {
       const contract = await this.prisma.projectTicketTypeSla.findFirst({
         where: {

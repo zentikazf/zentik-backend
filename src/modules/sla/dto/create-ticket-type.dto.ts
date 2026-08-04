@@ -19,4 +19,15 @@ export class CreateTicketTypeDto {
     message: 'El slug solo admite minúsculas, números y guiones',
   })
   slug?: string;
+
+  // #42 Fase 3 (árbol). `path` y `level` NO están acá a propósito: son DERIVADOS y
+  // los calcula el service. Además el ValidationPipe global corre con
+  // `forbidNonWhitelisted: true`, así que mandarlos es un 400, no un silencio.
+  @ApiPropertyOptional({
+    description: 'Id del tipo padre. Ausente o null = tipo raíz. Máximo 3 niveles.',
+    nullable: true,
+  })
+  @IsOptional()
+  @IsString()
+  parentId?: string | null;
 }

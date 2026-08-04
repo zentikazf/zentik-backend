@@ -31,6 +31,13 @@ export interface AvailableTicketTypes {
  * sin la matriz cargada NO puede dejar al cliente sin poder abrir un ticket; se
  * ofrecen todos los tipos activos y se marca `fallback: true` para que la UI (y la
  * pestaña de cobertura) muestren que falta configurar.
+ *
+ * ⚠️ Fase 3 (tipos en ÁRBOL): la disponibilidad también es de **match EXACTO**. Un
+ * contrato sobre el tipo PADRE no habilita a sus hijos, ni contratar un hijo
+ * arrastra al padre. Es la misma decisión deliberada que el paso 1 de
+ * `SlaResolverService` (paridad con OSD): lo ofrecido es exactamente lo contratado,
+ * sin herencia por la jerarquía. La UI muestra el path del padre solo como contexto
+ * (`Incidencia › Error del sistema`), nunca como cobertura.
  */
 @Injectable()
 export class TicketTypeAvailabilityService {

@@ -112,10 +112,20 @@ export class SlaConfigController {
   // de método pise al de la clase. Escritura de tipos sigue siendo Owner/PM.
   @Get('ticket-types')
   @Roles('Owner', 'Project Manager', 'Developer')
-  @ApiOperation({ summary: 'Listar tipos de solicitud' })
+  @ApiOperation({ summary: 'Listar tipos de solicitud (plano, ordenado por path del árbol)' })
   @ApiQuery({ name: 'includeInactive', required: false, type: Boolean })
   listTypes(@Param('orgId') orgId: string, @Query('includeInactive') includeInactive?: string) {
     return this.types.list(orgId, includeInactive === 'true');
+  }
+
+  // #42 Fase 3: la MISMA lectura, anidada. Mismo `@Roles` que `GET ticket-types`
+  // (incluye Developer): es el catálogo que puebla el selector de reclasificación.
+  @Get('ticket-types/tree')
+  @Roles('Owner', 'Project Manager', 'Developer')
+  @ApiOperation({ summary: 'Árbol de tipos de solicitud (jerarquía anidada, `children[]`)' })
+  @ApiQuery({ name: 'includeInactive', required: false, type: Boolean })
+  listTypeTree(@Param('orgId') orgId: string, @Query('includeInactive') includeInactive?: string) {
+    return this.types.getTree(orgId, includeInactive === 'true');
   }
 
   @Post('ticket-types')
@@ -135,7 +145,10 @@ export class SlaConfigController {
   }
 
   @Delete('ticket-types/:typeId')
-  @ApiOperation({ summary: 'Desactivar un tipo de solicitud (baja lógica)' })
+  @ApiOperation({
+    summary: 'Desactivar un tipo de solicitud y TODA su rama (baja lógica en cascada)',
+    description: 'Devuelve `{ deactivated }`: cuántos tipos se apagaron, incluido el propio.',
+  })
   deactivateType(@Param('orgId') orgId: string, @Param('typeId') typeId: string) {
     return this.types.deactivate(orgId, typeId);
   }

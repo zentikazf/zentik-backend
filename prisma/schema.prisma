@@ -1452,16 +1452,34 @@ model TicketType {
   name           String
   slug           String
   isActive       Boolean  @default(true) @map("is_active")
-  createdAt      DateTime @default(now()) @map("created_at")
-  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  // ── #42 Fase 3: ARBOL de tipos (paridad con OSD) ────────────────────────────
+  // `parentId` null = raiz. `path` y `level` son DERIVADOS: los calcula el service
+  // al crear/mover, nunca los manda el cliente. Se persisten (en vez de calcularse
+  // al leer) para poder ordenar el arbol y buscar por rama con un solo query.
+  //
+  // onDelete: Restrict a proposito — borrar un padre que tiene hijos debe fallar
+  // ruidoso, no dejar huerfanos ni borrar en cascada una rama entera sin querer.
+  // La baja normal es logica (`isActive=false`, que desactiva la rama completa).
+  parentId String? @map("parent_id")
+  /// Ruta de slugs desde la raiz: "incidencia/error-del-sistema". Orden y busqueda por rama.
+  path     String  @default("")
+  /// Profundidad: 0 = raiz. Tope de 3 niveles (guardarrail del service, no del schema).
+  level    Int     @default(0)
 
   organization    Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  parent          TicketType?            @relation("TicketTypeTree", fields: [parentId], references: [id], onDelete: Restrict)
+  children        TicketType[]           @relation("TicketTypeTree")
   contracts       ProjectTicketTypeSla[]
   tickets         Ticket[]               @relation("TicketTicketType")
   reportedTickets Ticket[]               @relation("TicketReportedType")
 
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
   @@unique([organizationId, slug])
   @@index([organizationId, isActive])
+  @@index([organizationId, parentId])
   @@map("ticket_types")
 }
 

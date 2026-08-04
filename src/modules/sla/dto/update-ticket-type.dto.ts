@@ -25,4 +25,18 @@ export class UpdateTicketTypeDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  // #42 Fase 3 (árbol). Semántica de tres estados, a propósito:
+  //   · ausente   → el tipo NO se mueve
+  //   · null      → se mueve a raíz
+  //   · "id"      → se mueve bajo ese padre
+  // `path`/`level` NO se aceptan del cliente (derivados; el ValidationPipe global
+  // corre con `forbidNonWhitelisted: true` y los rechaza con 400).
+  @ApiPropertyOptional({
+    description: 'Mover el tipo: id del nuevo padre, o null para moverlo a raíz. Si no se envía, no se mueve.',
+    nullable: true,
+  })
+  @IsOptional()
+  @IsString()
+  parentId?: string | null;
 }
