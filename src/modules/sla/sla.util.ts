@@ -125,6 +125,21 @@ export function calculateBusinessDeadline(
   const endOfDayMinutes = endParsed.hours * 60 + endParsed.minutes;
   const dailyMinutes = getBusinessMinutesInDay(bh);
 
+  // ⚠️ GUARD DE PROGRESO (#42, hallazgo A1 del review). Si el horario habil es
+  // degenerado (start >= end, ej. "17:30"-"08:30"), no hay NINGUN minuto habil por
+  // dia: el `while` de abajo avanzaria el cursor un dia por iteracion sin bajar
+  // `remaining` NUNCA → bucle infinito que bloquea el event loop de Node (single
+  // thread) y tumba TODA la API, no solo este request. Peor: la config queda
+  // persistida, asi que reiniciar el container no lo arregla.
+  //
+  // Es alcanzable: `UpsertBusinessHoursDto` solo valida el formato HH:MM y el
+  // `start < end` vive unicamente en el cliente. Devolver el instante de inicio
+  // (deadline = ahora) es la degradacion honesta: sin horario habil no hay plazo
+  // que calcular, y es preferible un SLA vencido visible a una API caida.
+  if (dailyMinutes <= 0) {
+    return new Date(startTime);
+  }
+
   // Zona del negocio (guard contra timezone vacío/inválido en tzOffsetMinutes).
   const tz = bh.timezone || DEFAULT_TIMEZONE;
 

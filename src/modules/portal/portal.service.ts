@@ -488,8 +488,22 @@ export class PortalService {
       slaSource = resolved.source;
       responseDeadline = resolved.responseDeadline ?? undefined;
       resolutionDeadline = resolved.resolutionDeadline ?? undefined;
-    } else if (categoryConfigId && criticality) {
-      // ── PATH ACTUAL (default): SlaConfig por criticidad. NO se toca una línea.
+    } else if (criticality) {
+      // ── PATH ACTUAL (default): SlaConfig por criticidad.
+      //
+      // ⚠️ NO agregar `categoryConfigId &&` a esta condición (#42, hallazgo C1 del
+      // review). El form nuevo del portal dejo de mandar `category`, y por lo tanto
+      // `categoryConfigId` queda undefined: con el gate viejo, un ticket creado con
+      // el flag APAGADO no entraba ni a la cascada ni aca, y se guardaba SIN
+      // deadlines — en silencio y para siempre (los deadlines se congelan al crear).
+      // Era una regresion del 100% sobre el canal de mayor volumen, y ademas dejaba
+      // el rollback del ADR sin efecto: apagar el flag no restauraba nada.
+      //
+      // `categoryConfigId` nunca fue una dependencia real de este path: la query de
+      // abajo busca por `organizationId_criticality`, no usa la categoria. Era solo
+      // el vehiculo historico por el que llegaba la criticidad. Hoy `criticality`
+      // SIEMPRE queda resuelta (elegida y validada contra clientVisible, o el
+      // default de la organizacion), asi que gatear por ella alcanza y sobra.
       const slaConfig = await this.prisma.slaConfig.findUnique({
         where: { organizationId_criticality: { organizationId: project.organizationId, criticality: criticality as any } },
       });

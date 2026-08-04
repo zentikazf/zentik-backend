@@ -283,6 +283,54 @@ describe('PortalService.createTicket (feature #42 — Fase 2)', () => {
       expect(data).toMatchObject({ ticketTypeId: 'type-1' });
     });
 
+    /**
+     * REGRESIÓN C1 (review #42). El form nuevo del portal manda `ticketTypeId` +
+     * `criticality` y ya NO manda `category`, así que `categoryConfigId` queda
+     * undefined. El path legacy estaba gateado por `categoryConfigId && criticality`
+     * → con el flag APAGADO (el default, y el estado al que lleva el rollback) el
+     * ticket no entraba ni a la cascada ni al path viejo y se guardaba SIN
+     * deadlines, en silencio y de forma permanente (se congelan al crear).
+     *
+     * Este test es el que faltaba: el de arriba solo verificaba que NO se
+     * escribieran los campos nuevos, nunca que SÍ siguieran existiendo los
+     * deadlines. Por eso los 466 tests pasaban con el bug adentro.
+     */
+    it('flag OFF + payload NUEVO (sin `category`): igual calcula los deadlines por SlaConfig', async () => {
+      prisma.slaConfig.findUnique.mockResolvedValue({
+        organizationId: ORG,
+        criticality: TicketCriticality.MEDIUM,
+        responseTimeMinutes: 240,
+        resolutionTimeMinutes: 1440,
+      } as never);
+      // El path legacy lee horario hábil + feriados para el motor de horas hábiles.
+      prisma.businessHoursConfig.findUnique.mockResolvedValue({
+        organizationId: ORG,
+        businessHoursStart: '08:30',
+        businessHoursEnd: '17:30',
+        businessDays: '1,2,3,4,5',
+        timezone: 'America/Asuncion',
+      } as never);
+      prisma.holiday.findMany.mockResolvedValue([] as never);
+
+      await service.createTicket(USER, PROJECT, makeDto({ ticketTypeId: 'type-1' }));
+
+      // Se consultó el SlaConfig por criticidad (el path viejo SÍ corrió)...
+      expect(prisma.slaConfig.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            organizationId_criticality: {
+              organizationId: ORG,
+              criticality: TicketCriticality.MEDIUM,
+            },
+          },
+        }),
+      );
+      // ...y ambos deadlines quedaron persistidos.
+      const data = createdTicketData();
+      expect(data.responseDeadline).toBeInstanceOf(Date);
+      expect(data.resolutionDeadline).toBeInstanceOf(Date);
+    });
+
     it('flag ON: pasa el ticketTypeId al resolver (el paso 1 —contrato— aplica desde el portal)', async () => {
       config.slaCascadeEnabled = true;
       slaResolver.resolveAndCalculateDeadlines.mockResolvedValue({
