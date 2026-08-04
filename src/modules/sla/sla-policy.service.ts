@@ -12,6 +12,7 @@ import { CreateSlaPolicyDto, SlaCriticalityDto, UpdateSlaPolicyDto } from './dto
  * de literales que genera Prisma.
  */
 const CRITICALITY_BY_DTO: Record<SlaCriticalityDto, TicketCriticality> = {
+  [SlaCriticalityDto.CRITICAL]: TicketCriticality.CRITICAL,
   [SlaCriticalityDto.HIGH]: TicketCriticality.HIGH,
   [SlaCriticalityDto.MEDIUM]: TicketCriticality.MEDIUM,
   [SlaCriticalityDto.LOW]: TicketCriticality.LOW,

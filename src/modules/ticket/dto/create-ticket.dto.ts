@@ -1,5 +1,6 @@
 import { IsString, IsEnum, IsOptional, MinLength, MaxLength, Matches, ValidateIf } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { TicketCriticality } from '@prisma/client';
 
 export enum TicketCategoryDto {
   SUPPORT_REQUEST = 'SUPPORT_REQUEST',
@@ -19,10 +20,24 @@ export enum TicketPriorityDto {
  * `clientVisible` en la organización (no alcanza con que el enum la admita).
  */
 export enum TicketCriticalityDto {
+  CRITICAL = 'CRITICAL',
   HIGH = 'HIGH',
   MEDIUM = 'MEDIUM',
   LOW = 'LOW',
 }
+
+/**
+ * Guard de compilacion: este enum es un ESPEJO A MANO de `TicketCriticality` de
+ * Prisma (class-validator necesita un enum propio del DTO). Al ser una lista
+ * independiente, agregar un valor en el schema y olvidarlo aca NO rompe el build
+ * — solo falla en runtime con un 400 al validar, que es como se colo el bug de
+ * `CRITICAL` (#42 Fase 3).
+ *
+ * Esta linea lo convierte en error de COMPILACION: si Prisma tiene un valor que
+ * este enum no cubre, `Exclude<...>` deja de ser `never` y TS rompe aca.
+ */
+type _AssertTicketCriticalityDtoCoversPrisma =
+  Exclude<TicketCriticality, `${TicketCriticalityDto}`> extends never ? true : never;
 
 export class CreateTicketDto {
   @ApiProperty({ example: 'Error al cargar la factura', description: 'Titulo del ticket' })

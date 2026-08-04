@@ -1,3 +1,4 @@
+import { TicketCriticality } from '@prisma/client';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsBoolean,
@@ -17,10 +18,19 @@ import {
  * (Fase 3 convierte la criticidad en catálogo y este enum desaparece).
  */
 export enum SlaCriticalityDto {
+  CRITICAL = 'CRITICAL',
   HIGH = 'HIGH',
   MEDIUM = 'MEDIUM',
   LOW = 'LOW',
 }
+
+/**
+ * Guard de compilacion — ver la nota extensa en `create-ticket.dto.ts`: este enum
+ * espeja a mano `TicketCriticality` de Prisma, y sin esta linea un valor nuevo en
+ * el schema pasaria desapercibido hasta fallar con 400 en runtime.
+ */
+type _AssertSlaCriticalityDtoCoversPrisma =
+  Exclude<TicketCriticality, `${SlaCriticalityDto}`> extends never ? true : never;
 
 /** Tope defensivo de horas (1 año hábil aprox.) — evita deadlines absurdos por typo. */
 export const MAX_SLA_HOURS = 8760;
