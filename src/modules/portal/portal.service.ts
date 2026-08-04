@@ -10,7 +10,7 @@ import { UpdateSuggestionDto } from './dto/update-suggestion.dto';
 import { domainEvent } from '../../common/events/domain-event.helper';
 import { CreateTicketDto } from '../ticket/dto/create-ticket.dto';
 import { AuditService } from '../audit/audit.service';
-import { calculateBusinessDeadline, parseBusinessDays } from '../ticket/sla.util';
+import { calculateBusinessDeadline, parseBusinessDays } from '../sla/sla.util';
 import { generateTicketNumber } from '../ticket/ticket.service';
 import { FileService } from '../file/file.service';
 import { StorageService } from '../../infrastructure/storage/storage.service';

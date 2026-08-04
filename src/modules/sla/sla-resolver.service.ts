@@ -6,7 +6,7 @@ import { domainEvent } from '../../common/events/domain-event.helper';
 // `sla.util` es un util PURO del módulo ticket (no es provider Nest): se importa la
 // FUNCIÓN directamente. Así `SlaModule` NO importa `TicketModule` y no hay ciclo
 // (decisión 2A del blueprint: el util se muda al módulo sla recién en Fase 3).
-import { calculateBusinessDeadline, parseBusinessDays } from '../ticket/sla.util';
+import { calculateBusinessDeadline, parseBusinessDays } from './sla.util';
 import {
   SlaResolution,
   SlaResolutionInput,

@@ -16,9 +16,19 @@ import { TicketTypeService } from './ticket-type.service';
  *
  * ⛔ REGLA DURA (arch-avoid-circular-deps): `SlaModule` NO importa `TicketModule`
  * ni `PortalModule`. La dependencia es unidireccional: ticket/portal importan
- * `SlaModule` y consumen SOLO `SlaResolverService`. El motor de horas hábiles
- * (`ticket/sla.util.ts`) se usa importando la FUNCIÓN pura, no el módulo — por eso
- * no hay ciclo (su mudanza a este módulo es cleanup de Fase 3).
+ * `SlaModule` y consumen SOLO `SlaResolverService`.
+ *
+ * 🧹 Cleanup de Fase 3 (decisión 2C, diferida desde Fase 1): el motor de horas
+ * hábiles `sla.util.ts` YA VIVE ACÁ — se mudó desde `ticket/` y los 6 consumidores
+ * apuntan a `sla/sla.util`. Es un util PURO (funciones sin estado, no un provider),
+ * así que mudarlo no crea ninguna dependencia entre módulos.
+ *
+ * ⚠️ EXCEPCIÓN DELIBERADA: `sla-cron.service.ts` **NO se mudó** y sigue en
+ * `TicketModule`. Depende de `TicketEventsService` para persistir los `TicketEvent`
+ * de breach; traerlo acá obligaría a `SlaModule` a importar algo de `ticket`, y como
+ * `TicketModule` ya importa `SlaModule`, cerraría el ciclo `Sla → Ticket → Sla`.
+ * Mover el cron solo tendría valor cosmético y el costo sería un ciclo real o un
+ * `forwardRef` que lo esconde. Se evaluó explícitamente y se decidió dejarlo.
  *
  * ⚠️ Los guards se registran como PROVIDERS locales en vez de importar `AuthModule`
  * (que es el molde de `AdminMcpModule`): `AuthModule` importa `TicketModule`, y

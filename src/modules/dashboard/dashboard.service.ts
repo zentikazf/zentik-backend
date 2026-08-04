@@ -8,7 +8,7 @@ import {
   classifySlaOutcome,
   SlaOutcome,
   TicketSlaShape,
-} from '../ticket/sla.util';
+} from '../sla/sla.util';
 
 type TicketStatusActive = 'OPEN' | 'IN_PROGRESS' | 'IN_REVIEW' | 'RESOLVED';
 type TicketCategoryActive = 'SUPPORT_REQUEST' | 'NEW_DEVELOPMENT';

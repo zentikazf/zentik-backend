@@ -19,7 +19,7 @@ import { UpsertSlaConfigDto } from './dto/upsert-sla-config.dto';
 import { UpsertBusinessHoursDto } from './dto/upsert-business-hours.dto';
 import { ReclassifyTicketDto } from './dto/reclassify-ticket.dto';
 import { domainEvent } from '../../common/events/domain-event.helper';
-import { calculateBusinessDeadline, parseBusinessDays } from './sla.util';
+import { calculateBusinessDeadline, parseBusinessDays } from '../sla/sla.util';
 import { TicketEventsService } from './ticket-events.service';
 import { AppConfigService } from '../../config/app.config';
 import { OutboxService } from '../sync/outbox.service';

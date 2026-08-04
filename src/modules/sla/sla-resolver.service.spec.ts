@@ -8,13 +8,13 @@ import { STANDARD_POLICY_NAMES } from './types/sla-resolution.types';
 // El motor de horas hábiles (`sla.util`) tiene su propio spec (feature #17) y NO se
 // re-testea acá: se mockea para que este spec verifique lo ÚNICO que aporta el
 // resolver sobre el cálculo — la conversión horas → minutos y qué config le pasa.
-jest.mock('../ticket/sla.util', () => ({
+jest.mock('./sla.util', () => ({
   calculateBusinessDeadline: jest.fn(
     (start: Date, minutes: number) => new Date(start.getTime() + minutes * 60_000),
   ),
   parseBusinessDays: jest.fn(() => [1, 2, 3, 4, 5]),
 }));
-import { calculateBusinessDeadline } from '../ticket/sla.util';
+import { calculateBusinessDeadline } from './sla.util';
 
 /**
  * Tests de SlaResolverService (feature #42 — Fase 1).
