@@ -165,7 +165,7 @@ describe('CriticalityConfigService', () => {
     });
 
     it('rechaza un valor que no existe en el enum', () => {
-      expect(() => parseCriticality('CRITICAL')).toThrow(
+      expect(() => parseCriticality('URGENTISIMA')).toThrow(
         expect.objectContaining({ code: 'CRITICALITY_INVALID', statusCode: 400 }),
       );
     });

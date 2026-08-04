@@ -25,10 +25,21 @@ export const CRITICALITY_DEFAULTS: Record<
   TicketCriticality,
   { displayName: string; level: number; isDefault: boolean }
 > = {
+  // #42 Fase 3: CRITICAL nace `clientVisible: false` (ver `seedClientVisible`) —
+  // la criticidad mas alta NO se ofrece al cliente por defecto; se habilita a mano
+  // si el negocio lo decide. Level 4 = la mas urgente.
+  [TicketCriticality.CRITICAL]: { displayName: 'Crítica', level: 4, isDefault: false },
   [TicketCriticality.HIGH]: { displayName: 'Alta', level: 3, isDefault: false },
   [TicketCriticality.MEDIUM]: { displayName: 'Media', level: 2, isDefault: true },
   [TicketCriticality.LOW]: { displayName: 'Baja', level: 1, isDefault: false },
 };
+
+/**
+ * Criticidades que NO se ofrecen al cliente al crear la fila por defecto.
+ * `CRITICAL` es decision de producto (#42 Fase 3): dejar que el cliente se
+ * autoasigne la maxima urgencia seria un agujero cuando falta el contrato.
+ */
+export const CRITICALITY_HIDDEN_BY_DEFAULT: TicketCriticality[] = [TicketCriticality.CRITICAL];
 
 /**
  * Criticidad que entra si la organización no configuró ninguna como default.

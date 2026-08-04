@@ -3,7 +3,10 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Prisma, TicketCriticality } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
 import { domainEvent } from '../../common/events/domain-event.helper';
-import { CRITICALITY_DEFAULTS } from './criticality-config.service';
+import {
+  CRITICALITY_DEFAULTS,
+  CRITICALITY_HIDDEN_BY_DEFAULT,
+} from './criticality-config.service';
 import { slugifyTicketTypeName } from './ticket-type.service';
 import {
   SlaReadiness,
@@ -20,6 +23,11 @@ import {
  * tiempos, y el guardarraíl del feature flag queda satisfecho con un solo import.
  */
 const POLICY_NAME_BY_CRITICALITY: Record<TicketCriticality, string> = {
+  // #42 Fase 3: CRITICAL no tiene `SlaConfig` legacy que importar (el modelo viejo
+  // solo tenia 3 criticidades), asi que en la practica esta entrada no se usa al
+  // importar. Se declara igual porque el Record exige exhaustividad — y si algun
+  // dia se crea a mano una politica para CRITICAL, este es el nombre canonico.
+  [TicketCriticality.CRITICAL]: 'Crítico 24/7',
   [TicketCriticality.HIGH]: 'Crítico',
   [TicketCriticality.MEDIUM]: STANDARD_POLICY_CANONICAL_NAME,
   [TicketCriticality.LOW]: 'Bajo',
@@ -144,7 +152,14 @@ export class SlaSeedService {
             organizationId: orgId,
             criticality: criticality as TicketCriticality,
             displayName: config.displayName,
-            clientVisible: true,
+            // #42 Fase 3: CRITICAL nace OCULTA al cliente. Es decision de producto:
+            // con la cascada, la criticidad es el paso 4 (fallback), asi que dejar
+            // que el cliente elija la maxima urgencia le permitiria autoasignarse
+            // el mejor SLA cuando falta el contrato. Se habilita a mano si el
+            // negocio lo decide.
+            clientVisible: !CRITICALITY_HIDDEN_BY_DEFAULT.includes(
+              criticality as TicketCriticality,
+            ),
             level: config.level,
             isDefault: config.isDefault,
           }));

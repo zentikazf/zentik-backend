@@ -86,7 +86,7 @@ describe('SlaSeedService', () => {
       expect(result).toEqual({
         policiesCreated: 2,
         typesCreated: 2,
-        criticalityConfigsCreated: 3,
+        criticalityConfigsCreated: 4,
         alreadyExisting: 0,
       });
 
@@ -159,7 +159,7 @@ describe('SlaSeedService', () => {
       expect(first).toEqual({
         policiesCreated: 2,
         typesCreated: 2,
-        criticalityConfigsCreated: 3,
+        criticalityConfigsCreated: 4,
         alreadyExisting: 0,
       });
 
@@ -167,7 +167,15 @@ describe('SlaSeedService', () => {
       stubRun(
         ['Crítico', 'Estándar'],
         ['incidencia-critica', 'consulta'],
-        [TicketCriticality.HIGH, TicketCriticality.MEDIUM, TicketCriticality.LOW],
+        // Las 4 que sembró la primera corrida (#42 Fase 3 sumó CRITICAL): el
+        // fixture tiene que reflejar exactamente lo que quedó en la DB, si no la
+        // "segunda corrida" no estaría probando idempotencia real.
+        [
+          TicketCriticality.CRITICAL,
+          TicketCriticality.HIGH,
+          TicketCriticality.MEDIUM,
+          TicketCriticality.LOW,
+        ],
       );
       const second = await service.importCurrentConfig(ORG, USER);
 
@@ -175,7 +183,7 @@ describe('SlaSeedService', () => {
         policiesCreated: 0,
         typesCreated: 0,
         criticalityConfigsCreated: 0,
-        alreadyExisting: 7, // 2 políticas + 2 tipos + 3 criticidades
+        alreadyExisting: 8, // 2 políticas + 2 tipos + 4 criticidades
       });
       // Una sola transacción con createMany: la de la primera corrida.
       expect(tx.slaPolicy.createMany).toHaveBeenCalledTimes(1);
@@ -183,12 +191,22 @@ describe('SlaSeedService', () => {
       expect(tx.ticketCriticalityConfig.createMany).toHaveBeenCalledTimes(1);
     });
 
-    it('siembra las 3 criticidades (Alta/Media/Baja) con MEDIUM como default y todas visibles', async () => {
+    it('siembra las 4 criticidades con MEDIUM como default y CRITICAL oculta al cliente', async () => {
       stubRun();
 
       await service.importCurrentConfig(ORG, USER);
 
       expect(tx.ticketCriticalityConfig.createMany.mock.calls[0][0].data).toEqual([
+        {
+          organizationId: ORG,
+          criticality: TicketCriticality.CRITICAL,
+          displayName: 'Crítica',
+          // #42 Fase 3: la máxima urgencia NO se ofrece al cliente por defecto —
+          // con la cascada, elegir criticidad es elegir el SLA cuando falta contrato.
+          clientVisible: false,
+          level: 4,
+          isDefault: false,
+        },
         {
           organizationId: ORG,
           criticality: TicketCriticality.HIGH,

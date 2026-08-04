@@ -153,10 +153,19 @@ enum TicketCategory {
   NEW_PROJECT
 }
 
+/// Criticidad del ticket. El ORDEN de urgencia NO lo define este enum: lo define
+/// `TicketCriticalityConfig.level` por organizacion (CRITICAL = 4, HIGH = 3,
+/// MEDIUM = 2, LOW = 1). Aca el orden es historico y no significa nada.
+///
+/// #42 Fase 3: se agrega CRITICAL para paridad con OSD (Baja/Media/Alta/Critica).
+/// Aditivo — `ALTER TYPE ... ADD VALUE` no toca ninguna fila existente. Nota: en
+/// Postgres quitar un valor de un enum exige recrear el tipo, asi que agregar es
+/// una via de una sola direccion (asumido).
 enum TicketCriticality {
   HIGH
   MEDIUM
   LOW
+  CRITICAL
 }
 
 enum TicketStatus {

@@ -390,7 +390,7 @@ describe('PortalService — criticidades y tipos del portal (#42 Fase 2)', () =>
   it('getProjectTicketTypes rechaza una criticidad que no existe en el enum', async () => {
     prisma.project.findFirst.mockResolvedValue({ id: PROJECT, organizationId: ORG } as never);
 
-    await expect(service.getProjectTicketTypes(USER, PROJECT, 'CRITICAL')).rejects.toMatchObject({
+    await expect(service.getProjectTicketTypes(USER, PROJECT, 'URGENTISIMA')).rejects.toMatchObject({
       code: 'CRITICALITY_INVALID',
       statusCode: 400,
     });
