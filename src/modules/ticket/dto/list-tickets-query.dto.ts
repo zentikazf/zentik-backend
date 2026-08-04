@@ -19,12 +19,22 @@ import { Transform, Type } from 'class-transformer';
  * Sin esto, el frontend que serializa category como string simple choca con
  * @IsArray() y devuelve 400 BAD_REQUEST silencioso.
  */
-const toArray = ({ value }: { value: unknown }): unknown =>
-  value === undefined || value === null
-    ? value
-    : Array.isArray(value)
-    ? value
-    : [value];
+const toArray = ({ value }: { value: unknown }): unknown => {
+  if (value === undefined || value === null) return value;
+  if (Array.isArray(value)) return value;
+  // El frontend serializa los facets multi-select como CSV (`?criticality=HIGH,LOW`,
+  // ver buildBackendQuery en use-tickets-filters.ts). Envolver el string entero en un
+  // array dejaba `["HIGH,LOW"]` — un único valor que `@IsEnum(..., { each: true })`
+  // rechaza → 400 en el listado apenas se marcaba una segunda casilla. Con un solo
+  // valor no se notaba, y por eso pasó desapercibido.
+  if (typeof value === 'string') {
+    return value
+      .split(',')
+      .map((part) => part.trim())
+      .filter(Boolean);
+  }
+  return [value];
+};
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { TicketCategory, TicketCriticality } from '@prisma/client';
 import { TicketStatusDto } from './update-ticket.dto';

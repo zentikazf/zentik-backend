@@ -8,6 +8,7 @@ import { SlaResolverService } from '../sla/sla-resolver.service';
 import { TicketService } from './ticket.service';
 import { TicketEventsService } from './ticket-events.service';
 import { TaskHoursGuardService } from './task-hours-guard.service';
+import { plainToInstance } from 'class-transformer';
 import { ListTicketsQueryDto, SlaOutcome } from './dto/list-tickets-query.dto';
 
 /**
@@ -115,5 +116,44 @@ describe('TicketService — where del listado', () => {
     it('array vacío no filtra nada', () => {
       expect(buildWhere({ slaOutcome: [] })).not.toHaveProperty('AND');
     });
+  });
+});
+
+/**
+ * El `@Transform(toArray)` de los facets multi-select.
+ *
+ * El frontend los manda CSV (`?criticality=HIGH,LOW`). La versión original de
+ * `toArray` solo envolvía el string entero (`["HIGH,LOW"]`), que
+ * `@IsEnum(..., { each: true })` rechaza → **400 en el listado** apenas se marcaba
+ * una segunda casilla. Con un solo valor funcionaba, y por eso pasó desapercibido
+ * en los tres facets a la vez (criticidad, categoría y desenlace SLA).
+ */
+describe('ListTicketsQueryDto — facets CSV', () => {
+  function transformOf(field: keyof ListTicketsQueryDto): (v: unknown) => unknown {
+    return (raw: unknown) =>
+      (plainToInstance(ListTicketsQueryDto, { [field]: raw }) as Record<string, unknown>)[field];
+  }
+
+  it.each(['criticality', 'category', 'slaOutcome'] as const)(
+    '%s: un CSV se parte en varios valores (antes: 400)',
+    (field) => {
+      expect(transformOf(field)('HIGH,LOW')).toEqual(['HIGH', 'LOW']);
+    },
+  );
+
+  it('un solo valor sigue llegando como array de uno', () => {
+    expect(transformOf('criticality')('HIGH')).toEqual(['HIGH']);
+  });
+
+  it('tolera espacios alrededor de las comas', () => {
+    expect(transformOf('criticality')('HIGH , LOW')).toEqual(['HIGH', 'LOW']);
+  });
+
+  it('string vacío no produce un valor fantasma que rompa el IsEnum', () => {
+    expect(transformOf('criticality')('')).toEqual([]);
+  });
+
+  it('ausente sigue siendo undefined (no filtra)', () => {
+    expect(transformOf('criticality')(undefined)).toBeUndefined();
   });
 });
