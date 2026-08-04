@@ -296,9 +296,7 @@ describe('PortalService.createTicket (feature #42 — Fase 2)', () => {
      * deadlines. Por eso los 466 tests pasaban con el bug adentro.
      */
     it('flag OFF + payload NUEVO (sin `category`): igual calcula los deadlines por SlaConfig', async () => {
-      prisma.slaConfig.findUnique.mockResolvedValue({
-        organizationId: ORG,
-        criticality: TicketCriticality.MEDIUM,
+      slaResolver.findLegacySlaConfig.mockResolvedValue({
         responseTimeMinutes: 240,
         resolutionTimeMinutes: 1440,
       } as never);
@@ -315,15 +313,9 @@ describe('PortalService.createTicket (feature #42 — Fase 2)', () => {
       await service.createTicket(USER, PROJECT, makeDto({ ticketTypeId: 'type-1' }));
 
       // Se consultó el SlaConfig por criticidad (el path viejo SÍ corrió)...
-      expect(prisma.slaConfig.findUnique).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: {
-            organizationId_criticality: {
-              organizationId: ORG,
-              criticality: TicketCriticality.MEDIUM,
-            },
-          },
-        }),
+      expect(slaResolver.findLegacySlaConfig).toHaveBeenCalledWith(
+        ORG,
+        TicketCriticality.MEDIUM,
       );
       // ...y ambos deadlines quedaron persistidos.
       const data = createdTicketData();

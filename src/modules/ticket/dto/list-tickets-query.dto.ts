@@ -108,6 +108,17 @@ export class ListTicketsQueryDto {
   @IsString()
   clientId?: string;
 
+  /**
+   * El panel "Más filtros" ya tenía selector de proyecto y mandaba `projectId`, pero
+   * el DTO no lo declaraba: con `forbidNonWhitelisted: true` (main.ts) eso NO se
+   * ignoraba, tiraba **400** y volteaba el listado entero. Peor: el filtro se
+   * persiste en cookie 30 días, así que el 400 sobrevivía al refresh.
+   */
+  @ApiPropertyOptional({ description: 'Filtrar por proyecto' })
+  @IsOptional()
+  @IsString()
+  projectId?: string;
+
   @ApiPropertyOptional({ description: 'Buscar por titulo, ID o ticketNumber' })
   @IsOptional()
   @IsString()
@@ -130,10 +141,22 @@ export class ListTicketsQueryDto {
 
   // ─── Facets para vista "Resueltos" (feature #10) ─────────────────────
 
-  @ApiPropertyOptional({ enum: SlaOutcome, description: 'Filtrar por desenlace SLA' })
+  /**
+   * El panel de filtros permite marcar VARIOS desenlaces, y los manda como CSV
+   * (`slaOutcome=COMPLIED,NO_SLA`). Antes esto era un valor único: dos marcados
+   * reventaban el listado con 400 — y el filtro queda guardado en cookie 30 días,
+   * así que el error se volvía pegajoso.
+   */
+  @ApiPropertyOptional({
+    isArray: true,
+    enum: SlaOutcome,
+    description: 'Filtrar por uno o varios desenlaces SLA',
+  })
   @IsOptional()
-  @IsEnum(SlaOutcome, { message: 'slaOutcome no es valido' })
-  slaOutcome?: SlaOutcome;
+  @Transform(toArray)
+  @IsArray()
+  @IsEnum(SlaOutcome, { each: true, message: 'slaOutcome no es valido' })
+  slaOutcome?: SlaOutcome[];
 
   @ApiPropertyOptional({
     isArray: true,

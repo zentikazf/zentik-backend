@@ -1,7 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { SlaSource } from '@prisma/client';
+import { SlaSource, TicketCriticality } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
+import { FALLBACK_CRITICALITY } from './criticality-config.service';
 import { domainEvent } from '../../common/events/domain-event.helper';
 // `sla.util` es un util PURO del módulo ticket (no es provider Nest): se importa la
 // FUNCIÓN directamente. Así `SlaModule` NO importa `TicketModule` y no hay ciclo
@@ -201,6 +202,57 @@ export class SlaResolverService {
    * todavía no existe. El consumidor de la alerta agrupa por proyecto + tipo, que sí
    * viajan en el payload.
    */
+  /**
+   * Busca la `SlaConfig` legacy de una criticidad, con FALLBACK explícito.
+   *
+   * ⚠️ Vive acá, y no duplicada en cada llamador, por el hallazgo C1' del review
+   * post-#42 — la reincidencia de C1 con otra llave.
+   *
+   * El path legacy (el ÚNICO activo mientras `SLA_CASCADE_ENABLED` está apagado)
+   * hacía `findUnique` + `if (slaConfig) { ...calcular... }` **sin `else`**. Si la
+   * org no tiene fila para esa criticidad, el ticket se guardaba sin
+   * `responseDeadline` ni `resolutionDeadline`: silencioso, y PERMANENTE porque los
+   * deadlines se congelan al crear.
+   *
+   * Y hay una criticidad que NUNCA tiene fila: `CRITICAL` nació con el enum en Fase 3
+   * (`ALTER TYPE ... ADD VALUE`, sin backfill), y la única pantalla que administra
+   * `SlaConfig` tiene HIGH/MEDIUM/LOW hardcodeadas — no hay forma por UI de crearla.
+   * Basta que un admin habilite "Crítica" para clientes (un switch que el propio
+   * feature agregó) para que el portal empiece a emitir tickets sin SLA.
+   *
+   * Por eso: si no hay fila exacta se cae a la criticidad de fallback y se LOGUEA.
+   * Si tampoco hay, se devuelve null pero con un log explícito — ese caso sí es
+   * legítimo (organización que todavía no configuró ningún SLA) y es preexistente.
+   */
+  async findLegacySlaConfig(
+    organizationId: string,
+    criticality: TicketCriticality,
+  ): Promise<{ responseTimeMinutes: number; resolutionTimeMinutes: number } | null> {
+    const exact = await this.prisma.slaConfig.findUnique({
+      where: { organizationId_criticality: { organizationId, criticality } },
+    });
+    if (exact) return exact;
+
+    if (criticality !== FALLBACK_CRITICALITY) {
+      const fallback = await this.prisma.slaConfig.findUnique({
+        where: { organizationId_criticality: { organizationId, criticality: FALLBACK_CRITICALITY } },
+      });
+      if (fallback) {
+        this.logger.warn(
+          `SlaConfig legacy ausente para ${criticality} en org ${organizationId}: se usa ${FALLBACK_CRITICALITY}. ` +
+            `Cargar los tiempos de ${criticality} en Configuración → SLA.`,
+        );
+        return fallback;
+      }
+    }
+
+    this.logger.error(
+      `Org ${organizationId} sin ninguna SlaConfig legacy usable (criticidad ${criticality}): ` +
+        `el ticket se creará SIN deadlines.`,
+    );
+    return null;
+  }
+
   private emitFallbackIfNeeded(input: SlaResolutionInput, resolution: SlaResolution): void {
     if (resolution.source !== SlaSource.CRITICALITY && resolution.source !== SlaSource.STANDARD) {
       return;

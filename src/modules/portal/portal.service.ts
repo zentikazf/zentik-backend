@@ -504,9 +504,12 @@ export class PortalService {
       // el vehiculo historico por el que llegaba la criticidad. Hoy `criticality`
       // SIEMPRE queda resuelta (elegida y validada contra clientVisible, o el
       // default de la organizacion), asi que gatear por ella alcanza y sobra.
-      const slaConfig = await this.prisma.slaConfig.findUnique({
-        where: { organizationId_criticality: { organizationId: project.organizationId, criticality: criticality as any } },
-      });
+      // Con fallback + log: sin fila para esta criticidad el ticket quedaba sin
+      // deadlines en silencio (hallazgo C1' del review — ver findLegacySlaConfig).
+      const slaConfig = await this.slaResolver.findLegacySlaConfig(
+        project.organizationId,
+        criticality as TicketCriticality,
+      );
       if (slaConfig) {
         const [bhConfig, holidayRows] = await Promise.all([
           this.prisma.businessHoursConfig.findUnique({ where: { organizationId: project.organizationId } }),

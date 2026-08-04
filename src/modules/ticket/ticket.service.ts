@@ -13,7 +13,7 @@ import { AppException } from '../../common/filters/app-exception';
 import { UpdateTicketDto } from './dto/update-ticket.dto';
 import { CreateAdminTicketDto } from './dto/create-admin-ticket.dto';
 import { CloseTicketDto } from './dto/close-ticket.dto';
-import { ListTicketsQueryDto } from './dto/list-tickets-query.dto';
+import { ListTicketsQueryDto, SlaOutcome } from './dto/list-tickets-query.dto';
 import { CreateCategoryConfigDto, UpdateCategoryConfigDto } from './dto/create-category-config.dto';
 import { UpsertSlaConfigDto } from './dto/upsert-sla-config.dto';
 import { UpsertBusinessHoursDto } from './dto/upsert-business-hours.dto';
@@ -392,6 +392,7 @@ export class TicketService {
       organizationId: orgId,
       ...(query.status && { status: query.status as TicketStatus }),
       ...(query.clientId && { clientId: query.clientId }),
+      ...(query.projectId && { projectId: query.projectId }),
       ...(query.createdByUserId && { createdByUserId: query.createdByUserId }),
       ...(query.categoryConfigId && { categoryConfigId: query.categoryConfigId }),
       ...(query.assigneeId && {
@@ -420,36 +421,43 @@ export class TicketService {
 
     // slaOutcome → cláusulas sobre flags + deadlines.
     // Las reglas se alinean con classifySlaOutcome (sla.util.ts).
-    if (query.slaOutcome) {
-      switch (query.slaOutcome) {
-        case 'COMPLIED':
-          // Sin breaches Y al menos una deadline definida Y status RESOLVED.
-          where.slaResponseBreached = false;
-          where.slaResolutionBreached = false;
-          where.status = 'RESOLVED';
-          where.OR = [
-            ...(Array.isArray(where.OR) ? where.OR : []),
-            { responseDeadline: { not: null } },
-            { resolutionDeadline: { not: null } },
-          ];
-          break;
-        case 'BREACHED_RESPONSE':
-          where.slaResponseBreached = true;
-          where.slaResolutionBreached = false;
-          break;
-        case 'BREACHED_RESOLUTION':
-          where.slaResponseBreached = false;
-          where.slaResolutionBreached = true;
-          break;
-        case 'BREACHED_BOTH':
-          where.slaResponseBreached = true;
-          where.slaResolutionBreached = true;
-          break;
-        case 'NO_SLA':
-          where.responseDeadline = null;
-          where.resolutionDeadline = null;
-          break;
-      }
+    //
+    // Cada desenlace se arma como una cláusula AUTOCONTENIDA y se combinan con OR
+    // dentro de un `AND`. Dos motivos:
+    //  1. El panel deja marcar varios desenlaces a la vez (antes: 400).
+    //  2. `COMPLIED` escribía en `where.OR`, que es el MISMO array que usa el
+    //     buscador. Con búsqueda + COMPLIED las cláusulas se mezclaban en un solo
+    //     OR: "titulo coincide O id coincide O tiene deadline" → el buscador
+    //     quedaba anulado y aparecían tickets que no coincidían con el texto.
+    //     Metiéndolo en `AND` los dos filtros vuelven a ser independientes.
+    if (query.slaOutcome?.length) {
+      const clauseFor = (outcome: SlaOutcome): Prisma.TicketWhereInput => {
+        switch (outcome) {
+          case 'COMPLIED':
+            // Sin breaches Y al menos una deadline definida Y status RESOLVED.
+            return {
+              slaResponseBreached: false,
+              slaResolutionBreached: false,
+              status: 'RESOLVED',
+              OR: [{ responseDeadline: { not: null } }, { resolutionDeadline: { not: null } }],
+            };
+          case 'BREACHED_RESPONSE':
+            return { slaResponseBreached: true, slaResolutionBreached: false };
+          case 'BREACHED_RESOLUTION':
+            return { slaResponseBreached: false, slaResolutionBreached: true };
+          case 'BREACHED_BOTH':
+            return { slaResponseBreached: true, slaResolutionBreached: true };
+          case 'NO_SLA':
+            return { responseDeadline: null, resolutionDeadline: null };
+          default:
+            return {};
+        }
+      };
+      const clauses = query.slaOutcome.map(clauseFor);
+      where.AND = [
+        ...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []),
+        clauses.length === 1 ? clauses[0] : { OR: clauses },
+      ];
     }
 
     // Overshoot (feature #12): filtro nativo sobre la columna generada
@@ -1274,9 +1282,10 @@ export class TicketService {
       resolutionDeadline = resolved.resolutionDeadline;
     } else if (categoryConfig) {
       // ── PATH ACTUAL (default): SlaConfig por criticidad. NO se toca una línea.
-      const slaConfig = await this.prisma.slaConfig.findUnique({
-        where: { organizationId_criticality: { organizationId: orgId, criticality: categoryConfig.criticality } },
-      });
+      const slaConfig = await this.slaResolver.findLegacySlaConfig(
+        orgId,
+        categoryConfig.criticality,
+      );
 
       if (slaConfig) {
         const [businessHours, holidayRows] = await Promise.all([

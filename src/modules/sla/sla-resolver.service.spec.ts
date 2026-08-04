@@ -329,3 +329,73 @@ describe('SlaResolverService', () => {
     });
   });
 });
+
+/**
+ * `findLegacySlaConfig` — el path que corre mientras `SLA_CASCADE_ENABLED` está
+ * APAGADO, es decir el estado con el que la feature #42 se mergea a producción.
+ *
+ * Existe por el hallazgo C1' del review post-#42: la reincidencia de C1 con otra
+ * llave. Los llamadores hacían `findUnique` + `if (row) { calcular }` **sin `else`**;
+ * si la organización no tenía fila para esa criticidad el ticket se guardaba sin
+ * deadlines, en silencio y para siempre. Y `CRITICAL` nunca tiene fila: nació con
+ * el enum en Fase 3 sin backfill, y la única pantalla que administra `SlaConfig`
+ * tiene HIGH/MEDIUM/LOW hardcodeadas.
+ */
+describe('SlaResolverService.findLegacySlaConfig', () => {
+  let service: SlaResolverService;
+  let prisma: DeepMockProxy<PrismaService>;
+
+  const ORG = 'org-1';
+  const ROW = { responseTimeMinutes: 240, resolutionTimeMinutes: 1440 };
+
+  beforeEach(() => {
+    prisma = mockDeep<PrismaService>();
+    service = new SlaResolverService(prisma, mockDeep<EventEmitter2>());
+    jest.spyOn(service['logger'], 'warn').mockImplementation(() => undefined);
+    jest.spyOn(service['logger'], 'error').mockImplementation(() => undefined);
+  });
+
+  it('devuelve la fila exacta cuando existe (comportamiento de siempre)', async () => {
+    prisma.slaConfig.findUnique.mockResolvedValue(ROW as never);
+
+    const res = await service.findLegacySlaConfig(ORG, TicketCriticality.HIGH);
+
+    expect(res).toEqual(ROW);
+    expect(prisma.slaConfig.findUnique).toHaveBeenCalledTimes(1);
+    expect(prisma.slaConfig.findUnique).toHaveBeenCalledWith({
+      where: { organizationId_criticality: { organizationId: ORG, criticality: TicketCriticality.HIGH } },
+    });
+  });
+
+  it('CRITICAL sin fila: cae a MEDIUM y avisa, en vez de dejar el ticket sin deadlines', async () => {
+    prisma.slaConfig.findUnique
+      .mockResolvedValueOnce(null as never) // CRITICAL: no existe (nunca se creó)
+      .mockResolvedValueOnce(ROW as never); // MEDIUM: la de fallback
+
+    const res = await service.findLegacySlaConfig(ORG, TicketCriticality.CRITICAL);
+
+    expect(res).toEqual(ROW);
+    expect(prisma.slaConfig.findUnique).toHaveBeenNthCalledWith(2, {
+      where: { organizationId_criticality: { organizationId: ORG, criticality: TicketCriticality.MEDIUM } },
+    });
+    // El aviso NO es opcional: sin él la degradación sería invisible.
+    expect(service['logger'].warn).toHaveBeenCalled();
+  });
+
+  it('org sin NINGUNA SlaConfig: devuelve null pero lo loguea como error (no en silencio)', async () => {
+    prisma.slaConfig.findUnique.mockResolvedValue(null as never);
+
+    const res = await service.findLegacySlaConfig(ORG, TicketCriticality.CRITICAL);
+
+    expect(res).toBeNull();
+    expect(service['logger'].error).toHaveBeenCalled();
+  });
+
+  it('MEDIUM sin fila: no se consulta dos veces a sí misma', async () => {
+    prisma.slaConfig.findUnique.mockResolvedValue(null as never);
+
+    await service.findLegacySlaConfig(ORG, TicketCriticality.MEDIUM);
+
+    expect(prisma.slaConfig.findUnique).toHaveBeenCalledTimes(1);
+  });
+});

@@ -138,7 +138,11 @@ export class CriticalityConfigService {
           criticality,
           displayName: dto.displayName?.trim() || defaults.displayName,
           clientLabel: dto.clientLabel ?? null,
-          clientVisible: dto.clientVisible ?? true,
+          // El default de "oculta al cliente" (CRITICAL) también rige acá, no solo en
+          // el seed: si no, cualquier upsert que no mande `clientVisible` — p.ej. el
+          // botón "Marcar por defecto", que solo manda `isDefault` — creaba la fila
+          // de Crítica VISIBLE, exponiéndola en el portal sin que nadie lo decidiera.
+          clientVisible: dto.clientVisible ?? !CRITICALITY_HIDDEN_BY_DEFAULT.includes(criticality),
           level: dto.level ?? defaults.level,
           isDefault: dto.isDefault ?? false,
         },
