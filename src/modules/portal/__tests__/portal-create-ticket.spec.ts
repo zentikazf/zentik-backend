@@ -437,9 +437,14 @@ describe('PortalService — criticidades y tipos del portal (#42 Fase 2)', () =>
   });
 
   describe('getTicketDetail — qué ve el cliente (#42 Fase 2.1)', () => {
-    /** `include` con el que el portal pide el detalle. */
-    function detailInclude(): Record<string, unknown> {
-      return prisma.ticket.findFirst.mock.calls[0][0]!.include as Record<string, unknown>;
+    /**
+     * `select` con el que el portal pide el detalle. Antes era `include` — y ese fue
+     * exactamente el bug (fix 2026-08-05): `include` sin `select` de nivel superior
+     * devuelve TODOS los escalares del ticket, `adminNotes` (notas internas del
+     * staff) incluido, y el portal lo renderizaba como "Respuesta del equipo".
+     */
+    function detailSelect(): Record<string, unknown> {
+      return prisma.ticket.findFirst.mock.calls[0][0]!.select as Record<string, unknown>;
     }
 
     beforeEach(() => {
@@ -458,7 +463,7 @@ describe('PortalService — criticidades y tipos del portal (#42 Fase 2)', () =>
         reportedTicketType: { id: 'type-consulta', name: 'Consulta' },
         reportedCriticality: TicketCriticality.HIGH,
       });
-      expect(detailInclude()).toMatchObject({
+      expect(detailSelect()).toMatchObject({
         ticketType: { select: { id: true, name: true } },
         reportedTicketType: { select: { id: true, name: true } },
       });
@@ -467,9 +472,31 @@ describe('PortalService — criticidades y tipos del portal (#42 Fase 2)', () =>
     it('NO expone la categoría interna ni la política de SLA al cliente', async () => {
       await service.getTicketDetail(USER, 'ticket-1');
 
-      const include = detailInclude();
-      expect(include).not.toHaveProperty('categoryConfig');
-      expect(include).not.toHaveProperty('slaPolicy');
+      const select = detailSelect();
+      expect(select).not.toHaveProperty('categoryConfig');
+      expect(select).not.toHaveProperty('slaPolicy');
+    });
+
+    /**
+     * REGRESIÓN de la fuga de notas internas (fix 2026-08-05). El staff escribe
+     * `adminNotes` bajo la promesa "no son visibles para el cliente"; el portal las
+     * mostraba destacadas como "Respuesta del equipo". Si alguien vuelve a `include`
+     * (que no admite recortar escalares) o agrega el campo al `select`, este test
+     * revienta. Cubre el detalle Y el listado.
+     */
+    it('NO expone adminNotes (notas internas del staff) ni en el detalle ni en el listado', async () => {
+      await service.getTicketDetail(USER, 'ticket-1');
+
+      const detail = prisma.ticket.findFirst.mock.calls[0][0]!;
+      expect(detail.include).toBeUndefined(); // include = todos los escalares → prohibido acá
+      expect(detail.select).not.toHaveProperty('adminNotes');
+
+      prisma.ticket.findMany.mockResolvedValue([] as never);
+      await service.getTickets(USER);
+
+      const list = prisma.ticket.findMany.mock.calls[0][0]!;
+      expect(list.include).toBeUndefined();
+      expect(list.select).not.toHaveProperty('adminNotes');
     });
 
     it('sigue scopeado al cliente logueado (un ticket ajeno es 404)', async () => {
