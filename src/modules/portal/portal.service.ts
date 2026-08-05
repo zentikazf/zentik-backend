@@ -340,9 +340,21 @@ export class PortalService {
       ...(filters?.createdByUserId && { createdByUserId: filters.createdByUserId }),
     };
 
+    // ⚠️ `select` explícito, igual que getTicketDetail: el `include` devolvía todos
+    // los escalares — `adminNotes` (notas internas del staff) incluido — para CADA
+    // ticket del listado. Este endpoint responde al cliente.
     const data = await this.prisma.ticket.findMany({
       where,
-      include: {
+      select: {
+        id: true,
+        ticketNumber: true,
+        title: true,
+        description: true,
+        category: true,
+        status: true,
+        priority: true,
+        criticality: true,
+        createdAt: true,
         project: { select: { id: true, name: true } },
         task: { select: { id: true, status: true } },
         createdByUser: { select: { id: true, name: true } },
@@ -375,9 +387,26 @@ export class PortalService {
   async getTicketDetail(userId: string, ticketId: string) {
     const client = await this.getClientByUserId(userId);
 
+    // ⚠️ `select` EXPLÍCITO, nunca `include` a secas. El `include` sin `select` en el
+    // nivel superior devolvía TODOS los escalares del ticket — `adminNotes` incluido,
+    // que el portal renderizaba como "Respuesta del equipo" mientras la UI del staff
+    // prometía "no son visibles para el cliente". Este endpoint responde al CLIENTE:
+    // cada campo que se agrega acá tiene que poder leerlo el cliente.
     const ticket = await this.prisma.ticket.findFirst({
       where: { id: ticketId, clientId: client.id },
-      include: {
+      select: {
+        id: true,
+        ticketNumber: true,
+        title: true,
+        description: true,
+        category: true,
+        status: true,
+        priority: true,
+        criticality: true,
+        ticketTypeId: true,
+        responseDeadline: true,
+        resolutionDeadline: true,
+        createdAt: true,
         project: { select: { id: true, name: true } },
         task: { select: { id: true, title: true, status: true } },
         channel: { select: { id: true, name: true } },
