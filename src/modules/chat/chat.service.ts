@@ -406,11 +406,14 @@ export class MessageService {
       );
     }
 
-    // Gate read-only (feature #11): si el canal pertenece a un ticket RESOLVED
-    // (terminal) y el sender es cliente (User.clientId !== null), rechazar. El
+    // Gate read-only (feature #11 + #43): si el canal pertenece a un ticket en
+    // estado terminal para el cliente — RESOLVED (resuelto) o CLOSED (cancelado,
+    // #43 D3b) — y el sender es cliente (User.clientId !== null), rechazar. El
     // staff (clientId === null) y los tickets en cualquier otro estado pasan sin
     // cambios. Cubre HTTP (POST /chat/channels/:id/messages) y WS (message:send),
     // porque ambos entran por este método. Una sola query liviana por path.
+    // Se conserva el código TICKET_RESOLVED_READ_ONLY para ambos estados: el
+    // frontend lo trata como "chat de solo lectura" sin distinguir la causa.
     const [sender, channel] = await Promise.all([
       this.prisma.user.findUnique({
         where: { id: userId },
@@ -422,9 +425,12 @@ export class MessageService {
       }),
     ]);
 
-    if (sender?.clientId && channel?.ticket?.status === 'RESOLVED') {
+    const ticketStatus = channel?.ticket?.status;
+    if (sender?.clientId && (ticketStatus === 'RESOLVED' || ticketStatus === 'CLOSED')) {
       throw new AppException(
-        'El ticket está resuelto. Creá una nueva consulta para continuar.',
+        ticketStatus === 'RESOLVED'
+          ? 'El ticket está resuelto. Creá una nueva consulta para continuar.'
+          : 'El ticket fue cancelado. Creá una nueva consulta para continuar.',
         'TICKET_RESOLVED_READ_ONLY',
         403,
         { channelId },

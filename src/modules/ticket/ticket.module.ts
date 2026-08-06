@@ -11,6 +11,7 @@ import { OutboxModule } from '../sync/outbox.module';
 import { SessionValidityModule } from '../auth/session-validity.module';
 import { TaskHoursGuardModule } from '../task/task-hours-guard.module';
 import { SlaModule } from '../sla/sla.module';
+import { ChatModule } from '../chat/chat.module';
 
 @Module({
   // ScheduleModule.forRoot() se movio a AppModule (#19 ALTO-2): debe ser unico y
@@ -27,6 +28,10 @@ import { SlaModule } from '../sla/sla.module';
     SessionValidityModule,
     TaskHoursGuardModule,
     SlaModule,
+    // #43 R2.4: TicketSyncListener escribe el mensaje de sistema al reabrir por
+    // rechazo. ChatModule solo importa PrismaModule + SessionValidityModule →
+    // Ticket → Chat es acíclico (Chat no importa Ticket).
+    ChatModule,
   ],
   controllers: [TicketController],
   providers: [

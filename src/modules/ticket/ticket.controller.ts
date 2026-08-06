@@ -21,13 +21,13 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { TicketService } from './ticket.service';
 import { UpdateTicketDto } from './dto/update-ticket.dto';
+import { CloseTicketDto } from './dto/close-ticket.dto';
 import { ReclassifyTicketDto } from './dto/reclassify-ticket.dto';
 import { CreateAdminTicketDto } from './dto/create-admin-ticket.dto';
 import { ListTicketsQueryDto } from './dto/list-tickets-query.dto';
 import { CreateCategoryConfigDto, UpdateCategoryConfigDto } from './dto/create-category-config.dto';
 import { UpsertSlaConfigDto } from './dto/upsert-sla-config.dto';
 import { UpsertBusinessHoursDto } from './dto/upsert-business-hours.dto';
-import { AppException } from '../../common/filters/app-exception';
 
 @ApiTags('Tickets')
 @ApiBearerAuth()
@@ -153,22 +153,22 @@ export class TicketController {
     });
   }
 
-  // DEPRECATED — feature #10 elimina el estado CLOSED del modelo.
-  // El handler se mantiene para devolver un 410 Gone con mensaje claro
-  // a clientes legacy en vez de un 404 confuso. NO eliminar el codigo
-  // de TicketService.closeTicket — preserva audit trail de tickets
-  // historicos cerrados antes de la migracion.
+  // #43: CLOSED se reutiliza como «Cancelado». El endpoint vuelve a estar
+  // VIVO (feature #10 lo había tombstoneado con 410): es la ÚNICA puerta al
+  // estado CLOSED, con comentario obligatorio (DTO + candado en el service).
+  // Cancelar es de staff (R1b.5) — mismo gate de roles que reclassify.
   @Post('tickets/:ticketId/close')
+  @UseGuards(RolesGuard)
+  @Roles('Owner', 'Project Manager', 'Developer')
   @ApiOperation({
-    summary: 'DEPRECATED — devuelve 410 Gone. Usar POST /tickets/:id/resolve',
-    deprecated: true,
+    summary: 'Cancelar ticket (status CLOSED, label «Cancelado») — comentario obligatorio',
   })
-  closeTicket(): never {
-    throw new AppException(
-      'Endpoint deprecado. Usar PATCH /tickets/:ticketId con status=RESOLVED',
-      'TICKET_CLOSE_DEPRECATED',
-      HttpStatus.GONE,
-    );
+  closeTicket(
+    @Param('ticketId') ticketId: string,
+    @Body() dto: CloseTicketDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.ticketService.closeTicket(ticketId, dto, user.id);
   }
 
   // ── Ticket Category Configs ──────────────────────────────

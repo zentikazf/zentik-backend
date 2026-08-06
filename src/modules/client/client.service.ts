@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, TicketStatus } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import { randomBytes } from 'crypto';
 import { PrismaService } from '../../database/prisma.service';
@@ -183,7 +183,12 @@ export class ClientService {
     return client;
   }
 
-  async changeStatus(orgId: string, clientId: string, newStatus: 'ACTIVE' | 'DISABLED' | 'ARCHIVED') {
+  async changeStatus(
+    orgId: string,
+    clientId: string,
+    newStatus: 'ACTIVE' | 'DISABLED' | 'ARCHIVED',
+    userId: string,
+  ) {
     const client = await this.findById(orgId, clientId);
 
     await this.prisma.$transaction(async (tx) => {
@@ -209,14 +214,11 @@ export class ClientService {
           await tx.session.deleteMany({ where: { userId: { in: userIds } } });
         }
 
-        // Close open tickets
-        await tx.ticket.updateMany({
-          where: {
-            clientId,
-            status: { in: ['OPEN', 'IN_PROGRESS'] },
-          },
-          data: { status: 'CLOSED', adminNotes: 'Cliente deshabilitado' },
-        });
+        await this.closeOpenTicketsForDisabledClient(tx, clientId, userId);
+      }
+
+      if (newStatus === 'ACTIVE') {
+        await this.restoreTicketsForReactivatedClient(tx, clientId, userId);
       }
     });
 
@@ -234,6 +236,119 @@ export class ClientService {
       resourceId: clientId,
       newData: { status: newStatus, name: client.name },
     });
+  }
+
+  /**
+   * Cierre honesto de los tickets abiertos al deshabilitar/archivar un cliente
+   * (#43 R3). Reemplaza el `updateMany` mudo que pisaba `adminNotes` (destruía
+   * notas internas del staff) por un loop transaccional que:
+   *  - marca `status=CLOSED` + `closedAt` + `closeNote` + `closedByUserId`, SIN
+   *    tocar `adminNotes`;
+   *  - escribe un `TicketEvent` STATUS_CHANGE con `fromValue` = estado previo
+   *    real y `metadata.reason = 'CLIENT_DISABLED'`. Ese `fromValue` es la
+   *    fuente de la restauración de R4, y el `reason` en metadata es el
+   *    discriminador (el enum `TicketCloseReason` no tiene `CLIENT_DISABLED` y
+   *    el spec manda NO migrarlo — design §D4).
+   *
+   * Incluye `IN_REVIEW` (tombstone #43) en el barrido para drenarlo también.
+   * `closeReason` queda null a propósito: el discriminador vive en el evento,
+   * no en el enum; el `closeNote` 'Cliente deshabilitado' es interno (staff-only,
+   * en la lista anti-fuga del portal) y da el texto del banner (R3.4).
+   */
+  private async closeOpenTicketsForDisabledClient(
+    tx: Prisma.TransactionClient,
+    clientId: string,
+    userId: string,
+  ) {
+    const openTickets = await tx.ticket.findMany({
+      where: { clientId, status: { in: ['OPEN', 'IN_PROGRESS', 'IN_REVIEW'] } },
+      select: { id: true, status: true },
+    });
+    const now = new Date();
+    for (const t of openTickets) {
+      await tx.ticket.update({
+        where: { id: t.id },
+        data: {
+          status: 'CLOSED',
+          closedAt: now,
+          closeNote: 'Cliente deshabilitado',
+          closedByUserId: userId,
+          // adminNotes NO se toca — antes se pisaba y destruía notas internas.
+        },
+      });
+      // Molde de TicketEventsService.writeEventTx (ticket-events.service.ts:48):
+      // se escribe inline para no acoplar ClientModule → TicketModule.
+      await tx.ticketEvent.create({
+        data: {
+          ticketId: t.id,
+          type: 'STATUS_CHANGE',
+          fromValue: t.status,
+          toValue: 'CLOSED',
+          source: 'SYSTEM',
+          userId,
+          metadata: { reason: 'CLIENT_DISABLED' },
+        },
+      });
+    }
+  }
+
+  /**
+   * Restauración total al reactivar el cliente (#43 R4): cada ticket que se
+   * cerró por CLIENT_DISABLED vuelve a su estado natural (el `fromValue` del
+   * último evento de cierre), limpiando los campos del cierre y dejando el
+   * `TicketEvent` espejo.
+   *
+   * DISCRIMINADOR = `closeReason IS NULL` a nivel TICKET. El cierre por
+   * deshabilitación (closeOpenTicketsForDisabledClient) es el ÚNICO writer que
+   * deja `closeReason` en null; la cancelación manual (closeTicket) SIEMPRE
+   * setea un `closeReason` (el DTO lo exige) y un `CLOSED` histórico también lo
+   * tiene. Así R4.3 (no tocar manuales ni históricos) sale del `where`, sin
+   * depender de la metadata del evento — que era frágil: la cancelación manual
+   * escribe un evento `type:'CLOSED'` (no `STATUS_CHANGE`), invisible a la query
+   * de discriminación por evento, con lo que un cierre-deshabilitación viejo
+   * podía "ganar" y revivir un ticket cancelado a mano. Idempotente (R4.5): tras
+   * restaurar, el ticket ya no está `CLOSED` ni con `closeReason` null.
+   */
+  private async restoreTicketsForReactivatedClient(
+    tx: Prisma.TransactionClient,
+    clientId: string,
+    userId: string,
+  ) {
+    const closedTickets = await tx.ticket.findMany({
+      where: { clientId, status: 'CLOSED', closeReason: null },
+      select: { id: true },
+    });
+    for (const t of closedTickets) {
+      // El `fromValue` (estado natural) viene del evento de cierre por
+      // deshabilitación — el único STATUS_CHANGE→CLOSED que escribimos.
+      const lastClose = await tx.ticketEvent.findFirst({
+        where: { ticketId: t.id, type: 'STATUS_CHANGE', toValue: 'CLOSED' },
+        orderBy: { createdAt: 'desc' },
+        select: { fromValue: true },
+      });
+      const restoreTo = (lastClose?.fromValue as TicketStatus) ?? 'OPEN';
+      await tx.ticket.update({
+        where: { id: t.id },
+        data: {
+          status: restoreTo,
+          closedAt: null,
+          closeReason: null,
+          closeNote: null,
+          closedByUserId: null,
+        },
+      });
+      await tx.ticketEvent.create({
+        data: {
+          ticketId: t.id,
+          type: 'STATUS_CHANGE',
+          fromValue: 'CLOSED',
+          toValue: restoreTo,
+          source: 'SYSTEM',
+          userId,
+          metadata: { reason: 'CLIENT_REACTIVATED' },
+        },
+      });
+    }
   }
 
   async createClientUser(orgId: string, clientId: string, dto: CreateClientUserDto) {
