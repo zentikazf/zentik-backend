@@ -484,19 +484,26 @@ describe('PortalService — criticidades y tipos del portal (#42 Fase 2)', () =>
      * (que no admite recortar escalares) o agrega el campo al `select`, este test
      * revienta. Cubre el detalle Y el listado.
      */
-    it('NO expone adminNotes (notas internas del staff) ni en el detalle ni en el listado', async () => {
+    it('NO expone adminNotes ni closeNote/closeReason (campos internos del staff) ni en el detalle ni en el listado', async () => {
+      // #43 R1b.3: `closeNote` es el comentario de cancelación (interno) — se suma
+      // a la lista prohibida junto a `adminNotes`. El cliente ve el estado
+      // «Cancelado» pero nunca el motivo interno de la cancelación / cierre.
       await service.getTicketDetail(USER, 'ticket-1');
 
       const detail = prisma.ticket.findFirst.mock.calls[0][0]!;
       expect(detail.include).toBeUndefined(); // include = todos los escalares → prohibido acá
-      expect(detail.select).not.toHaveProperty('adminNotes');
+      for (const campo of ['adminNotes', 'closeNote', 'closeReason', 'closedAt', 'closedByUserId']) {
+        expect(detail.select).not.toHaveProperty(campo);
+      }
 
       prisma.ticket.findMany.mockResolvedValue([] as never);
       await service.getTickets(USER);
 
       const list = prisma.ticket.findMany.mock.calls[0][0]!;
       expect(list.include).toBeUndefined();
-      expect(list.select).not.toHaveProperty('adminNotes');
+      for (const campo of ['adminNotes', 'closeNote', 'closeReason', 'closedAt', 'closedByUserId']) {
+        expect(list.select).not.toHaveProperty(campo);
+      }
     });
 
     it('sigue scopeado al cliente logueado (un ticket ajeno es 404)', async () => {

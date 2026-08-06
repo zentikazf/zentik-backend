@@ -81,16 +81,23 @@ function csvEscape(value: string): string {
 }
 
 // ─── State machine: transiciones válidas del ticket ────────────────────
-// CLOSED queda como key con array vacio para preservar el enum en lectura
-// (tickets historicos pre-feature #10), pero ningun estado origen permite
-// transicionar a CLOSED — el cierre fue deprecado, los tickets terminan en
-// RESOLVED. Ver docs en spec tickets-eliminar-closed-pulir-listing/design.md.
+// Feature #43: 4 estados vivos — OPEN (Nuevo) / IN_PROGRESS (En curso) /
+// RESOLVED (Resuelto) / CLOSED (Cancelado). CLOSED se reutiliza como
+// «Cancelado» y su ÚNICA puerta de entrada es la acción dedicada
+// closeTicket() (comentario obligatorio); el PATCH genérico lo rechaza.
+// IN_REVIEW queda como TOMBSTONE: se retiró del ciclo (la revisión vive en
+// la task del kanban — resolver el ticket manda la task a IN_REVIEW y la
+// aprobación del PM la completa). Los históricos en IN_REVIEW conservan
+// solo transiciones de salida para drenarse. Desde RESOLVED no se cancela
+// (ya está entregado): se reabre a IN_PROGRESS primero. CLOSED → OPEN es
+// la reapertura manual de una cancelación (vuelve al inicio del ciclo).
+// Ver specs/ticket-lifecycle-estados-cierre-honesto/{requirements,design}.md.
 const ALLOWED_TRANSITIONS: Record<TicketStatus, TicketStatus[]> = {
-  OPEN:        ['IN_PROGRESS'],
-  IN_PROGRESS: ['IN_REVIEW', 'RESOLVED', 'OPEN'],
-  IN_REVIEW:   ['IN_PROGRESS', 'RESOLVED'],
+  OPEN:        ['IN_PROGRESS', 'CLOSED'],
+  IN_PROGRESS: ['RESOLVED', 'OPEN', 'CLOSED'],
+  IN_REVIEW:   ['IN_PROGRESS', 'RESOLVED', 'CLOSED'],
   RESOLVED:    ['IN_PROGRESS'],
-  CLOSED:      [],
+  CLOSED:      ['OPEN'],
 };
 
 // ─── Reclasificación interna (feature #42 — Fase 2) ────────────────────
@@ -727,15 +734,27 @@ export class TicketService {
     const wantsAssignee = dto.assigneeId !== undefined;
     const wantsNotes = dto.adminNotes !== undefined;
 
-    // El estado CLOSED fue deprecado (feature #10). Cualquier intento de
-    // transicionar a CLOSED via PATCH falla con error explicito antes de
-    // validar la state machine (que tambien lo bloquearia, pero con mensaje
-    // generico de transicion invalida).
+    // #43: CLOSED = «Cancelado» y su única puerta es la acción dedicada
+    // «Cancelar ticket» (POST /tickets/:ticketId/close), que exige el
+    // comentario obligatorio. El PATCH genérico no lo trae → 400 apuntando
+    // a la acción. Candado en el service, no solo en la UI.
     if (wantsStatus && dto.status === 'CLOSED') {
       throw new AppException(
-        'El estado CLOSED fue deprecado. Los tickets terminan en RESOLVED.',
-        'TICKET_CLOSE_DEPRECATED',
-        410,
+        'Para cancelar un ticket usá la acción "Cancelar ticket" (POST /tickets/:ticketId/close) — el comentario es obligatorio.',
+        'TICKET_CANCEL_REQUIRES_ACTION',
+        400,
+      );
+    }
+
+    // #43: IN_REVIEW se retiró del ciclo de vida del ticket (la revisión vive
+    // en la task del kanban). ALLOWED_TRANSITIONS ya no lo ofrece como destino;
+    // este guard es defensa en profundidad para cualquier caller nuevo, con un
+    // error explícito en vez del genérico de transición inválida.
+    if (wantsStatus && dto.status === 'IN_REVIEW') {
+      throw new AppException(
+        'El estado "En revisión" fue retirado del ciclo de vida del ticket.',
+        'TICKET_STATUS_RETIRED',
+        400,
       );
     }
 
@@ -955,9 +974,22 @@ export class TicketService {
   }
 
   // ────────────────────────────────────────────────────────────
-  // Cerrar ticket (endpoint dedicado)
+  // Cancelar ticket (endpoint dedicado — #43 reutiliza CLOSED como «Cancelado»)
   // ────────────────────────────────────────────────────────────
 
+  /**
+   * Cancela un ticket (status CLOSED, label UI «Cancelado»). Feature #43 R1b:
+   * única puerta de entrada al estado CLOSED, con comentario OBLIGATORIO
+   * (candado acá, no solo en el DTO/UI). El endpoint y los campos conservan
+   * su nombre histórico (`close*`) — cero migración, el schema sigue siendo
+   * cierto. `closeNote` es INTERNO: nunca viaja por los endpoints del portal.
+   *
+   * Semántica SLA (R1b.6): cancelar NO estampa resolvedAt/firstResponseAt
+   * (un cancelado sin resolver no cuenta como cumplido ni incumplido —
+   * `classifySlaOutcome` lo deja fuera de COMPLIED y el cron nunca mira
+   * CLOSED). El molde viejo (feature #10, muerto detrás del 410) estampaba
+   * ambos; eso era el "cierre = resolución" que este feature elimina.
+   */
   async closeTicket(ticketId: string, dto: CloseTicketDto, userId: string) {
     const ticket = await this.prisma.ticket.findUnique({
       where: { id: ticketId },
@@ -967,10 +999,30 @@ export class TicketService {
       throw new AppException('Ticket no encontrado', 'TICKET_NOT_FOUND', 404);
     }
 
+    // Candado del comentario en el SERVICE (R1b.1) — el DTO también lo exige,
+    // pero cualquier caller interno futuro tiene que chocar con esto.
+    if (!dto.note?.trim()) {
+      throw new AppException(
+        'El comentario de cancelación es obligatorio',
+        'CANCEL_NOTE_REQUIRED',
+        400,
+      );
+    }
+
     if (ticket.status === 'CLOSED') {
       throw new AppException(
-        'El ticket ya esta cerrado',
+        'El ticket ya esta cancelado',
         'ALREADY_CLOSED',
+        400,
+      );
+    }
+
+    // R1.1: desde RESOLVED no se cancela — ya está entregado. Mensaje claro
+    // en vez del genérico de transición inválida.
+    if (ticket.status === 'RESOLVED') {
+      throw new AppException(
+        'Un ticket resuelto no se puede cancelar: ya fue entregado. Reabrilo a "En curso" primero.',
+        'TICKET_RESOLVED_NOT_CANCELLABLE',
         400,
       );
     }
@@ -979,26 +1031,22 @@ export class TicketService {
 
     const previousStatus = ticket.status;
 
-    // Capturar los flags ANTES de la tx para decidir emision de eventos SLA
-    // (firstResponseAt y resolvedAt se setean dentro de la tx solo si eran null).
-    const willSetFirstResponse = ticket.firstResponseAt === null;
-    const willSetResolved = ticket.resolvedAt === null;
-
     await this.prisma.$transaction(async (tx) => {
       await tx.ticket.update({
         where: { id: ticketId },
         data: {
           status: 'CLOSED',
           closeReason: dto.reason as TicketCloseReason,
-          closeNote: dto.note ?? null,
+          closeNote: dto.note,
           closedAt: new Date(),
           closedByUserId: userId,
-          // SLA auto-marks
-          ...(willSetFirstResponse && { firstResponseAt: new Date() }),
-          ...(willSetResolved && { resolvedAt: new Date() }),
+          // ⚠️ SIN SLA auto-marks (R1b.6): cancelar no es resolver.
+          // resolvedAt/firstResponseAt quedan como estaban.
         },
       });
 
+      // Evento con fromValue real (R1b.2): la reapertura manual CLOSED → OPEN
+      // y la auditoría lo leen. metadata.note es interna (timeline staff-only).
       await this.events.writeEventTx(tx, {
         ticketId,
         type: 'CLOSED',
@@ -1009,48 +1057,37 @@ export class TicketService {
         metadata: { reason: dto.reason, note: dto.note },
       });
 
-      // Audit timeline para hitos SLA: FIRST_RESPONSE / RESOLVED.
-      // Solo se emiten si el cierre fuerza la marca por primera vez.
-      if (willSetFirstResponse) {
-        await this.events.writeEventTx(tx, {
-          ticketId,
-          type: 'FIRST_RESPONSE',
-          source: 'TICKET',
-          userId,
-        });
-      }
-      if (willSetResolved) {
-        await this.events.writeEventTx(tx, {
-          ticketId,
-          type: 'RESOLVED',
-          source: 'TICKET',
-          userId,
+      // Outbox sync Onnix (paridad con updateTicket): el estado que ve el
+      // cliente cambió → replicar a Onnix (slug 'cerrado' via STATUS_SLUG).
+      // Mismo gate por categoría que el resto del módulo.
+      if (ticket.category === 'SUPPORT_REQUEST') {
+        await this.outbox.enqueueTx(tx, {
+          eventType: 'STATUS_CHANGED',
+          aggregateId: ticketId,
+          organizationId: ticket.organizationId,
+          payload: { ticketId },
         });
       }
 
-      // Sync task → DONE (a menos que el ticket se cerró sin resolverse,
-      // en cuyo caso preservamos el comportamiento legacy: cancelar la task)
-      if (ticket.task) {
-        const wasNeverResolved = ticket.resolvedAt === null && previousStatus !== 'RESOLVED';
-        if (wasNeverResolved) {
-          if (ticket.task.status !== 'CANCELLED') {
-            await tx.task.update({
-              where: { id: ticket.task.id },
-              data: { status: 'CANCELLED' },
-            });
-            this.pendingEvents.push(() => {
-              this.eventEmitter.emit('task.updated', {
-                taskId: ticket.task!.id,
-                status: 'CANCELLED',
-                projectId: ticket.task!.projectId,
-                reason: 'ticket_closed_unresolved',
-                organizationId: ticket.organizationId,
-              });
-            });
-          }
-        } else {
-          await this.syncTaskToStatus(tx, ticket.task.id, 'DONE', userId, ticket.organizationId);
-        }
+      // R1b.4: cancelar el ticket lleva la task SIEMPRE a CANCELLED (el enum
+      // TaskStatus lo tiene; verificado en schema.prisma:49). La rama vieja
+      // "resuelto y cerrado → task DONE" es inalcanzable: desde RESOLVED no
+      // se cancela (guard de arriba). Mismo mecanismo legacy: update directo
+      // del status sin mover la boardColumn.
+      if (ticket.task && ticket.task.status !== 'CANCELLED') {
+        await tx.task.update({
+          where: { id: ticket.task.id },
+          data: { status: 'CANCELLED' },
+        });
+        this.pendingEvents.push(() => {
+          this.eventEmitter.emit('task.updated', {
+            taskId: ticket.task!.id,
+            status: 'CANCELLED',
+            projectId: ticket.task!.projectId,
+            reason: 'ticket_cancelled',
+            organizationId: ticket.organizationId,
+          });
+        });
       }
     });
 
@@ -1116,8 +1153,15 @@ export class TicketService {
         targetTicketStatus = 'IN_PROGRESS';
         break;
       case 'IN_REVIEW':
-        targetTicketStatus = 'IN_REVIEW';
-        break;
+        // #43: task IN_REVIEW ya NO empuja el ticket a IN_REVIEW (estado
+        // retirado). En el modelo nuevo, task IN_REVIEW = "el dev entregó" y
+        // el ticket YA está en RESOLVED (fue resolver el ticket lo que mandó
+        // la task a revisión). Una tarjeta arrastrada a mano a la columna
+        // Revisión es asunto del kanban, no del ticket → no-op.
+        this.logger.debug(
+          `Task ${taskId} → IN_REVIEW: no-op sobre el status del ticket (#43)`,
+        );
+        return null;
       case 'DONE':
         // El kanban yendo a DONE solo lleva a RESOLVED, NUNCA a CLOSED
         targetTicketStatus = 'RESOLVED';

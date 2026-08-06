@@ -41,6 +41,12 @@ const baseImports = [
   ScheduleModule.forRoot(),
   AppConfigModule,
   FakeRedisModule,
+  // #43: TicketModule ahora importa ChatModule (para el mensaje de sistema al
+  // reabrir). MessageService depende de StorageService, provisto por el
+  // StorageModule @Global (en la app real está en AppModule). Su constructor
+  // solo hace path.resolve (el S3/fs vive en onModuleInit, que .compile() no
+  // corre), así que es seguro instanciarlo sin stub.
+  StorageModule,
 ];
 
 describe('DI check', () => {

@@ -84,8 +84,9 @@ export class ClientController {
     @Param('orgId') orgId: string,
     @Param('clientId') clientId: string,
     @Body() body: { status: 'ACTIVE' | 'DISABLED' | 'ARCHIVED' },
+    @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.clientService.changeStatus(orgId, clientId, body.status);
+    return this.clientService.changeStatus(orgId, clientId, body.status, user.id);
   }
 
   @Delete(':clientId')
@@ -94,8 +95,9 @@ export class ClientController {
   remove(
     @Param('orgId') orgId: string,
     @Param('clientId') clientId: string,
+    @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.clientService.changeStatus(orgId, clientId, 'ARCHIVED');
+    return this.clientService.changeStatus(orgId, clientId, 'ARCHIVED', user.id);
   }
 
   @Post(':clientId/create-user')
