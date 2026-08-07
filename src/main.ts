@@ -1,6 +1,7 @@
 import './infrastructure/observability/instrument'; // Sentry must init before everything
 import * as Sentry from '@sentry/node';
 import { NestFactory } from '@nestjs/core';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import helmet from 'helmet';
@@ -16,11 +17,35 @@ import { WinstonLoggerService } from './infrastructure/observability';
 async function bootstrap() {
   const env = validateEnv();
 
-  const app = await NestFactory.create(AppModule, {
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     logger: new WinstonLoggerService(),
   });
 
   const configService = app.get(AppConfigService);
+
+  // === Trust proxy (#45 T1) ===
+  // Railway pone N proxies delante. Sin esto `req.ip` es la IP del SOCKET = el
+  // proxy de borde interno (CGNAT 100.64.x) = LA MISMA para todos → el rate-limit
+  // cuenta a toda la empresa como un usuario, y los registros de auditoría de IP
+  // guardan basura. Con el hop count exacto, `req.ip` es la IP real del cliente.
+  // ⚠️ NÚMERO, nunca `true` (con `true` Express toma el XFF más a la izquierda,
+  // que lo escribe el cliente → falsificable: evade el límite y lockea a terceros
+  // en /login). El número se VERIFICA contra Railway real (DEBUG_TRUST_PROXY).
+  app.set('trust proxy', configService.trustProxyHops);
+
+  // Log TEMPORAL para fijar el hop count real de Railway (T1). Con
+  // DEBUG_TRUST_PROXY=true imprime el XFF crudo y el req.ip resuelto de las
+  // primeras requests; se cuentan las IPs y se apaga. NO deja rastro con el flag
+  // off (default).
+  if (configService.debugTrustProxy) {
+    const tpLogger = new Logger('TrustProxy');
+    app.use((req: any, _res: any, next: () => void) => {
+      tpLogger.debug(
+        `xff="${req.headers['x-forwarded-for'] ?? ''}" socket=${req.socket?.remoteAddress ?? ''} resolvedIp=${req.ip} hops=${configService.trustProxyHops}`,
+      );
+      next();
+    });
+  }
 
   // Global prefix
   app.setGlobalPrefix(configService.apiPrefix, {

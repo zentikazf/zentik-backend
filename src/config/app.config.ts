@@ -44,6 +44,23 @@ export class AppConfigService {
   get sentryDsn(): string | undefined { return this.configService.get<string>('SENTRY_DSN'); }
   get logLevel(): string { return this.configService.getOrThrow<string>('LOG_LEVEL'); }
 
+  // === Rate-limit / trust proxy (#45) ===
+  // Number(...) explícito: validateEnv() valida pero NO inyecta los defaults de
+  // Zod de vuelta a process.env, así que la app debe arrancar sin la var (mismo
+  // patrón que onnix/botmaker). El default 1 espeja env.validation.ts.
+  get trustProxyHops(): number {
+    return Number(this.configService.get<string>('TRUST_PROXY_HOPS') ?? 1);
+  }
+  get debugTrustProxy(): boolean {
+    return this.configService.get<string>('DEBUG_TRUST_PROXY') === 'true';
+  }
+  get dupRequestWarnThreshold(): number {
+    return Number(this.configService.get<string>('DUP_REQUEST_WARN_THRESHOLD') ?? 3);
+  }
+  get dupRequestWindowMs(): number {
+    return Number(this.configService.get<string>('DUP_REQUEST_WINDOW_MS') ?? 1000);
+  }
+
   get prismaTxTimeoutMs(): number {
     // Cast explicito a number — env vars en process.env siempre son string,
     // y el generico <number> del ConfigService es solo hint de TS, no convierte

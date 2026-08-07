@@ -4,7 +4,8 @@ import { APP_GUARD } from '@nestjs/core';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
-import { CorrelationIdMiddleware } from './common/middleware';
+import { CorrelationIdMiddleware, DuplicateRequestMiddleware } from './common/middleware';
+import { buildThrottlerOptions } from './common/throttler/throttler.config';
 import { PrismaModule } from './database/prisma.module';
 import { RedisModule } from './infrastructure/redis/redis.module';
 import { EmailModule } from './infrastructure/email/email.module';
@@ -63,11 +64,9 @@ import { SlaModule } from './modules/sla/sla.module';
     // segundo explorer y el re-registro del mismo nombre de interval lanzaria
     // `Interval already exists`. Importar `ScheduleModule` a secas es no-op.
     ScheduleModule.forRoot(),
-    ThrottlerModule.forRoot([
-      { name: 'short', ttl: 1000, limit: 3 },
-      { name: 'medium', ttl: 10000, limit: 20 },
-      { name: 'long', ttl: 60000, limit: 100 },
-    ]),
+    // Rate-limit (#45): forma OBJETO con getTracker de sesión + throttlers de auth
+    // por email+IP. Config y razonamiento en common/throttler/throttler.config.ts.
+    ThrottlerModule.forRoot(buildThrottlerOptions()),
 
     // Infrastructure
     PrismaModule,
@@ -115,6 +114,10 @@ import { SlaModule } from './modules/sla/sla.module';
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {
-    consumer.apply(CorrelationIdMiddleware).forRoutes('*');
+    // CorrelationId PRIMERO: el contador de duplicados (#45 D4) lo lee para
+    // correlacionar el warn con la request original.
+    consumer
+      .apply(CorrelationIdMiddleware, DuplicateRequestMiddleware)
+      .forRoutes('*');
   }
 }
