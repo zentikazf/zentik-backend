@@ -27,6 +27,7 @@ import {
   TaskHoursGuardService,
   HoursGateActorContext,
 } from '../task/task-hours-guard.service';
+import { TicketClassificationGuardService } from './ticket-classification-guard.service';
 import { SlaResolverService } from '../sla/sla-resolver.service';
 
 /**
@@ -199,6 +200,8 @@ export class TicketService {
     private readonly hoursGuard: TaskHoursGuardService,
     // Feature #42 — Fase 1: solo se usa con `SLA_CASCADE_ENABLED=true`.
     private readonly slaResolver: SlaResolverService,
+    // Feature #44: candado "no resolver sin tipificar" (updateTicket + sync).
+    private readonly classificationGuard: TicketClassificationGuardService,
   ) {}
 
   // ────────────────────────────────────────────────────────────
@@ -773,6 +776,14 @@ export class TicketService {
     }
 
     const updated = await this.prisma.$transaction(async (tx) => {
+      // #44 (D2.1): candado de tipificación. Ningún camino lleva a RESUELTO sin
+      // que el equipo lo haya tipificado (ticketType + categoría interna). Corre
+      // DENTRO de la tx y ANTES de estampar resolvedAt: si lanza, se revierte el
+      // cambio de estado sin dejar rastro parcial. Mismo molde que el gate de horas.
+      if (wantsStatus && this.classificationGuard.isGatedStatus(newStatus)) {
+        await this.classificationGuard.assertIsClassified(ticket.id, tx);
+      }
+
       // 1) Update ticket fields
       const data: Prisma.TicketUpdateInput = {};
       if (wantsStatus) {
@@ -1180,6 +1191,21 @@ export class TicketService {
     if (!allowed.includes(targetTicketStatus)) {
       this.logger.warn(
         `Sync ignorado: ${ticket.status} → ${targetTicketStatus} no permitido (taskId=${taskId})`,
+      );
+      return null;
+    }
+
+    // #44 (D2.3): última línea de defensa del gate de tipificación. Este path lo
+    // dispara el listener de `task.approval.approved`, que traga cualquier throw
+    // río abajo (ticket-sync.listener.ts) → si lanzáramos, quedaría divergencia
+    // silenciosa task-DONE / ticket-abierto. Por eso NO lanza: loguea y devuelve
+    // null (el pre-vuelo síncrono de approveTask ya frenó el caso normal; llegar
+    // acá sin tipificar significa que ese pre-vuelo falló o hay un caller nuevo).
+    // Va ANTES de abrir la tx para poder cortar el método entero y no emitir el
+    // evento `ticket.updated` de un cambio que no ocurrió.
+    if (targetTicketStatus === 'RESOLVED' && !(await this.classificationGuard.isClassified(ticket.id))) {
+      this.logger.error(
+        `Sync a RESOLVED abortado: ticket ${ticket.id} sin tipificar (taskId=${taskId}, newTaskStatus=${newTaskStatus})`,
       );
       return null;
     }
