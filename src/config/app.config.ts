@@ -49,7 +49,9 @@ export class AppConfigService {
   // Zod de vuelta a process.env, así que la app debe arrancar sin la var (mismo
   // patrón que onnix/botmaker). El default 1 espeja env.validation.ts.
   get trustProxyHops(): number {
-    return Number(this.configService.get<string>('TRUST_PROXY_HOPS') ?? 1);
+    // Default 2: verificado contra Railway (XFF = cliente, edge; socket interno).
+    // Ver env.validation.ts. hops=1 se quedaba en el edge (2 IPs para todos).
+    return Number(this.configService.get<string>('TRUST_PROXY_HOPS') ?? 2);
   }
   get debugTrustProxy(): boolean {
     return this.configService.get<string>('DEBUG_TRUST_PROXY') === 'true';

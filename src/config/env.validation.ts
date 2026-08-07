@@ -33,11 +33,15 @@ export const envSchema = z.object({
   // === Rate-limit / trust proxy (#45) ===
   // Cantidad de proxies de confianza entre el cliente y la app (Railway pone N
   // hops en X-Forwarded-For). `req.ip` se deriva saltando estos hops desde el
-  // socket. Default 1 (Railway single edge proxy) — SE VERIFICA contra un request
-  // real con DEBUG_TRUST_PROXY antes de fijarlo. ⚠️ NUNCA `true`: haría el XFF más
-  // a la izquierda (escrito por el cliente) falsificable → evasión del límite y
-  // lock de terceros en /login. Tuneable por env sin re-deploy de código.
-  TRUST_PROXY_HOPS: z.coerce.number().int().min(0).default(1),
+  // socket. VERIFICADO contra Railway real 2026-08-07 (DEBUG_TRUST_PROXY):
+  //   xff="<cliente>, 152.233.23.x(edge)"  socket=100.64.0.x(interno)
+  // → con hops=2 `req.ip` = la IP REAL del cliente; con hops=1 se quedaba en el
+  //   edge de Railway (solo 2 IPs, compartidas por todos). Default 2.
+  // ⚠️ NUNCA `true`: haría el XFF más a la izquierda (escrito por el cliente)
+  // falsificable → evasión del límite y lock de terceros en /login. Con hops=2 un
+  // XFF inyectado por el cliente queda a la izquierda de los 2 hops de Railway y
+  // se ignora. Tuneable por env sin re-deploy de código.
+  TRUST_PROXY_HOPS: z.coerce.number().int().min(0).default(2),
   // Flag TEMPORAL: loguea el `x-forwarded-for` crudo + `req.ip` resuelto para
   // contar los hops reales de Railway. Apagar tras fijar TRUST_PROXY_HOPS.
   DEBUG_TRUST_PROXY: z.enum(['true', 'false']).default('false'),
