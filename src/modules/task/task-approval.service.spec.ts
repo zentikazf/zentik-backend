@@ -2,6 +2,7 @@ import { mockDeep, DeepMockProxy } from 'jest-mock-extended';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { TaskApprovalService } from './task-approval.service';
 import { TaskHoursGuardService } from './task-hours-guard.service';
+import { TicketClassificationGuardService } from '../ticket/ticket-classification-guard.service';
 import { TimeEntryService } from '../time-tracking/time-tracking.service';
 import { PrismaService } from '../../database/prisma.service';
 
@@ -16,6 +17,7 @@ describe('TaskApprovalService.approveTask — gate H6', () => {
   let eventEmitter: DeepMockProxy<EventEmitter2>;
   let timeEntry: DeepMockProxy<TimeEntryService>;
   let hoursGuard: DeepMockProxy<TaskHoursGuardService>;
+  let classificationGuard: DeepMockProxy<TicketClassificationGuardService>;
   let service: TaskApprovalService;
 
   const TASK = 'task-1';
@@ -26,7 +28,11 @@ describe('TaskApprovalService.approveTask — gate H6', () => {
     eventEmitter = mockDeep<EventEmitter2>();
     timeEntry = mockDeep<TimeEntryService>();
     hoursGuard = mockDeep<TaskHoursGuardService>();
-    service = new TaskApprovalService(prisma, eventEmitter, timeEntry, hoursGuard);
+    classificationGuard = mockDeep<TicketClassificationGuardService>();
+    // #44: aprobar siempre apunta a RESOLVED → el status gatea. assertIsClassified
+    // default (mockDeep) resuelve = tipificado. El test del gate lo sobreescribe.
+    classificationGuard.isGatedStatus.mockReturnValue(true);
+    service = new TaskApprovalService(prisma, eventEmitter, timeEntry, hoursGuard, classificationGuard);
 
     prisma.task.findUnique.mockResolvedValue({
       id: TASK,
@@ -88,6 +94,51 @@ describe('TaskApprovalService.approveTask — gate H6', () => {
     await expect(service.approveTask(TASK, 'pm-1')).rejects.toMatchObject({ code: 'INVALID_TASK_STATUS' });
     expect(hoursGuard.enforce).not.toHaveBeenCalled();
   });
+
+  // ── #44 T3: pre-vuelo de tipificación (el punto crítico) ──
+  const taskWithTicket = {
+    id: TASK,
+    status: 'IN_REVIEW',
+    title: 'Tarea',
+    projectId: 'proj-1',
+    estimatedHours: 4,
+    endDate: null,
+    project: { id: 'proj-1', name: 'Proj', responsibleId: 'r1', organizationId: ORG },
+    assignments: [],
+    ticket: { id: 'tk-1' },
+  };
+
+  it('#44 — task con ticket SIN tipificar → 409 antes de aprobar y SIN cobrar horas (task sigue en IN_REVIEW)', async () => {
+    prisma.task.findUnique.mockResolvedValue(taskWithTicket as never);
+    classificationGuard.assertIsClassified.mockRejectedValue(
+      Object.assign(new Error('falta'), {
+        code: 'TICKET_CLASSIFICATION_REQUIRED',
+        statusCode: 409,
+      }) as never,
+    );
+    await expect(service.approveTask(TASK, 'pm-1')).rejects.toMatchObject({
+      code: 'TICKET_CLASSIFICATION_REQUIRED',
+    });
+    expect(prisma.task.update).not.toHaveBeenCalled(); // la task NO pasó a DONE
+    expect(timeEntry.confirmFromApproval).not.toHaveBeenCalled(); // NO se cobraron horas
+    expect(hoursGuard.enforce).not.toHaveBeenCalled(); // el gate de tipificación corre ANTES que el de horas
+  });
+
+  it('#44 — task con ticket YA tipificado → aprueba normal (el gate pasa)', async () => {
+    prisma.task.findUnique.mockResolvedValue(taskWithTicket as never);
+    // assertIsClassified default (mockDeep) resuelve = tipificado.
+    await service.approveTask(TASK, 'pm-1');
+    expect(classificationGuard.assertIsClassified).toHaveBeenCalled();
+    expect(classificationGuard.assertIsClassified.mock.calls[0][0]).toBe('tk-1');
+    expect(prisma.task.update).toHaveBeenCalled();
+  });
+
+  it('#44 — task SIN ticket asociado → el gate de tipificación no se invoca', async () => {
+    // El mock por defecto de findUnique no trae `ticket` → task.ticket es undefined.
+    await service.approveTask(TASK, 'pm-1');
+    expect(classificationGuard.assertIsClassified).not.toHaveBeenCalled();
+    expect(prisma.task.update).toHaveBeenCalled();
+  });
 });
 
 /**
@@ -105,6 +156,7 @@ describe('TaskApprovalService.getApprovalPreview — H7 (horas reales + AJ-3)', 
       mockDeep<EventEmitter2>(),
       mockDeep<TimeEntryService>(),
       mockDeep<TaskHoursGuardService>(),
+      mockDeep<TicketClassificationGuardService>(),
     );
     prisma.task.findUnique.mockResolvedValue({
       id: 'task-1',
@@ -175,7 +227,13 @@ describe('TaskApprovalService.rejectTask — H8c (guard revert facturado)', () =
     eventEmitter = mockDeep<EventEmitter2>();
     timeEntry = mockDeep<TimeEntryService>();
     hoursGuard = mockDeep<TaskHoursGuardService>();
-    service = new TaskApprovalService(prisma, eventEmitter, timeEntry, hoursGuard);
+    service = new TaskApprovalService(
+      prisma,
+      eventEmitter,
+      timeEntry,
+      hoursGuard,
+      mockDeep<TicketClassificationGuardService>(),
+    );
 
     prisma.task.findUnique.mockResolvedValue({
       id: TASK,

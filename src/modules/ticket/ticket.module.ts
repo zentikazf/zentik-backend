@@ -10,6 +10,7 @@ import { SlaCronService } from './sla-cron.service';
 import { OutboxModule } from '../sync/outbox.module';
 import { SessionValidityModule } from '../auth/session-validity.module';
 import { TaskHoursGuardModule } from '../task/task-hours-guard.module';
+import { TicketClassificationGuardModule } from './ticket-classification-guard.module';
 import { SlaModule } from '../sla/sla.module';
 import { ChatModule } from '../chat/chat.module';
 
@@ -27,6 +28,9 @@ import { ChatModule } from '../chat/chat.module';
     OutboxModule,
     SessionValidityModule,
     TaskHoursGuardModule,
+    // #44: gate de tipificación, inyectado en TicketService (updateTicket + sync).
+    // Módulo standalone (mismo patrón anti-ciclo que TaskHoursGuardModule).
+    TicketClassificationGuardModule,
     SlaModule,
     // #43 R2.4: TicketSyncListener escribe el mensaje de sistema al reabrir por
     // rechazo. ChatModule solo importa PrismaModule + SessionValidityModule →

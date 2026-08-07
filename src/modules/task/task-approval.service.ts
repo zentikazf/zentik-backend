@@ -8,6 +8,7 @@ import {
   TaskHoursGuardService,
   HoursGateActorContext,
 } from './task-hours-guard.service';
+import { TicketClassificationGuardService } from '../ticket/ticket-classification-guard.service';
 
 @Injectable()
 export class TaskApprovalService {
@@ -18,6 +19,10 @@ export class TaskApprovalService {
     private readonly eventEmitter: EventEmitter2,
     private readonly timeEntryService: TimeEntryService,
     private readonly hoursGuard: TaskHoursGuardService,
+    // #44: pre-vuelo "no resolver sin tipificar". Aprobar lleva la task a DONE y
+    // eso resuelve el ticket vía listener fire-and-forget → el candado va acá,
+    // síncrono, o no bloquea nada. Guard standalone (sin ciclo Task↔Ticket).
+    private readonly classificationGuard: TicketClassificationGuardService,
   ) {}
 
   /**
@@ -112,6 +117,9 @@ export class TaskApprovalService {
       include: {
         project: { select: { id: true, name: true, responsibleId: true, organizationId: true } },
         assignments: { select: { userId: true } },
+        // #44: la relación del ticket asociado (si existe) alimenta el pre-vuelo
+        // de tipificación. Se suma al include existente, sin query nueva.
+        ticket: { select: { id: true } },
       },
     }) as any;
 
@@ -141,6 +149,16 @@ export class TaskApprovalService {
     let escaped = false;
     let confirmedSeconds = 0;
     const updated = await this.prisma.$transaction(async (tx) => {
+      // #44 (D2.2): pre-vuelo de tipificación, ANTES de tocar la task y de cobrar
+      // horas. Aprobar la task la lleva a DONE, lo que resuelve el ticket asociado
+      // por un listener fire-and-forget que traga los throws (ticket-sync.listener.ts):
+      // un gate solo en ese sync no bloquearía nada (task DONE + horas cobradas +
+      // ticket callado en IN_PROGRESS). Acá es síncrono: si el ticket no está
+      // tipificado, 409 dentro del request y la task sigue en IN_REVIEW.
+      if (task.ticket && this.classificationGuard.isGatedStatus('RESOLVED')) {
+        await this.classificationGuard.assertIsClassified(task.ticket.id, tx);
+      }
+
       // H6: gate de horas — no aprobar (→DONE) sin horas reales, salvo escape auditado
       // (asignado o manage:projects + motivo). Defensa en profundidad: la task pudo
       // llegar a IN_REVIEW por un camino previo a H6 o que lo evadió.

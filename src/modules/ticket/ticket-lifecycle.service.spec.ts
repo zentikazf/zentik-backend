@@ -8,6 +8,7 @@ import { AppConfigService } from '../../config/app.config';
 import { OutboxService } from '../sync/outbox.service';
 import { TaskHoursGuardService } from '../task/task-hours-guard.service';
 import { SlaResolverService } from '../sla/sla-resolver.service';
+import { TicketClassificationGuardService } from './ticket-classification-guard.service';
 import { CloseTicketDto, CloseReasonDto } from './dto/close-ticket.dto';
 import { classifySlaOutcome, calculateSlaOvershoot, TicketSlaShape } from '../sla/sla.util';
 
@@ -29,6 +30,7 @@ describe('TicketService — ciclo de vida #43', () => {
   let outbox: DeepMockProxy<OutboxService>;
   let hoursGuard: DeepMockProxy<TaskHoursGuardService>;
   let slaResolver: DeepMockProxy<SlaResolverService>;
+  let classificationGuard: DeepMockProxy<TicketClassificationGuardService>;
   let lastTx: DeepMockProxy<Prisma.TransactionClient>;
 
   const ORG = 'org-1';
@@ -43,9 +45,15 @@ describe('TicketService — ciclo de vida #43', () => {
     outbox = mockDeep<OutboxService>();
     hoursGuard = mockDeep<TaskHoursGuardService>();
     slaResolver = mockDeep<SlaResolverService>();
+    classificationGuard = mockDeep<TicketClassificationGuardService>();
+    // #44: por defecto los tickets están tipificados (el gate no interfiere con
+    // los tests de ciclo de vida). isGatedStatus se comporta como el real (solo
+    // RESOLVED gatea). Los tests del gate sobreescriben estos mocks.
+    classificationGuard.isGatedStatus.mockImplementation((s?: string | null) => s === 'RESOLVED');
+    classificationGuard.isClassified.mockResolvedValue(true);
     config.slaCascadeEnabled = false;
 
-    service = new TicketService(prisma, eventEmitter, events, config, outbox, hoursGuard, slaResolver);
+    service = new TicketService(prisma, eventEmitter, events, config, outbox, hoursGuard, slaResolver, classificationGuard);
 
     // $transaction: corre el callback con un tx mockeado (recorre el cuerpo real).
     prisma.$transaction.mockImplementation(async (cb: unknown) => {
@@ -274,6 +282,101 @@ describe('TicketService — ciclo de vida #43', () => {
       const data = lastTx.ticket.update.mock.calls[0][0].data as Record<string, unknown>;
       expect(data.status).toBe('RESOLVED');
       expect(data.resolvedAt).toBeInstanceOf(Date);
+    });
+  });
+
+  // ── #44 T2: gate de tipificación en updateTicket (D2.1) ─────────────────────
+  describe('updateTicket — gate de tipificación #44 (D2.1)', () => {
+    function stubTicket(status: string, extra: Record<string, unknown> = {}) {
+      prisma.ticket.findUnique.mockResolvedValue({
+        id: TICKET,
+        status,
+        organizationId: ORG,
+        category: 'SUPPORT_REQUEST',
+        firstResponseAt: null,
+        resolvedAt: null,
+        channelId: null,
+        task: null,
+        ...extra,
+      } as never);
+    }
+
+    it('sin tipificar: resolver (IN_PROGRESS → RESOLVED) → 409 y el ticket NO queda resuelto (la tx revirtió)', async () => {
+      stubTicket('IN_PROGRESS');
+      classificationGuard.assertIsClassified.mockRejectedValue(
+        Object.assign(new Error('falta'), {
+          code: 'TICKET_CLASSIFICATION_REQUIRED',
+          statusCode: 409,
+        }) as never,
+      );
+      await expect(
+        service.updateTicket(TICKET, { status: 'RESOLVED' } as never, USER),
+      ).rejects.toMatchObject({ code: 'TICKET_CLASSIFICATION_REQUIRED', statusCode: 409 });
+      // El gate corre DENTRO de la tx → al lanzar, no se escribió el status.
+      expect(lastTx.ticket.update).not.toHaveBeenCalled();
+    });
+
+    it('tipificado: resolver desde IN_PROGRESS resuelve normal y estampa resolvedAt', async () => {
+      stubTicket('IN_PROGRESS');
+      // assertIsClassified default (mockDeep) resuelve = tipificado.
+      await service.updateTicket(TICKET, { status: 'RESOLVED' } as never, USER);
+      expect(classificationGuard.assertIsClassified).toHaveBeenCalled();
+      expect(classificationGuard.assertIsClassified.mock.calls[0][0]).toBe(TICKET);
+      const data = lastTx.ticket.update.mock.calls[0][0].data as Record<string, unknown>;
+      expect(data.status).toBe('RESOLVED');
+      expect(data.resolvedAt).toBeInstanceOf(Date);
+    });
+
+    it('cancelar (CLOSED) NO exige tipificación: el gate no se invoca al cancelar', async () => {
+      prisma.ticket.findUnique.mockResolvedValue({
+        id: TICKET,
+        status: 'IN_PROGRESS',
+        organizationId: ORG,
+        category: 'SUPPORT_REQUEST',
+        firstResponseAt: null,
+        resolvedAt: null,
+        task: { id: 'task-1', status: 'IN_PROGRESS', projectId: 'p1' },
+      } as never);
+      await service.closeTicket(TICKET, { reason: CloseReasonDto.OTHER, note: 'Duplicado' }, USER);
+      expect(classificationGuard.assertIsClassified).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── #44 T4: defensa en syncTicketFromTaskMove (D2.3) ────────────────────────
+  describe('syncTicketFromTaskMove — defensa de tipificación #44 (D2.3)', () => {
+    function stubTicket(status: string, extra: Record<string, unknown> = {}) {
+      prisma.ticket.findFirst.mockResolvedValue({
+        id: TICKET,
+        status,
+        organizationId: ORG,
+        firstResponseAt: new Date('2026-08-01T09:00:00Z'),
+        resolvedAt: null,
+        channelId: 'chan-1',
+        ...extra,
+      } as never);
+    }
+
+    it('sync a RESOLVED con ticket sin tipificar → NO lanza, no abre tx, no cambia estado, loguea', async () => {
+      stubTicket('IN_PROGRESS');
+      classificationGuard.isClassified.mockResolvedValue(false);
+      const errSpy = jest
+        .spyOn((service as unknown as { logger: { error: (...a: unknown[]) => void } }).logger, 'error')
+        .mockImplementation(() => undefined);
+
+      const res = await service.syncTicketFromTaskMove('task-1', 'DONE', USER); // DONE → RESOLVED
+
+      expect(res).toBeNull();
+      // NO lanza (el listener lo tragaría → divergencia silenciosa) y NO escribe.
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(errSpy).toHaveBeenCalled();
+    });
+
+    it('sync a RESOLVED con ticket tipificado → procede y escribe el estado (no-regresión)', async () => {
+      stubTicket('IN_PROGRESS', { resolvedAt: null });
+      classificationGuard.isClassified.mockResolvedValue(true);
+      await service.syncTicketFromTaskMove('task-1', 'DONE', USER);
+      const data = lastTx.ticket.update.mock.calls[0][0].data as Record<string, unknown>;
+      expect(data.status).toBe('RESOLVED');
     });
   });
 
