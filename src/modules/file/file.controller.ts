@@ -21,6 +21,7 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { Throttle } from '@nestjs/throttler';
 import { ApiTags, ApiBearerAuth, ApiConsumes, ApiBody, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { Response } from 'express';
 import * as fs from 'fs/promises';
@@ -52,6 +53,10 @@ export class FileController {
 
   @Post('files/upload')
   @UseGuards(AuthGuard)
+  // #45 T4: el chat sube adjuntos con `Promise.allSettled` (un POST por archivo).
+  // Con el `short` base (30/seg) ya entran ~5 en paralelo; este override da techo
+  // holgado para selección múltiple (arrastrar 15-20 imágenes) sin 429.
+  @Throttle({ short: { ttl: 1000, limit: 50 } })
   @ApiOperation({ summary: 'Subir un archivo' })
   @ApiConsumes('multipart/form-data')
   @ApiBody({

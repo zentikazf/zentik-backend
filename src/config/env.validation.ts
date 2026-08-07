@@ -30,6 +30,22 @@ export const envSchema = z.object({
   SENTRY_DSN: z.string().optional(),
   LOG_LEVEL: z.enum(['error', 'warn', 'info', 'debug']).default('debug'),
 
+  // === Rate-limit / trust proxy (#45) ===
+  // Cantidad de proxies de confianza entre el cliente y la app (Railway pone N
+  // hops en X-Forwarded-For). `req.ip` se deriva saltando estos hops desde el
+  // socket. Default 1 (Railway single edge proxy) — SE VERIFICA contra un request
+  // real con DEBUG_TRUST_PROXY antes de fijarlo. ⚠️ NUNCA `true`: haría el XFF más
+  // a la izquierda (escrito por el cliente) falsificable → evasión del límite y
+  // lock de terceros en /login. Tuneable por env sin re-deploy de código.
+  TRUST_PROXY_HOPS: z.coerce.number().int().min(0).default(1),
+  // Flag TEMPORAL: loguea el `x-forwarded-for` crudo + `req.ip` resuelto para
+  // contar los hops reales de Railway. Apagar tras fijar TRUST_PROXY_HOPS.
+  DEBUG_TRUST_PROXY: z.enum(['true', 'false']).default('false'),
+  // Contador de duplicados (#45 D4): loguea `warn` cuando un mismo (sesión,
+  // método, ruta) supera el umbral dentro de la ventana. Diagnóstico, NO bloquea.
+  DUP_REQUEST_WARN_THRESHOLD: z.coerce.number().int().min(1).default(3),
+  DUP_REQUEST_WINDOW_MS: z.coerce.number().int().min(100).default(1000),
+
   // Prisma $transaction tunables. Default seguro para dev con BD remota (Railway):
   // 15s para tx que hacen 6-10 queries secuenciales con latencia ~300ms. En prod
   // (Railway<->Railway, latencia ~5ms) podes bajar via env vars sin recompilar.

@@ -50,7 +50,9 @@ export class AuthController {
   ) {}
 
   @Post('register')
-  @Throttle({ short: { ttl: 60000, limit: 3 } })
+  // Rate-limit por email+IP a nivel módulo (#45 T3): throttlers `auth-email`
+  // (estricto por email) + `auth-ip` (amplio, NAT-safe). Sin `@Throttle` acá:
+  // los tiers de sesión NO aplican en esta ruta (todavía no hay sesión).
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
     summary: 'Registrar nuevo usuario',
@@ -70,7 +72,9 @@ export class AuthController {
   }
 
   @Post('login')
-  @Throttle({ short: { ttl: 60000, limit: 5 } })
+  // Rate-limit por email+IP a nivel módulo (#45 T3): `auth-email` 5/60s protege
+  // la cuenta del brute force; `auth-ip` 50/60s es el backstop NAT-safe. Antes:
+  // `short` 5/60s por IP colapsada = el sexto login de la oficina fallaba.
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Iniciar sesion',
