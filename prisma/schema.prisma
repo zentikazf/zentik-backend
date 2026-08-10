@@ -1467,6 +1467,23 @@ model TicketType {
   /// Profundidad: 0 = raiz. Tope de 3 niveles (guardarrail del service, no del schema).
   level    Int     @default(0)
 
+  // ── #48: carpetas de tipos ─────────────────────────────────────────────────
+  /// Si ESTE tipo se ofrece como opcion al CLIENTE. Apagado en un padre = carpeta
+  /// pura: agrupa y ordena, el cliente no la ve ni la elige, pero si ve a sus
+  /// hijos contratados. Calca `TicketCriticalityConfig.clientVisible`.
+  ///
+  /// SOLO filtra en la lectura del CLIENTE (portal). El staff ve todo, siempre:
+  /// ni el catalogo, ni la reclasificacion, ni el alta interna, ni el seed, ni el
+  /// RESOLVER miran este campo. Apagar el ojito es presentacion, no dato — por eso
+  /// un padre oculto con contrato sigue resolviendo (#48 R6).
+  ///
+  /// Default `true` OBLIGATORIO: con `false` se vaciaria el selector del portal de
+  /// todas las organizaciones en el mismo deploy.
+  ///
+  /// Sin indice a proposito: `@@index([organizationId, isActive])` ya poda y el
+  /// catalogo son decenas de filas por organizacion.
+  clientVisible Boolean @default(true) @map("client_visible")
+
   organization    Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   parent          TicketType?            @relation("TicketTypeTree", fields: [parentId], references: [id], onDelete: Restrict)
   children        TicketType[]           @relation("TicketTypeTree")

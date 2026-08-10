@@ -1320,22 +1320,37 @@ export class TicketService {
       criticality = categoryConfig.criticality;
     }
 
+    // #48 T10 (R8.2): la criticidad que eligió el EQUIPO gana sobre la derivada de
+    // la categoría SLA. Hasta esta feature el DTO no aceptaba `criticality`, así
+    // que nadie la manda todavía y el comportamiento previo queda intacto: sin el
+    // campo, la fuente sigue siendo `categoryConfig`.
+    if (dto.criticality) {
+      criticality = dto.criticality;
+    }
+
+    // #48 T10: el tipo de solicitud es CLASIFICACIÓN, no salida del motor de SLA.
+    // Por eso se valida y se resuelve SIEMPRE, FUERA del gate de
+    // `slaCascadeEnabled`. El portal ya se había corregido por exactamente esto
+    // (ver `portal.service.ts`, alta desde el portal); el alta por admin quedó
+    // atrás: con el flag apagado se descartaba en silencio lo que el equipo eligió
+    // y el ticket nacía sin tipo → condenado al 409 del candado de tipificación
+    // al resolverlo (#44).
+    if (dto.ticketTypeId) {
+      // Scoping multi-tenant: un tipo de otra org no se persiste ni se resuelve.
+      const type = await this.prisma.ticketType.findFirst({
+        where: { id: dto.ticketTypeId, organizationId: orgId, isActive: true },
+        select: { id: true },
+      });
+      if (!type) {
+        throw new AppException('Tipo de solicitud no encontrado', 'TICKET_TYPE_NOT_FOUND', 404);
+      }
+      ticketTypeId = type.id;
+    }
+
     if (this.config.slaCascadeEnabled) {
       // ── PATH NUEVO: cascada contrato → proyecto → cliente → criticidad → "Estándar".
       // El motor de cálculo (horas hábiles + feriados) es el MISMO; cambia solo de
       // dónde salen los tiempos. Los deadlines se congelan igual que hoy.
-      if (dto.ticketTypeId) {
-        // Scoping multi-tenant: un tipo de otra org no se persiste ni se resuelve.
-        const type = await this.prisma.ticketType.findFirst({
-          where: { id: dto.ticketTypeId, organizationId: orgId, isActive: true },
-          select: { id: true },
-        });
-        if (!type) {
-          throw new AppException('Tipo de solicitud no encontrado', 'TICKET_TYPE_NOT_FOUND', 404);
-        }
-        ticketTypeId = type.id;
-      }
-
       const resolved = await this.slaResolver.resolveAndCalculateDeadlines({
         organizationId: orgId,
         clientId: dto.clientId,
@@ -1350,11 +1365,22 @@ export class TicketService {
       slaSource = resolved.source;
       responseDeadline = resolved.responseDeadline;
       resolutionDeadline = resolved.resolutionDeadline;
-    } else if (categoryConfig) {
-      // ── PATH ACTUAL (default): SlaConfig por criticidad. NO se toca una línea.
+    } else if (criticality) {
+      // ── PATH ACTUAL (default): SlaConfig por criticidad.
+      //
+      // ⚠️ El gate es `criticality`, NO `categoryConfig` (#48 T10; espejo del
+      // hallazgo C1 que ya se corrigió en el portal). Desde que el admin puede
+      // mandar `criticality` suelta, un alta con criticidad y SIN "Categoría SLA"
+      // entraba al `else` viejo, no calculaba deadlines y los guardaba vacíos —
+      // en silencio y PARA SIEMPRE, porque los deadlines se congelan al crear.
+      // Sería el mismo bug de "payload nuevo + flag apagado" de #42.
+      //
+      // `categoryConfigId` nunca fue una dependencia real de este path: la query
+      // busca por `organizationId_criticality`. Era solo el vehículo por el que
+      // llegaba la criticidad.
       const slaConfig = await this.slaResolver.findLegacySlaConfig(
         orgId,
-        categoryConfig.criticality,
+        criticality as TicketCriticality,
       );
 
       if (slaConfig) {
@@ -1374,13 +1400,14 @@ export class TicketService {
       }
     }
 
-    // Campos SLA v2 del ticket. Con el flag OFF el objeto queda VACÍO → el create es
-    // byte-por-byte el de hoy (ni siquiera se envían las columnas nuevas).
+    // Salida del MOTOR de SLA. Con el flag OFF queda VACÍO → no se escriben las
+    // columnas que produce la cascada.
+    // ⚠️ `ticketTypeId` NO está acá (#48 T10): es clasificación, se persiste
+    // siempre — ver el bloque de arriba y el mismo criterio en `portal.service.ts`.
     const slaCascadeData = this.config.slaCascadeEnabled
       ? {
           ...(slaPolicyId && { slaPolicyId }),
           ...(slaSource && { slaSource }),
-          ...(ticketTypeId && { ticketTypeId }),
         }
       : {};
 
@@ -1482,6 +1509,10 @@ export class TicketService {
           ...(responseDeadline && { responseDeadline }),
           ...(resolutionDeadline && { resolutionDeadline }),
           ...(dto.relatedTicketId && { relatedTicketId: dto.relatedTicketId }),
+          // El tipo es CLASIFICACIÓN, no salida del motor de SLA: se persiste
+          // también con `SLA_CASCADE_ENABLED` apagado (#48 T10), igual que en el
+          // portal. `slaPolicyId`/`slaSource` sí van gateados (`slaCascadeData`).
+          ...(ticketTypeId && { ticketTypeId }),
           // #42 Fase 2.1: el alta por ADMIN no escribe `reportedTicketTypeId` ni
           // `reportedCriticality` — quedan en null a propósito. Esas columnas son
           // la declaración del CLIENTE (solo el portal la produce); llenarlas acá

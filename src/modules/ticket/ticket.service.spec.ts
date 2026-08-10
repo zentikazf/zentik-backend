@@ -9,7 +9,7 @@ import { OutboxService } from '../sync/outbox.service';
 import { TaskHoursGuardService } from '../task/task-hours-guard.service';
 import { SlaResolverService } from '../sla/sla-resolver.service';
 import { CreateAdminTicketDto } from './dto/create-admin-ticket.dto';
-import { TicketCategoryDto, TicketPriorityDto } from './dto/create-ticket.dto';
+import { TicketCategoryDto, TicketCriticalityDto, TicketPriorityDto } from './dto/create-ticket.dto';
 
 // Cast puntual documentado: los getters de AppConfigService son read-only; el mock
 // los hace asignables en runtime pero TS sigue viendo el tipo real.
@@ -147,13 +147,16 @@ describe('TicketService — gate por categoría del outbox (feature #13)', () =>
 
   // ── Feature #42 (Fase 1): conmutación del motor de SLA ────────────────────
   describe('feature flag SLA_CASCADE_ENABLED', () => {
-    it('flag OFF (default): NO invoca la cascada ni escribe columnas SLA v2 (paridad con hoy)', async () => {
+    it('flag OFF (default): NO invoca la cascada ni escribe las columnas que ESA produce', async () => {
       await service.createTicket(ORG_ID, makeDto(TicketCategoryDto.SUPPORT_REQUEST), CREATED_BY);
 
       expect(slaResolver.resolveAndCalculateDeadlines).not.toHaveBeenCalled();
       const data = lastTx.ticket.create.mock.calls[0][0].data as Record<string, unknown>;
       expect(data).not.toHaveProperty('slaPolicyId');
       expect(data).not.toHaveProperty('slaSource');
+      // `ticketTypeId` no está porque este DTO no lo manda — NO porque el flag lo
+      // gatee. Desde #48 T10 el tipo se persiste con el flag apagado (ver el
+      // describe de T10 más abajo).
       expect(data).not.toHaveProperty('ticketTypeId');
     });
 
@@ -203,6 +206,165 @@ describe('TicketService — gate por categoría del outbox (feature #13)', () =>
         ),
       ).rejects.toMatchObject({ code: 'TICKET_TYPE_NOT_FOUND', statusCode: 404 });
       expect(slaResolver.resolveAndCalculateDeadlines).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * ── #48 T10 — el tipo es CLASIFICACIÓN, no salida del motor de SLA ────────
+   *
+   * Hasta acá el `ticketTypeId` del alta por admin viajaba dentro de
+   * `slaCascadeData`: con `SLA_CASCADE_ENABLED` apagado se descartaba en
+   * silencio y el ticket nacía sin tipo → condenado al 409 del candado de
+   * tipificación (#44) cuando alguien intentara resolverlo. El portal ya se
+   * había corregido por lo mismo; el admin quedó atrás.
+   *
+   * Estos tests corren con el flag APAGADO a propósito (memoria del proyecto:
+   * el camino viejo + payload nuevo es donde se colaron los bugs de #42).
+   */
+  describe('#48 T10 — el tipo se persiste con el flag APAGADO', () => {
+    it('flag OFF: el ticketTypeId del staff se guarda (antes se perdía en silencio)', async () => {
+      config.slaCascadeEnabled = false;
+      prisma.ticketType.findFirst.mockResolvedValue({ id: 'type-1' } as never);
+
+      await service.createTicket(
+        ORG_ID,
+        { ...makeDto(TicketCategoryDto.SUPPORT_REQUEST), ticketTypeId: 'type-1' },
+        CREATED_BY,
+      );
+
+      const data = lastTx.ticket.create.mock.calls[0][0].data as Record<string, unknown>;
+      expect(data).toMatchObject({ ticketTypeId: 'type-1' });
+      // …y la salida del MOTOR sigue gateada por el flag: lo que se sacó del gate
+      // es la clasificación, no la cascada.
+      expect(data).not.toHaveProperty('slaPolicyId');
+      expect(data).not.toHaveProperty('slaSource');
+      expect(slaResolver.resolveAndCalculateDeadlines).not.toHaveBeenCalled();
+    });
+
+    it('flag OFF: un tipo de OTRA organización se rechaza igual (el scoping no depende del flag)', async () => {
+      config.slaCascadeEnabled = false;
+      prisma.ticketType.findFirst.mockResolvedValue(null as never);
+
+      await expect(
+        service.createTicket(
+          ORG_ID,
+          { ...makeDto(TicketCategoryDto.SUPPORT_REQUEST), ticketTypeId: 'type-de-otra-org' },
+          CREATED_BY,
+        ),
+      ).rejects.toMatchObject({ code: 'TICKET_TYPE_NOT_FOUND', statusCode: 404 });
+    });
+  });
+
+  /**
+   * ── #48 T10 — criticidad elegida por el EQUIPO (R8.2) ──────────────────────
+   *
+   * Antes la única fuente era `categoryConfig.criticality`: un alta sin
+   * "Categoría SLA" nacía sin criticidad, y el campo "Criticidad" del modal en
+   * realidad escribía `priority` (otra columna, otro dominio).
+   */
+  describe('#48 T10 — criticidad del staff', () => {
+    it('persiste la criticidad que mandó el equipo', async () => {
+      config.slaCascadeEnabled = false;
+      slaResolver.findLegacySlaConfig.mockResolvedValue(null as never);
+
+      await service.createTicket(
+        ORG_ID,
+        { ...makeDto(TicketCategoryDto.SUPPORT_REQUEST), criticality: TicketCriticalityDto.CRITICAL },
+        CREATED_BY,
+      );
+
+      const data = lastTx.ticket.create.mock.calls[0][0].data as Record<string, unknown>;
+      expect(data).toMatchObject({ criticality: 'CRITICAL' });
+      // Sigue siendo un campo DISTINTO de `priority` (el modal viejo confundía los dos).
+      expect(data).toMatchObject({ priority: 'MEDIUM' });
+    });
+
+    it('la criticidad del equipo GANA sobre la derivada de la categoría SLA', async () => {
+      config.slaCascadeEnabled = false;
+      slaResolver.findLegacySlaConfig.mockResolvedValue(null as never);
+      prisma.ticketCategoryConfig.findFirst.mockResolvedValue({
+        id: 'cat-1',
+        criticality: 'LOW',
+      } as never);
+
+      await service.createTicket(
+        ORG_ID,
+        {
+          ...makeDto(TicketCategoryDto.SUPPORT_REQUEST),
+          categoryConfigId: 'cat-1',
+          criticality: TicketCriticalityDto.HIGH,
+        },
+        CREATED_BY,
+      );
+
+      const data = lastTx.ticket.create.mock.calls[0][0].data as Record<string, unknown>;
+      expect(data).toMatchObject({ criticality: 'HIGH', categoryConfigId: 'cat-1' });
+    });
+
+    it('sin criticidad en el DTO manda la categoría SLA (comportamiento previo intacto)', async () => {
+      config.slaCascadeEnabled = false;
+      slaResolver.findLegacySlaConfig.mockResolvedValue(null as never);
+      prisma.ticketCategoryConfig.findFirst.mockResolvedValue({
+        id: 'cat-1',
+        criticality: 'LOW',
+      } as never);
+
+      await service.createTicket(
+        ORG_ID,
+        { ...makeDto(TicketCategoryDto.SUPPORT_REQUEST), categoryConfigId: 'cat-1' },
+        CREATED_BY,
+      );
+
+      const data = lastTx.ticket.create.mock.calls[0][0].data as Record<string, unknown>;
+      expect(data).toMatchObject({ criticality: 'LOW' });
+    });
+
+    /**
+     * El bug de "payload nuevo + camino viejo": el gate del path legacy era
+     * `else if (categoryConfig)`. Con el flag apagado, una criticidad suelta (sin
+     * categoría SLA) no entraba ni a la cascada ni al path legacy → el ticket se
+     * guardaba SIN deadlines, en silencio y para siempre (se congelan al crear).
+     * Ahora el gate es `criticality`, espejo de la corrección ya aplicada al portal.
+     */
+    it('flag OFF + criticidad SIN categoría SLA: calcula deadlines por el path legacy', async () => {
+      config.slaCascadeEnabled = false;
+      slaResolver.findLegacySlaConfig.mockResolvedValue({
+        responseTimeMinutes: 60,
+        resolutionTimeMinutes: 240,
+      } as never);
+      prisma.businessHoursConfig.findUnique.mockResolvedValue(null as never);
+      prisma.holiday.findMany.mockResolvedValue([] as never);
+
+      await service.createTicket(
+        ORG_ID,
+        { ...makeDto(TicketCategoryDto.SUPPORT_REQUEST), criticality: TicketCriticalityDto.HIGH },
+        CREATED_BY,
+      );
+
+      expect(slaResolver.findLegacySlaConfig).toHaveBeenCalledWith(ORG_ID, 'HIGH');
+      const data = lastTx.ticket.create.mock.calls[0][0].data as Record<string, unknown>;
+      expect(data.responseDeadline).toBeInstanceOf(Date);
+      expect(data.resolutionDeadline).toBeInstanceOf(Date);
+    });
+
+    it('flag ON: la criticidad del equipo viaja a la cascada (paso 4)', async () => {
+      config.slaCascadeEnabled = true;
+      slaResolver.resolveAndCalculateDeadlines.mockResolvedValue({
+        policy: { id: 'policy-1' },
+        source: 'CRITICALITY',
+        responseDeadline: null,
+        resolutionDeadline: null,
+      } as never);
+
+      await service.createTicket(
+        ORG_ID,
+        { ...makeDto(TicketCategoryDto.SUPPORT_REQUEST), criticality: TicketCriticalityDto.CRITICAL },
+        CREATED_BY,
+      );
+
+      expect(slaResolver.resolveAndCalculateDeadlines).toHaveBeenCalledWith(
+        expect.objectContaining({ criticality: 'CRITICAL' }),
+      );
     });
   });
 

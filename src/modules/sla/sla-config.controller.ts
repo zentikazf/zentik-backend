@@ -195,9 +195,17 @@ export class SlaConfigController {
     return this.contracts.upsertForProject(orgId, projectId, dto, user.id);
   }
 
+  /**
+   * Vista de STAFF del mismo dato que consume el portal.
+   *
+   * `audience: 'STAFF'` (#48 R2.2, call site 3): NO filtra por `clientVisible`.
+   * El equipo ve el árbol completo, carpetas incluidas — puede tipificar un
+   * ticket con un tipo que el cliente no puede elegir.
+   */
   @Get('projects/:projectId/available-ticket-types')
   @ApiOperation({
-    summary: 'Tipos disponibles del proyecto (contratados; permisivo + fallback si no hay contratos)',
+    summary:
+      'Tipos disponibles del proyecto para STAFF (contratados; permisivo + fallback si no hay contratos). No oculta carpetas.',
   })
   @ApiQuery({ name: 'criticality', required: false, enum: ['HIGH', 'MEDIUM', 'LOW'] })
   getAvailableTicketTypes(
@@ -205,7 +213,10 @@ export class SlaConfigController {
     @Param('projectId') projectId: string,
     @Query() query: AvailableTicketTypesQueryDto,
   ) {
-    return this.availability.getAvailableTypes(orgId, projectId, parseCriticality(query.criticality));
+    return this.availability.getAvailableTypes(orgId, projectId, {
+      criticality: parseCriticality(query.criticality),
+      audience: 'STAFF',
+    });
   }
 
   @Patch('projects/:projectId/sla-policy')

@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsOptional, IsString, Matches, MaxLength, MinLength } from 'class-validator';
+import { IsBoolean, IsOptional, IsString, Matches, MaxLength, MinLength } from 'class-validator';
 
 export class CreateTicketTypeDto {
   @ApiProperty({ example: 'Incidencia', description: 'Nombre del tipo de solicitud' })
@@ -30,4 +30,19 @@ export class CreateTicketTypeDto {
   @IsOptional()
   @IsString()
   parentId?: string | null;
+
+  /**
+   * El "ojito" (#48 R1). `false` = carpeta pura: agrupa y ordena, pero el cliente
+   * no la ve ni la elige — sus hijos contratados sí se siguen ofreciendo.
+   *
+   * Ausente = `true` (el default de la columna). Un tipo nuevo nace visible: lo
+   * contrario dejaría tipos invisibles sin que nadie lo haya pedido.
+   */
+  @ApiPropertyOptional({
+    default: true,
+    description: 'Si el tipo se ofrece como opción al cliente. false = carpeta pura.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  clientVisible?: boolean;
 }
