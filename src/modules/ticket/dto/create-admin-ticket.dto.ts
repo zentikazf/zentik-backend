@@ -1,6 +1,6 @@
 import { IsString, IsEnum, IsOptional, MinLength, MaxLength } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { TicketCategoryDto, TicketPriorityDto } from './create-ticket.dto';
+import { TicketCategoryDto, TicketCriticalityDto, TicketPriorityDto } from './create-ticket.dto';
 
 export class CreateAdminTicketDto {
   @ApiProperty({ example: 'Error al cargar la factura', description: 'Titulo del ticket' })
@@ -45,11 +45,33 @@ export class CreateAdminTicketDto {
 
   @ApiPropertyOptional({
     description:
-      'ID del tipo de solicitud (feature #42). Solo se usa/persiste con SLA_CASCADE_ENABLED=true: ' +
-      'es la clave del paso 1 de la cascada (contrato proyecto+tipo).',
+      'ID del tipo de solicitud (feature #42). Es CLASIFICACIÓN, no salida del motor de SLA: ' +
+      'se persiste SIEMPRE, con `SLA_CASCADE_ENABLED` prendido o apagado (#48 T10). ' +
+      'Además es la clave del paso 1 de la cascada (contrato proyecto+tipo) cuando el flag está ON.',
   })
   @IsOptional()
   @IsString()
   @MaxLength(30, { message: 'ticketTypeId inválido' })
   ticketTypeId?: string;
+
+  /**
+   * Criticidad REAL del ticket, elegida por el equipo (#48 T10 / R8.2).
+   *
+   * Antes el staff no podía fijarla ni por API: la única fuente era
+   * `categoryConfig.criticality`, así que un alta sin "Categoría SLA" nacía sin
+   * criticidad. El campo "Criticidad" del modal en realidad escribía `priority`
+   * (otra columna, otro dominio).
+   *
+   * NO se valida contra `clientVisible`: eso es una regla del PORTAL (qué puede
+   * elegir el cliente). El staff ve y elige todas — misma regla que el ojito de
+   * los tipos (#48 R2.1: el flag solo filtra la lectura del cliente).
+   */
+  @ApiPropertyOptional({
+    enum: TicketCriticalityDto,
+    description:
+      'Criticidad determinada por el equipo. Si no viene, se usa la de `categoryConfigId` (comportamiento previo).',
+  })
+  @IsOptional()
+  @IsEnum(TicketCriticalityDto, { message: 'La criticidad no es valida' })
+  criticality?: TicketCriticalityDto;
 }
