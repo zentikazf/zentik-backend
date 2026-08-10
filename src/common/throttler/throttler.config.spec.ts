@@ -1,5 +1,5 @@
 import { ExecutionContext } from '@nestjs/common';
-import { isAuthEmailPath, buildThrottlerOptions } from './throttler.config';
+import { isAuthEmailPath, buildThrottlerOptions, TRUST_PROXY_HOPS } from './throttler.config';
 
 /**
  * Tests de la config del throttler (#45). `isAuthEmailPath` decide qué tiers
@@ -11,6 +11,32 @@ const ctxOf = (path: string, type: 'http' | 'ws' = 'http'): ExecutionContext =>
     getType: () => type,
     switchToHttp: () => ({ getRequest: () => ({ path }) }),
   }) as unknown as ExecutionContext;
+
+describe('TRUST_PROXY_HOPS (#46 R2)', () => {
+  it('vale 2: el hop count verificado contra Railway (con 1, `req.ip` se quedaba en el edge)', () => {
+    expect(TRUST_PROXY_HOPS).toBe(2);
+  });
+
+  it('es un entero, nunca `true` (con `true` el XFF que escribe el cliente es falsificable)', () => {
+    expect(typeof TRUST_PROXY_HOPS).toBe('number');
+    expect(Number.isInteger(TRUST_PROXY_HOPS)).toBe(true);
+  });
+
+  it('ninguna env lo pisa: es constante, no configuración', () => {
+    const prev = process.env.TRUST_PROXY_HOPS;
+    process.env.TRUST_PROXY_HOPS = '9';
+    try {
+      let fresh: number | undefined;
+      jest.isolateModules(() => {
+        fresh = (require('./throttler.config') as typeof import('./throttler.config')).TRUST_PROXY_HOPS;
+      });
+      expect(fresh).toBe(2);
+    } finally {
+      if (prev === undefined) delete process.env.TRUST_PROXY_HOPS;
+      else process.env.TRUST_PROXY_HOPS = prev;
+    }
+  });
+});
 
 describe('isAuthEmailPath (#45 T3)', () => {
   it.each(['/api/v1/auth/login', '/api/v1/auth/register', '/auth/login', '/auth/register'])(

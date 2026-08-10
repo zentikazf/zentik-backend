@@ -30,25 +30,11 @@ export const envSchema = z.object({
   SENTRY_DSN: z.string().optional(),
   LOG_LEVEL: z.enum(['error', 'warn', 'info', 'debug']).default('debug'),
 
-  // === Rate-limit / trust proxy (#45) ===
-  // Cantidad de proxies de confianza entre el cliente y la app (Railway pone N
-  // hops en X-Forwarded-For). `req.ip` se deriva saltando estos hops desde el
-  // socket. VERIFICADO contra Railway real 2026-08-07 (DEBUG_TRUST_PROXY):
-  //   xff="<cliente>, 152.233.23.x(edge)"  socket=100.64.0.x(interno)
-  // → con hops=2 `req.ip` = la IP REAL del cliente; con hops=1 se quedaba en el
-  //   edge de Railway (solo 2 IPs, compartidas por todos). Default 2.
-  // ⚠️ NUNCA `true`: haría el XFF más a la izquierda (escrito por el cliente)
-  // falsificable → evasión del límite y lock de terceros en /login. Con hops=2 un
-  // XFF inyectado por el cliente queda a la izquierda de los 2 hops de Railway y
-  // se ignora. Tuneable por env sin re-deploy de código.
-  TRUST_PROXY_HOPS: z.coerce.number().int().min(0).default(2),
-  // Flag TEMPORAL: loguea el `x-forwarded-for` crudo + `req.ip` resuelto para
-  // contar los hops reales de Railway. Apagar tras fijar TRUST_PROXY_HOPS.
-  DEBUG_TRUST_PROXY: z.enum(['true', 'false']).default('false'),
-  // Contador de duplicados (#45 D4): loguea `warn` cuando un mismo (sesión,
-  // método, ruta) supera el umbral dentro de la ventana. Diagnóstico, NO bloquea.
-  DUP_REQUEST_WARN_THRESHOLD: z.coerce.number().int().min(1).default(3),
-  DUP_REQUEST_WINDOW_MS: z.coerce.number().int().min(100).default(1000),
+  // Rate-limit / trust proxy (#45): NO tiene variables de entorno. El hop count
+  // de Railway y los umbrales del contador de duplicados son constantes en el
+  // código (#46 R2/R3): no cambian entre entornos, y como env se podían pisar en
+  // silencio desde el panel. Ver common/throttler/throttler.config.ts y
+  // common/middleware/duplicate-request.middleware.ts.
 
   // Prisma $transaction tunables. Default seguro para dev con BD remota (Railway):
   // 15s para tx que hacen 6-10 queries secuenciales con latencia ~300ms. En prod

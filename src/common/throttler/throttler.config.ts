@@ -8,6 +8,30 @@ import { sessionTracker, authEmailTracker, authIpTracker } from './tracker.util'
  */
 
 /**
+ * Hops de proxy de confianza entre el cliente y la app — `app.set('trust proxy')`
+ * en main.ts (#45 T1).
+ *
+ * Railway pone 2 proxies delante y `req.ip` se deriva saltando esos hops desde el
+ * socket. VERIFICADO contra Railway real el 2026-08-07 con un log temporal del XFF:
+ *   xff="<cliente>, 152.233.23.x (edge)"   socket=100.64.0.x (interno, CGNAT)
+ * → con `hops=2` `req.ip` es la IP REAL del cliente; con `hops=1` se quedaba en el
+ *   edge de Railway (2 IPs para TODOS → el bucket del rate-limit colapsado y los
+ *   registros de auditoría de IP guardando basura).
+ *
+ * Constante y no env (#46 R2): el hop count no cambia entre entornos — es una
+ * propiedad de Railway, el único lugar donde esto se deploya. Como variable vivía
+ * en dos lados, y un valor mal puesto en el panel pisaba EN SILENCIO el número
+ * verificado contra la infraestructura real. Si Railway cambia su topología: se
+ * corrige acá y se deploya (evento raro y visible).
+ *
+ * ⚠️ NÚMERO, nunca `true`: con `true` Express toma el XFF más a la izquierda —el
+ * que escribe el cliente— y se vuelve falsificable (evasión del límite + lock de
+ * terceros en /login). Con `hops=2` un XFF inyectado por el cliente queda a la
+ * izquierda de los 2 hops de Railway y se ignora.
+ */
+export const TRUST_PROXY_HOPS = 2;
+
+/**
  * Rutas de auth SIN sesión (login/registro): se trackean por email+IP, no por
  * sesión. Se matchea por sufijo del path (robusto al global prefix `/api/v1`).
  *
