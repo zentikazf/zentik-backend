@@ -15,6 +15,16 @@ export interface ProjectContractRow {
   slaPolicyName: string | null;
   contractNotes: string | null;
   isActive: boolean;
+  // ── #48 T1b: la jerarquía viaja con la fila ────────────────────────────────
+  // El centro de contratación agrupa por rama (padre colapsable + un check por
+  // hijo) y necesita el árbol. Antes tenía que pedir el catálogo de tipos aparte
+  // para reconstruirlo — un tercer fetch cuyo fallo se tragaba en silencio.
+  /** `null` = tipo raíz. */
+  parentId: string | null;
+  /** Ruta de SLUGS desde la raíz. Es para ORDENAR y agrupar, no para mostrar. */
+  path: string;
+  /** Profundidad: 0 = raíz. Sirve para indentar. */
+  level: number;
 }
 
 /** Cobertura de contratos de UN proyecto. */
@@ -48,7 +58,10 @@ export class SlaContractService {
     const [types, contracts] = await Promise.all([
       this.prisma.ticketType.findMany({
         where: { organizationId: orgId, isActive: true },
-        orderBy: { name: 'asc' },
+        // #48 T1b: por `path` primero, así cada hijo cae inmediatamente debajo de
+        // su padre. Con `{ name: 'asc' }` padre e hijos quedaban en posiciones
+        // arbitrarias de la lista y el árbol había que rearmarlo en el cliente.
+        orderBy: [{ path: 'asc' }, { name: 'asc' }],
       }),
       this.prisma.projectTicketTypeSla.findMany({
         where: { projectId },
@@ -68,6 +81,9 @@ export class SlaContractService {
         slaPolicyName: covered ? contract!.slaPolicy.name : null,
         contractNotes: contract?.contractNotes ?? null,
         isActive: covered,
+        parentId: type.parentId,
+        path: type.path,
+        level: type.level,
       };
     });
 
@@ -106,8 +122,25 @@ export class SlaContractService {
       );
     }
 
+    // Filas que se CONTRATAN (crear o actualizar) vs. las que solo DESCONTRATAN.
+    // Solo las primeras necesitan política: descontratar es apagar la fila que ya
+    // existe, y no tiene por qué saber con qué se atendía (#48 T1).
+    const contractedItems = dto.items.filter((i) => i.isActive !== false);
+    const missingPolicy = contractedItems.filter((i) => !i.slaPolicyId);
+    if (missingPolicy.length > 0) {
+      // Defensa en profundidad: el DTO ya lo exige vía @ValidateIf. Si el service
+      // se llama desde otro path, mejor un 422 que nombra el problema que un
+      // error crudo de Prisma por un FK `undefined`.
+      throw new AppException(
+        'Un contrato activo necesita su política SLA',
+        'SLA_POLICY_REQUIRED',
+        422,
+        { ticketTypeIds: missingPolicy.map((i) => i.ticketTypeId) },
+      );
+    }
+
     const uniqueTypeIds = [...new Set(typeIds)];
-    const uniquePolicyIds = [...new Set(dto.items.map((i) => i.slaPolicyId))];
+    const uniquePolicyIds = [...new Set(contractedItems.map((i) => i.slaPolicyId as string))];
 
     if (uniqueTypeIds.length > 0) {
       const typeCount = await this.prisma.ticketType.count({
@@ -137,6 +170,23 @@ export class SlaContractService {
 
     await this.prisma.$transaction(async (tx) => {
       for (const item of dto.items) {
+        if (item.isActive === false) {
+          // ── DESCONTRATAR (#48 T1) ─────────────────────────────────────────
+          // `updateMany` y no `upsert`: una fila desactivada que no existía es
+          // inexpresable (`sla_policy_id` es NOT NULL) y además no significa
+          // nada — si no había contrato, no hay nada que apagar. `updateMany`
+          // hace ese no-op sin una consulta previa.
+          //
+          // Solo se toca `isActive`: la política y las notas quedan como
+          // estaban. Descontratar es apagar la fila, no reescribir su historia;
+          // así, reactivarla muestra con qué se atendía antes.
+          await tx.projectTicketTypeSla.updateMany({
+            where: { projectId, ticketTypeId: item.ticketTypeId },
+            data: { isActive: false },
+          });
+          continue;
+        }
+
         await tx.projectTicketTypeSla.upsert({
           where: {
             projectId_ticketTypeId: { projectId, ticketTypeId: item.ticketTypeId },
@@ -144,14 +194,14 @@ export class SlaContractService {
           create: {
             projectId,
             ticketTypeId: item.ticketTypeId,
-            slaPolicyId: item.slaPolicyId,
+            slaPolicyId: item.slaPolicyId as string,
             contractNotes: item.contractNotes ?? null,
-            isActive: item.isActive ?? true,
+            isActive: true,
           },
           update: {
-            slaPolicyId: item.slaPolicyId,
+            slaPolicyId: item.slaPolicyId as string,
             contractNotes: item.contractNotes ?? null,
-            isActive: item.isActive ?? true,
+            isActive: true,
           },
         });
       }
