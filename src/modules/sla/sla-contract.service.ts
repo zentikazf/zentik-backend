@@ -25,6 +25,14 @@ export interface ProjectContractRow {
   path: string;
   /** Profundidad: 0 = raíz. Sirve para indentar. */
   level: number;
+  /**
+   * El "ojito" del TIPO (#48 R5.8). Viaja acá para que el centro de contratación
+   * pueda mostrarlo y togglearlo sin un fetch extra del catálogo.
+   *
+   * ⚠️ Es del tipo y GLOBAL a la organización, no del proyecto: apagarlo desde
+   * esta pantalla lo apaga en todas. La UI tiene que decirlo.
+   */
+  clientVisible: boolean;
 }
 
 /** Cobertura de contratos de UN proyecto. */
@@ -84,6 +92,7 @@ export class SlaContractService {
         parentId: type.parentId,
         path: type.path,
         level: type.level,
+        clientVisible: type.clientVisible,
       };
     });
 
@@ -92,6 +101,10 @@ export class SlaContractService {
         id: project.id,
         name: project.name,
         slaPolicyId: project.slaPolicyId,
+        // #48 R5.3: el centro de contratación es una ruta propia y su header
+        // tiene que decir de qué cliente es el proyecto. Va acá para que siga
+        // siendo UN solo fetch.
+        client: project.client,
       },
       items,
       coverage: this.buildCoverage(types, items),
@@ -263,12 +276,30 @@ export class SlaContractService {
   }
 
   /**
-   * Cobertura global: todos los proyectos ACTIVOS × tipos activos, marcando los
-   * pares sin contrato. Los proyectos archivados/deshabilitados se excluyen: no
-   * reciben tickets nuevos y solo ensuciarían el checklist.
+   * Índice de cobertura: los proyectos ACTIVOS con lo mínimo para elegir a cuál
+   * entrar. Los archivados/deshabilitados se excluyen: no reciben tickets nuevos
+   * y solo ensuciarían la lista.
+   *
+   * ── Qué NO devuelve, y por qué (#48 R4.3, decisión 5 del dueño) ─────────────
+   * Salieron `isComplete`, `coveredTypes`, `missingTypes` y `completeProjects`.
+   * "Cobertura completa" nunca fue una meta: contratar los 40 tipos en los 30
+   * proyectos no es el objetivo, y un ✅/⚠️ binario sobre esa idea empujaba a
+   * perseguir un 100% que nadie quiere. Además obligaba a traer el catálogo
+   * entero para restarlo por proyecto.
+   *
+   * ── El eje que SÍ importa (#48 R4.4) ────────────────────────────────────────
+   * "Qué ve el cliente": `clientSeesAllTypes` (modo permisivo) vs.
+   * `clientVisibleTypeCount`. Antes ese dato estaba mezclado con el estado del
+   * SLA, y por eso una fila podía contradecirse sola: "0 de 12 con contrato" y a
+   * la vez el portal ofreciéndole los 12 al cliente (justamente PORQUE no hay
+   * contratos → permisivo).
+   *
+   * El conteo espeja el criterio de `TicketTypeAvailabilityService`: contrato
+   * activo + política viva + tipo activo Y `clientVisible`. Si divergieran, esta
+   * pantalla diría un número y el portal ofrecería otro.
    */
   async getCoverage(orgId: string) {
-    const [projects, types] = await Promise.all([
+    const [projects, visibleTypeCount] = await Promise.all([
       this.prisma.project.findMany({
         where: { organizationId: orgId, lifecycleStatus: ProjectLifecycleStatus.ACTIVE },
         select: {
@@ -276,20 +307,28 @@ export class SlaContractService {
           name: true,
           slaPolicyId: true,
           client: { select: { id: true, name: true, defaultSlaPolicyId: true } },
-          slaContracts: { where: { isActive: true }, select: { ticketTypeId: true } },
+          slaContracts: {
+            where: {
+              isActive: true,
+              slaPolicy: { organizationId: orgId, isActive: true },
+              ticketType: { organizationId: orgId, isActive: true, clientVisible: true },
+            },
+            select: { ticketTypeId: true },
+          },
         },
         orderBy: { name: 'asc' },
       }),
-      this.prisma.ticketType.findMany({
-        where: { organizationId: orgId, isActive: true },
-        select: { id: true, name: true },
-        orderBy: { name: 'asc' },
+      this.prisma.ticketType.count({
+        where: { organizationId: orgId, isActive: true, clientVisible: true },
       }),
     ]);
 
     const items = projects.map((project) => {
-      const coveredTypeIds = new Set(project.slaContracts.map((c) => c.ticketTypeId));
-      const missingTypes = types.filter((t) => !coveredTypeIds.has(t.id));
+      const offered = new Set(project.slaContracts.map((c) => c.ticketTypeId)).size;
+      // Sin contratos APLICABLES el portal es permisivo y ofrece todo lo visible.
+      // Ojo: "aplicables" ya descuenta los que apuntan a carpetas ocultas, que es
+      // exactamente el caso que hace caer al modo permisivo (#48 R2.4).
+      const seesAll = offered === 0;
       return {
         projectId: project.id,
         projectName: project.name,
@@ -297,17 +336,17 @@ export class SlaContractService {
         clientName: project.client?.name ?? null,
         hasProjectPolicy: !!project.slaPolicyId,
         hasClientPolicy: !!project.client?.defaultSlaPolicyId,
-        totalTypes: types.length,
-        coveredTypes: types.length - missingTypes.length,
-        missingTypes,
-        isComplete: missingTypes.length === 0,
+        /** Modo permisivo: el proyecto no tiene contratos aplicables. */
+        clientSeesAllTypes: seesAll,
+        /** Cuántos tipos puede elegir HOY el cliente en este proyecto. */
+        clientVisibleTypeCount: seesAll ? visibleTypeCount : offered,
       };
     });
 
     return {
       totalProjects: items.length,
-      totalTypes: types.length,
-      completeProjects: items.filter((i) => i.isComplete).length,
+      /** Tipos activos y visibles al cliente en la organización. */
+      totalVisibleTypes: visibleTypeCount,
       items,
     };
   }
@@ -331,7 +370,12 @@ export class SlaContractService {
   private async assertProject(orgId: string, projectId: string) {
     const project = await this.prisma.project.findFirst({
       where: { id: projectId, organizationId: orgId },
-      select: { id: true, name: true, slaPolicyId: true },
+      select: {
+        id: true,
+        name: true,
+        slaPolicyId: true,
+        client: { select: { id: true, name: true } },
+      },
     });
     if (!project) {
       throw new AppException('Proyecto no encontrado', 'PROJECT_NOT_FOUND', 404);

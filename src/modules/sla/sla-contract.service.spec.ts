@@ -41,6 +41,8 @@ describe('SlaContractService — upsertForProject (#48 T1)', () => {
     parentId: null,
     path: 'incidencia',
     level: 0,
+    // Carpeta pura: el padre no se le ofrece al cliente, pero sus hijos sí.
+    clientVisible: false,
   };
   const hijo = {
     id: 'type-err',
@@ -49,6 +51,7 @@ describe('SlaContractService — upsertForProject (#48 T1)', () => {
     parentId: 'type-inc',
     path: 'incidencia/error-del-sistema',
     level: 1,
+    clientVisible: true,
   };
 
   beforeEach(() => {
@@ -255,6 +258,8 @@ describe('SlaContractService — getByProject: jerarquía en la matriz (#48 T1b)
     parentId: null,
     path: 'incidencia',
     level: 0,
+    // Carpeta pura: el padre no se le ofrece al cliente, pero sus hijos sí.
+    clientVisible: false,
   };
   const hijo = {
     id: 'type-err',
@@ -263,6 +268,7 @@ describe('SlaContractService — getByProject: jerarquía en la matriz (#48 T1b)
     parentId: 'type-inc',
     path: 'incidencia/error-del-sistema',
     level: 1,
+    clientVisible: true,
   };
 
   beforeEach(() => {
@@ -275,7 +281,7 @@ describe('SlaContractService — getByProject: jerarquía en la matriz (#48 T1b)
     } as never);
   });
 
-  it('cada fila trae parentId, path y level', async () => {
+  it('cada fila trae parentId, path, level y clientVisible', async () => {
     prisma.ticketType.findMany.mockResolvedValue([padre, hijo] as never);
     prisma.projectTicketTypeSla.findMany.mockResolvedValue([
       {
@@ -297,6 +303,8 @@ describe('SlaContractService — getByProject: jerarquía en la matriz (#48 T1b)
         path: 'incidencia',
         level: 0,
         isActive: false,
+        // La carpeta viaja igual: el staff la ve y la administra desde acá.
+        clientVisible: false,
       }),
       expect.objectContaining({
         ticketTypeId: hijo.id,
@@ -304,6 +312,7 @@ describe('SlaContractService — getByProject: jerarquía en la matriz (#48 T1b)
         path: 'incidencia/error-del-sistema',
         level: 1,
         isActive: true,
+        clientVisible: true,
         slaPolicyName: 'Crítica 4h',
       }),
     ]);
@@ -318,6 +327,116 @@ describe('SlaContractService — getByProject: jerarquía en la matriz (#48 T1b)
     expect(prisma.ticketType.findMany.mock.calls[0][0]).toMatchObject({
       where: { organizationId: ORG, isActive: true },
       orderBy: [{ path: 'asc' }, { name: 'asc' }],
+    });
+  });
+});
+
+/**
+ * #48 T6 — el índice de cobertura, adelgazado.
+ *
+ * Salieron `isComplete`/`coveredTypes`/`missingTypes` (decisión 5 del dueño) y
+ * entró el eje que faltaba: QUÉ VE EL CLIENTE. El test que importa es el de la
+ * contradicción vieja — un proyecto sin contratos aparecía como "0 cubiertos"
+ * mientras el portal le ofrecía TODO al cliente, justamente porque no los tiene.
+ *
+ * No había ningún test de `getCoverage` antes de esta feature.
+ */
+describe('SlaContractService — getCoverage (#48 T6)', () => {
+  let service: SlaContractService;
+  let prisma: DeepMockProxy<PrismaService>;
+
+  const ORG = 'org-1';
+
+  const project = (over: Record<string, unknown> = {}) => ({
+    id: 'p-1',
+    name: 'Proyecto Demo',
+    slaPolicyId: null,
+    client: { id: 'c-1', name: 'Cliente Demo', defaultSlaPolicyId: null },
+    slaContracts: [],
+    ...over,
+  });
+
+  beforeEach(() => {
+    prisma = mockDeep<PrismaService>();
+    service = new SlaContractService(prisma, mockDeep<EventEmitter2>());
+    prisma.ticketType.count.mockResolvedValue(12 as never);
+  });
+
+  it('ya NO devuelve isComplete, coveredTypes ni missingTypes', async () => {
+    prisma.project.findMany.mockResolvedValue([project()] as never);
+
+    const res = await service.getCoverage(ORG);
+
+    expect(res).not.toHaveProperty('completeProjects');
+    expect(res).not.toHaveProperty('totalTypes');
+    expect(res.items[0]).not.toHaveProperty('isComplete');
+    expect(res.items[0]).not.toHaveProperty('coveredTypes');
+    expect(res.items[0]).not.toHaveProperty('missingTypes');
+  });
+
+  it('proyecto SIN contratos aplicables → permisivo: el cliente ve TODOS los tipos visibles', async () => {
+    prisma.project.findMany.mockResolvedValue([project()] as never);
+
+    const res = await service.getCoverage(ORG);
+
+    expect(res.items[0]).toMatchObject({
+      clientSeesAllTypes: true,
+      clientVisibleTypeCount: 12,
+    });
+    expect(res.totalVisibleTypes).toBe(12);
+  });
+
+  it('proyecto CON contratos → el cliente ve exactamente esos', async () => {
+    prisma.project.findMany.mockResolvedValue([
+      project({ slaContracts: [{ ticketTypeId: 't-1' }, { ticketTypeId: 't-2' }] }),
+    ] as never);
+
+    const res = await service.getCoverage(ORG);
+
+    expect(res.items[0]).toMatchObject({
+      clientSeesAllTypes: false,
+      clientVisibleTypeCount: 2,
+    });
+  });
+
+  /**
+   * El criterio de "contrato aplicable" tiene que ser EL MISMO que el de la
+   * disponibilidad del portal. Si divergieran, esta pantalla diría un número y el
+   * portal ofrecería otro — que es justo la contradicción que #48 viene a matar.
+   */
+  it('solo cuenta contratos vivos sobre tipos activos Y VISIBLES (mismo criterio que el portal)', async () => {
+    prisma.project.findMany.mockResolvedValue([project()] as never);
+
+    await service.getCoverage(ORG);
+
+    const select = (prisma.project.findMany.mock.calls[0][0] as { select: any }).select;
+    expect(select.slaContracts.where).toMatchObject({
+      isActive: true,
+      slaPolicy: { organizationId: ORG, isActive: true },
+      ticketType: { organizationId: ORG, isActive: true, clientVisible: true },
+    });
+    expect(prisma.ticketType.count.mock.calls[0][0]).toMatchObject({
+      where: { organizationId: ORG, isActive: true, clientVisible: true },
+    });
+  });
+
+  it('un proyecto cuyos únicos contratos son carpetas ocultas cae a permisivo, no a "0 tipos"', async () => {
+    // El `where` con `clientVisible: true` deja `slaContracts` vacío.
+    prisma.project.findMany.mockResolvedValue([project({ slaContracts: [] })] as never);
+
+    const res = await service.getCoverage(ORG);
+
+    expect(res.items[0].clientSeesAllTypes).toBe(true);
+    expect(res.items[0].clientVisibleTypeCount).toBe(12);
+  });
+
+  it('solo proyectos ACTIVOS (los archivados no reciben tickets nuevos)', async () => {
+    prisma.project.findMany.mockResolvedValue([] as never);
+
+    await service.getCoverage(ORG);
+
+    expect(prisma.project.findMany.mock.calls[0][0]).toMatchObject({
+      where: { organizationId: ORG, lifecycleStatus: 'ACTIVE' },
     });
   });
 });
