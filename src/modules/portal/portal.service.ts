@@ -778,11 +778,11 @@ export class PortalService {
       throw new AppException('Proyecto no encontrado', 'PROJECT_NOT_FOUND', 404);
     }
 
-    return this.ticketTypeAvailability.getAvailableTypes(
-      project.organizationId,
-      project.id,
-      parseCriticality(criticality),
-    );
+    // Lectura del CLIENTE: filtra por `clientVisible` (#48 R2.2, call site 1).
+    return this.ticketTypeAvailability.getAvailableTypes(project.organizationId, project.id, {
+      criticality: parseCriticality(criticality),
+      audience: 'CLIENT',
+    });
   }
 
   async getMyHours(userId: string) {

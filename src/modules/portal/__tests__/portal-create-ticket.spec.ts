@@ -424,7 +424,12 @@ describe('PortalService — criticidades y tipos del portal (#42 Fase 2)', () =>
     expect(prisma.project.findFirst.mock.calls[0][0]).toMatchObject({
       where: { id: PROJECT, clientId: CLIENT },
     });
-    expect(availability.getAvailableTypes).toHaveBeenCalledWith(ORG, PROJECT, TicketCriticality.HIGH);
+    // #48 T3: el portal pregunta SIEMPRE como CLIENTE — es la lectura que filtra
+    // por `clientVisible`. Sin default en la firma, elegirlo es obligatorio acá.
+    expect(availability.getAvailableTypes).toHaveBeenCalledWith(ORG, PROJECT, {
+      criticality: TicketCriticality.HIGH,
+      audience: 'CLIENT',
+    });
   });
 
   it('getProjectTicketTypes rechaza una criticidad que no existe en el enum', async () => {

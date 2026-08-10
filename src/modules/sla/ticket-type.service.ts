@@ -130,6 +130,9 @@ export class TicketTypeService {
           parentId: parent?.id ?? null,
           path: this.buildPath(parent?.path ?? '', slug),
           level,
+          // #48 R1: ausente = el default de la columna (`true`). Un tipo nuevo
+          // nace visible.
+          ...(dto.clientVisible !== undefined && { clientVisible: dto.clientVisible }),
         },
       }),
     );
@@ -202,6 +205,10 @@ export class TicketTypeService {
             ...(name !== undefined && { name }),
             ...(slug !== undefined && { slug }),
             ...(dto.isActive !== undefined && { isActive: dto.isActive }),
+            // #48 R6.3: el ojito es PRESENTACIÓN. No cascadea a la rama (a
+            // diferencia de `isActive`) ni toca contratos: cada nodo tiene el suyo
+            // y un padre oculto con contrato sigue resolviendo.
+            ...(dto.clientVisible !== undefined && { clientVisible: dto.clientVisible }),
             ...(moves && { parentId: parent?.id ?? null, level: nextLevel }),
             ...(rebuilds && { path: nextPath }),
           },

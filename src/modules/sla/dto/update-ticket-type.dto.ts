@@ -39,4 +39,18 @@ export class UpdateTicketTypeDto {
   @IsOptional()
   @IsString()
   parentId?: string | null;
+
+  /**
+   * El "ojito" (#48 R1/R5.8). Es un campo del TIPO, **global a la organización**:
+   * no es por proyecto. Apagarlo es una acción de PRESENTACIÓN — no toca los
+   * contratos ni la cascada, y un padre oculto con contrato sigue resolviendo
+   * (#48 R6). No cascadea a los hijos: cada nodo tiene el suyo.
+   */
+  @ApiPropertyOptional({
+    description:
+      'Si el tipo se ofrece como opción al cliente. false = carpeta pura (no cascadea a los hijos).',
+  })
+  @IsOptional()
+  @IsBoolean()
+  clientVisible?: boolean;
 }
