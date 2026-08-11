@@ -1,7 +1,14 @@
 import { Injectable, NestMiddleware, Logger } from '@nestjs/common';
 import { Request, Response, NextFunction } from 'express';
-import { AppConfigService } from '../../config/app.config';
 import { sessionTracker } from '../throttler/tracker.util';
+
+/**
+ * Umbral y ventana del contador (#46 R3). Constantes, no env: son el punto de
+ * disparo de una alarma de diagnóstico que nadie tunea por entorno (nunca
+ * estuvieron seteadas en Railway — siempre corrieron con estos valores).
+ */
+const DUP_REQUEST_WARN_THRESHOLD = 3;
+const DUP_REQUEST_WINDOW_MS = 1000;
 
 /**
  * Contador de requests duplicados (#45 D4) — reemplazo de la alarma que era el 429.
@@ -15,7 +22,10 @@ import { sessionTracker } from '../throttler/tracker.util';
  * - Es el definition-of-done medible de la tanda 04 (comparar antes/después de la
  *   vista de ticket). Si TSQ no baja este número, no sirvió.
  * - Storage: `Map` en memoria del proceso con purga por TTL (mismo tradeoff que el
- *   throttler — ver nota de storage en app.module.ts). Umbral/ventana por env.
+ *   throttler — ver nota de storage en throttler.config.ts).
+ *
+ * Queda como alarma permanente (#46 R3.2): cuesta nada y avisa si la duplicación
+ * vuelve. La causa de la tanda 04 (`reactStrictMode` en dev) se arregló de raíz.
  */
 @Injectable()
 export class DuplicateRequestMiddleware implements NestMiddleware {
@@ -23,8 +33,6 @@ export class DuplicateRequestMiddleware implements NestMiddleware {
   // key = `${tracker}|${method}|${path}` → timestamps (ms) dentro de la ventana.
   private readonly hits = new Map<string, number[]>();
   private lastSweep = 0;
-
-  constructor(private readonly config: AppConfigService) {}
 
   use(req: Request, res: Response, next: NextFunction): void {
     const path = (req.originalUrl || req.url || '').split('?')[0];
@@ -35,8 +43,8 @@ export class DuplicateRequestMiddleware implements NestMiddleware {
       return;
     }
 
-    const windowMs = this.config.dupRequestWindowMs;
-    const threshold = this.config.dupRequestWarnThreshold;
+    const windowMs = DUP_REQUEST_WINDOW_MS;
+    const threshold = DUP_REQUEST_WARN_THRESHOLD;
     const now = Date.now();
 
     const tracker = sessionTracker(req as unknown as Record<string, any>);

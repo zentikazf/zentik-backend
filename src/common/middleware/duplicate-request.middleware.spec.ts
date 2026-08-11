@@ -6,10 +6,11 @@ import { DuplicateRequestMiddleware } from './duplicate-request.middleware';
  * 429: cuenta por (sesión, método, ruta) y loguea UN warn al cruzar el umbral.
  */
 describe('DuplicateRequestMiddleware (#45 D4)', () => {
-  const config = { dupRequestWindowMs: 1000, dupRequestWarnThreshold: 3 } as any;
+  // Umbral 3 / ventana 1000ms son constantes del middleware (#46 R3): ya no se
+  // inyectan por config. Los casos de abajo asumen esos mismos valores.
   let warnSpy: jest.SpyInstance;
 
-  const mw = () => new DuplicateRequestMiddleware(config);
+  const mw = () => new DuplicateRequestMiddleware();
   const reqOf = (over: Record<string, any> = {}) => ({
     method: 'GET',
     originalUrl: '/api/v1/tickets/abc',

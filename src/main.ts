@@ -12,6 +12,7 @@ import { validateEnv } from './config/env.validation';
 import { GlobalExceptionFilter } from './common/filters';
 import { TransformInterceptor, LoggingInterceptor, TimeoutInterceptor } from './common/interceptors';
 import { AppConfigService } from './config/app.config';
+import { TRUST_PROXY_HOPS } from './common/throttler/throttler.config';
 import { WinstonLoggerService } from './infrastructure/observability';
 
 async function bootstrap() {
@@ -30,22 +31,9 @@ async function bootstrap() {
   // guardan basura. Con el hop count exacto, `req.ip` es la IP real del cliente.
   // ⚠️ NÚMERO, nunca `true` (con `true` Express toma el XFF más a la izquierda,
   // que lo escribe el cliente → falsificable: evade el límite y lockea a terceros
-  // en /login). El número se VERIFICA contra Railway real (DEBUG_TRUST_PROXY).
-  app.set('trust proxy', configService.trustProxyHops);
-
-  // Log TEMPORAL para fijar el hop count real de Railway (T1). Con
-  // DEBUG_TRUST_PROXY=true imprime el XFF crudo y el req.ip resuelto de las
-  // primeras requests; se cuentan las IPs y se apaga. NO deja rastro con el flag
-  // off (default).
-  if (configService.debugTrustProxy) {
-    const tpLogger = new Logger('TrustProxy');
-    app.use((req: any, _res: any, next: () => void) => {
-      tpLogger.debug(
-        `xff="${req.headers['x-forwarded-for'] ?? ''}" socket=${req.socket?.remoteAddress ?? ''} resolvedIp=${req.ip} hops=${configService.trustProxyHops}`,
-      );
-      next();
-    });
-  }
+  // en /login). El valor —y cómo se verificó contra Railway real— está documentado
+  // en la constante: common/throttler/throttler.config.ts.
+  app.set('trust proxy', TRUST_PROXY_HOPS);
 
   // Global prefix
   app.setGlobalPrefix(configService.apiPrefix, {

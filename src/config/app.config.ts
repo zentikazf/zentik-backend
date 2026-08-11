@@ -44,24 +44,10 @@ export class AppConfigService {
   get sentryDsn(): string | undefined { return this.configService.get<string>('SENTRY_DSN'); }
   get logLevel(): string { return this.configService.getOrThrow<string>('LOG_LEVEL'); }
 
-  // === Rate-limit / trust proxy (#45) ===
-  // Number(...) explícito: validateEnv() valida pero NO inyecta los defaults de
-  // Zod de vuelta a process.env, así que la app debe arrancar sin la var (mismo
-  // patrón que onnix/botmaker). El default 1 espeja env.validation.ts.
-  get trustProxyHops(): number {
-    // Default 2: verificado contra Railway (XFF = cliente, edge; socket interno).
-    // Ver env.validation.ts. hops=1 se quedaba en el edge (2 IPs para todos).
-    return Number(this.configService.get<string>('TRUST_PROXY_HOPS') ?? 2);
-  }
-  get debugTrustProxy(): boolean {
-    return this.configService.get<string>('DEBUG_TRUST_PROXY') === 'true';
-  }
-  get dupRequestWarnThreshold(): number {
-    return Number(this.configService.get<string>('DUP_REQUEST_WARN_THRESHOLD') ?? 3);
-  }
-  get dupRequestWindowMs(): number {
-    return Number(this.configService.get<string>('DUP_REQUEST_WINDOW_MS') ?? 1000);
-  }
+  // Rate-limit / trust proxy (#45): sin config de entorno. El hop count y los
+  // umbrales del contador de duplicados son constantes en el código (#46 R2/R3) —
+  // ver common/throttler/throttler.config.ts y
+  // common/middleware/duplicate-request.middleware.ts.
 
   get prismaTxTimeoutMs(): number {
     // Cast explicito a number — env vars en process.env siempre son string,
