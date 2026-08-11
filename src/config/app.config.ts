@@ -143,6 +143,12 @@ export class AppConfigService {
   get onnixDlqMaxAgeMin(): number {
     return Number(this.configService.get<string>('ONNIX_DLQ_MAX_AGE_MIN') ?? 1440);
   }
+  // Debounce del drain-on-enqueue (#50 R4.1): al encolar una fila se agenda UN
+  // drenado tras esta ventana, para agrupar rafagas de conversacion en un solo
+  // drain. 2-5s segun R4.1; default 3000. El cron horario sigue como red (R4.2).
+  get onnixSyncDrainDebounceMs(): number {
+    return Number(this.configService.get<string>('ONNIX_SYNC_DRAIN_DEBOUNCE_MS') ?? 3000);
+  }
 
   // === Botmaker Billing (feature #23) ===
   // Feature flag maestro (molde Onnix). Con `false` (default) los secretos Botmaker son

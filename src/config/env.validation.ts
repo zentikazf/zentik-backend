@@ -109,6 +109,10 @@ export const envSchema = z.object({
   ONNIX_CATALOG_CACHE_TTL_SEC: z.coerce.number().default(600),
   // Umbral de alerta DLQ por edad del mensaje failed mas viejo (minutos) — R44.
   ONNIX_DLQ_MAX_AGE_MIN: z.coerce.number().default(1440),
+  // Debounce del drain-on-enqueue (#50 R4.1): ventana para agrupar una rafaga de
+  // mensajes en UN solo drenado. Baja la latencia de horas a segundos sin pegarle
+  // a Onnix un POST por mensaje. Default 3000 (rango pedido: 2-5s).
+  ONNIX_SYNC_DRAIN_DEBOUNCE_MS: z.coerce.number().default(3000),
 
   // === Botmaker Billing (feature #23) ===
   // Feature flag maestro (molde Onnix). Con `false` (default) BASE_URL/ACCESS_TOKEN son opcionales:

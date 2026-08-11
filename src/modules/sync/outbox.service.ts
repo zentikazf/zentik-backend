@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
 import { AppConfigService } from '../../config/app.config';
@@ -6,6 +7,14 @@ import {
   EnqueueInput,
   OutboxRow,
 } from './types/outbox.types';
+
+/**
+ * Evento interno de baja latencia (#50 R4): "se escribio una fila en el outbox".
+ * Lo escucha SyncDispatcherService para agendar el drenado con debounce. Es un
+ * trigger best-effort, NUNCA fuente de verdad (la verdad es la fila; el cron
+ * horario sigue siendo la red de seguridad).
+ */
+export const OUTBOX_ENQUEUED_EVENT = 'outbox.enqueued';
 
 /**
  * Repositorio del outbox `outbox_events` (feature #13).
@@ -22,6 +31,7 @@ export class OutboxService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: AppConfigService,
+    private readonly events: EventEmitter2,
   ) {}
 
   /**
@@ -30,11 +40,19 @@ export class OutboxService {
    * nativa de Prisma, sin codigo extra. NO abre su propia transaccion.
    *
    * Molde exacto: TicketEventsService.writeEventTx (mismo cast a InputJsonValue).
+   *
+   * Devuelve `true` si escribio fila y `false` si fue no-op por flag/whitelist
+   * (#50 D8): el caller usa ese booleano para decidir si llamar `notifyEnqueued()`
+   * DESPUES del commit. Backward-compatible con los callers que la `await`ean sin
+   * mirar el valor.
+   *
+   * ⚠️ Esta funcion NO agenda ningun drenado: corre dentro de la tx, y si la tx
+   * revierte no hay nada que drenar (R4.3). El disparo es post-commit, afuera.
    */
   async enqueueTx(
     tx: Prisma.TransactionClient,
     input: EnqueueInput,
-  ): Promise<void> {
+  ): Promise<boolean> {
     // GATE de scoping multi-tenant: solo se capturan tickets de las orgs
     // habilitadas (ONNIX_SYNC_ORG_IDS) y con la feature on. No-op silencioso
     // para orgs no habilitadas o feature off — el outbox no captura nada de ellas.
@@ -42,7 +60,7 @@ export class OutboxService {
       !this.config.onnixSyncEnabled ||
       !this.config.onnixSyncOrgIds.includes(input.organizationId)
     ) {
-      return;
+      return false;
     }
     await tx.outboxEvent.create({
       data: {
@@ -53,6 +71,20 @@ export class OutboxService {
         status: 'pending',
       },
     });
+    return true;
+  }
+
+  /**
+   * Avisa que hay filas nuevas para drenar (#50 R4.1). El caller la invoca
+   * DESPUES de que resolvio su `$transaction` (post-commit, R4.3) y SOLO si
+   * `enqueueTx` devolvio `true`.
+   *
+   * Emision sincrona y sin await a proposito: es best-effort puro. Si nadie
+   * escucha o el listener falla, la fila sigue en `pending` y el cron horario la
+   * levanta. El gate del flag lo aplica el listener (SyncDispatcherService).
+   */
+  notifyEnqueued(): void {
+    this.events.emit(OUTBOX_ENQUEUED_EVENT);
   }
 
   /**
@@ -68,20 +100,33 @@ export class OutboxService {
    *   concatenacion → anti-inyeccion (molde report.service $queryRaw). PROHIBIDO
    *   `$queryRawUnsafe` con interpolacion de strings.
    * - Devuelve filas ⇒ `$queryRaw` (no `$executeRaw`, que devuelve count).
+   *
+   * ⚠️ ORDEN DE SALIDA (#50): el `ORDER BY created_at` del subquery decide QUE
+   * filas entran, pero NO el orden del `RETURNING` del UPDATE de afuera —
+   * Postgres devuelve esas filas en el orden del plan (heap/hash), no cronologico.
+   * Con #13 daba igual; con COMMENT_ADDED el orden de los POST ES el orden en que
+   * OSD muestra la conversacion, asi que una rafaga de mensajes (justo lo que el
+   * debounce agrupa a proposito) podia aparecer desordenada en el hilo. Por eso el
+   * UPDATE va envuelto en un CTE y el orden se impone en el SELECT de afuera:
+   * queda garantizado para TODO consumidor, presente y futuro, sin depender de que
+   * cada caller se acuerde de ordenar.
    */
   async claim(limit: number): Promise<OutboxRow[]> {
     const staleMs = this.config.onnixSyncStaleLockMs;
     return this.prisma.$queryRaw<OutboxRow[]>`
-      UPDATE outbox_events SET status = 'in_flight', locked_at = now()
-      WHERE id IN (
-        SELECT id FROM outbox_events
-        WHERE status = 'pending'
-           OR (status = 'in_flight' AND locked_at < now() - (${staleMs}::int * interval '1 millisecond'))
-        ORDER BY created_at
-        FOR UPDATE SKIP LOCKED
-        LIMIT ${limit}
+      WITH claimed AS (
+        UPDATE outbox_events SET status = 'in_flight', locked_at = now()
+        WHERE id IN (
+          SELECT id FROM outbox_events
+          WHERE status = 'pending'
+             OR (status = 'in_flight' AND locked_at < now() - (${staleMs}::int * interval '1 millisecond'))
+          ORDER BY created_at
+          FOR UPDATE SKIP LOCKED
+          LIMIT ${limit}
+        )
+        RETURNING *
       )
-      RETURNING *`;
+      SELECT * FROM claimed ORDER BY created_at ASC`;
   }
 
   /**

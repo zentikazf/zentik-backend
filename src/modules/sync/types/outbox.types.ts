@@ -6,8 +6,14 @@
  * (R1); EventEmitter2 solo dispara el drenado (best-effort), nunca es origen (R3).
  */
 
-/** Tipo de evento de negocio capturado en el outbox. */
-export type OutboxEventType = 'TICKET_CREATED' | 'STATUS_CHANGED';
+/**
+ * Tipo de evento de negocio capturado en el outbox.
+ * `COMMENT_ADDED` (#50 R2.1/R3.1) cubre los DOS origenes de comentario — mensaje
+ * del chat y nota interna — porque ambos terminan en el mismo endpoint de OSD
+ * (`POST /tickets/{code}/comentarios`); lo unico que cambia es `is_internal` y
+ * de donde sale el texto (ver OutboxPayload).
+ */
+export type OutboxEventType = 'TICKET_CREATED' | 'STATUS_CHANGED' | 'COMMENT_ADDED';
 
 /** Ciclo de vida de una outbox-row. */
 export type OutboxStatus = 'pending' | 'in_flight' | 'synced' | 'failed';
@@ -22,6 +28,23 @@ export interface OutboxPayload {
   /** Solo en TICKET_CREATED: cliente/proyecto Zentik para resolver el mapeo. */
   clientId?: string;
   projectId?: string | null;
+
+  // ── COMMENT_ADDED (#50) ────────────────────────────────────────────────────
+  /**
+   * Chat (R2.2): id del Message. El dispatcher lo RELEE al drenar — mismo criterio
+   * que el resto del outbox (el estado actual es la verdad). Si el mensaje ya no
+   * existe se skipea con log, no es un fallo.
+   */
+  messageId?: string;
+  /**
+   * Nota interna (R3.2): SNAPSHOT del texto. NUNCA se relee el ticket al drenar.
+   * Motivo: dos guardados rapidos generan DOS filas; si ambas releyeran el valor
+   * final, OSD recibiria el mismo texto dos veces y se perderia la version
+   * intermedia. Con snapshot, OSD guarda el historial fiel de versiones.
+   */
+  adminNoteSnapshot?: string;
+  /** Nota interna: autor que guardo, para el prefijo del comentario (R3.3). */
+  authorUserId?: string;
 }
 
 /**
