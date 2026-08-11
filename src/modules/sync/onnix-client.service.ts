@@ -3,6 +3,7 @@ import { RedisService } from '../../infrastructure/redis/redis.service';
 import { AppConfigService } from '../../config/app.config';
 import { OnnixConfigError, OnnixUpstreamError } from './errors';
 import {
+  OnnixAddComentarioBody,
   OnnixCallOutcome,
   OnnixCatalogItem,
   OnnixCatalogos,
@@ -10,6 +11,7 @@ import {
   OnnixEstado,
   OnnixLoginResponse,
   OnnixSetEstadoBody,
+  OnnixTicketComentario,
   OnnixTicketDetalle,
 } from './types/onnix.types';
 
@@ -165,6 +167,39 @@ export class OnnixClientService {
       return { ok: false, status: 422, message: await this.extractMessage(res) };
     }
     throw new OnnixUpstreamError(res.status, 'set-estado');
+  }
+
+  /**
+   * Agrega un comentario a un ticket via `POST /tickets/{code}/comentarios`
+   * (#50 R2/R3). Molde exacto de `setEstado`: authedFetch (re-login ante 401),
+   * 201/200 → ok, 422 → outcome con message (el dispatcher lo clasifica terminal),
+   * resto → OnnixUpstreamError (reintentable).
+   *
+   * `isInternal` decide la nota interna de OSD (R3.3). El truncado a 10.000 chars
+   * lo hace el dispatcher ANTES de llamar (tiene que conservar el prefijo de autor).
+   * NUNCA se loggea el `comment`: es contenido de conversacion del cliente.
+   */
+  async addComment(
+    code: string,
+    comment: string,
+    isInternal: boolean,
+    traceId: string,
+  ): Promise<OnnixCallOutcome<OnnixTicketComentario>> {
+    const body: OnnixAddComentarioBody = { comment, is_internal: isInternal };
+    const res = await this.authedFetch(
+      `/tickets/${encodeURIComponent(code)}/comentarios`,
+      'POST',
+      body,
+      traceId,
+    );
+    if (res.status === 201 || res.status === 200) {
+      const data = (await this.parseJson(res)) as OnnixTicketComentario;
+      return { ok: true, status: res.status, data };
+    }
+    if (res.status === 422) {
+      return { ok: false, status: 422, message: await this.extractMessage(res) };
+    }
+    throw new OnnixUpstreamError(res.status, 'add-comment');
   }
 
   /** Trae los 4 catalogos para el mapeo (R19). El mapping los cachea (R20). */

@@ -1,10 +1,12 @@
 import { mockDeep, DeepMockProxy } from 'jest-mock-extended';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import { Prisma } from '@prisma/client';
 import { Socket } from 'socket.io';
 import { ChannelService, MessageService } from './chat.service';
 import { ChatGateway } from './chat.gateway';
 import { PrismaService } from '../../database/prisma.service';
 import { StorageService } from '../../infrastructure/storage/storage.service';
+import { OutboxService } from '../sync/outbox.service';
 import { SessionValidityService } from '../auth/session-validity.service';
 import { AppException } from '../../common/filters/app-exception';
 import { SendMessageDto } from './dto/send-message.dto';
@@ -29,6 +31,7 @@ describe('Chat — membership gate (feature #18)', () => {
   let prisma: DeepMockProxy<PrismaService>;
   let eventEmitter: DeepMockProxy<EventEmitter2>;
   let storage: DeepMockProxy<StorageService>;
+  let outbox: DeepMockProxy<OutboxService>;
   let sessionValidity: DeepMockProxy<SessionValidityService>;
   let messageService: MessageService;
   let channelService: ChannelService;
@@ -45,18 +48,35 @@ describe('Chat — membership gate (feature #18)', () => {
     prisma = mockDeep<PrismaService>();
     eventEmitter = mockDeep<EventEmitter2>();
     storage = mockDeep<StorageService>();
+    // OutboxService: 4º parametro del constructor desde #50 D5. Mockeado — este
+    // spec no testea el encolado (eso vive en chat.service.spec.ts), solo necesita
+    // que MessageService se pueda construir.
+    outbox = mockDeep<OutboxService>();
     sessionValidity = mockDeep<SessionValidityService>();
     // Por default la sesion esta viva (el gate de membership es lo que se testea
     // aca; la revalidacion de sesion #19 tiene su propio spec).
     sessionValidity.isSessionLive.mockResolvedValue(true);
 
-    messageService = new MessageService(prisma, eventEmitter, storage);
+    messageService = new MessageService(prisma, eventEmitter, storage, outbox);
     channelService = new ChannelService(prisma, eventEmitter);
     gateway = new ChatGateway(messageService, prisma, sessionValidity);
 
     // Camino feliz de create (cuando el membership gate NO bloquea).
     prisma.user.findUnique.mockResolvedValue({ clientId: null } as never);
+    // Canal sin ticket: el gate de encolado del outbox (#50 D5) no aplica.
     prisma.channel.findUnique.mockResolvedValue({ ticket: null } as never);
+    // `create` abre `$transaction` SOLO si hay fila de outbox que atomizar; con
+    // canal sin ticket (el arrange de arriba) escribe suelto contra `this.prisma`,
+    // igual que antes de #50. El stub queda de todas formas para que el spec no
+    // dependa del camino: corre el callback con el propio mock de prisma como `tx`,
+    // asi las aserciones sobre `prisma.message.create` valen en los dos. Los casts
+    // son puntuales: `$transaction` esta sobrecargado (array | callback) y TS tipa
+    // la implementacion contra la firma del array.
+    (prisma.$transaction as unknown as jest.Mock).mockImplementation(async (cb: unknown) =>
+      (cb as (tx: Prisma.TransactionClient) => Promise<unknown>)(
+        prisma as unknown as Prisma.TransactionClient,
+      ),
+    );
     prisma.message.create.mockResolvedValue({
       id: 'message-created-1',
       content: dto.content,

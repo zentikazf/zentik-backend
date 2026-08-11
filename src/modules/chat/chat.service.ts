@@ -1,11 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
 import { StorageService } from '../../infrastructure/storage/storage.service';
 import { CreateChannelDto, ChannelTypeDto } from './dto/create-channel.dto';
 import { SendMessageDto } from './dto/send-message.dto';
 import { UpdateMessageDto } from './dto/update-message.dto';
 import { AppException } from '../../common/filters/app-exception';
+import { OutboxService } from '../sync/outbox.service';
 
 // ============================================
 // ChannelService — Gestion de canales de chat
@@ -299,6 +301,14 @@ export class ChannelService {
 // MessageService — Gestion de mensajes
 // ============================================
 
+/**
+ * Cliente Prisma suelto o cliente de transaccion: las escrituras del mensaje
+ * corren en los dos modos (mismo molde que `PrismaLike` en
+ * ticket-classification-guard.service.ts / task-hours-guard.service.ts).
+ * `PrismaService` extiende `PrismaClient`, asi que la union cubre ambos.
+ */
+type PrismaLike = Prisma.TransactionClient | PrismaService;
+
 @Injectable()
 export class MessageService {
   private readonly logger = new Logger(MessageService.name);
@@ -315,6 +325,10 @@ export class MessageService {
     private readonly prisma: PrismaService,
     private readonly eventEmitter: EventEmitter2,
     private readonly storage: StorageService,
+    // OutboxService (#50 D5): encola el mensaje como comentario para OSD dentro
+    // de la MISMA tx que lo crea. 4º parametro nuevo — los specs que instancian
+    // MessageService a mano deben pasar el mock.
+    private readonly outbox: OutboxService,
   ) {}
 
   /** Enrich message with senderType + resolved file URLs */
@@ -421,7 +435,15 @@ export class MessageService {
       }),
       this.prisma.channel.findUnique({
         where: { id: channelId },
-        select: { ticket: { select: { status: true } } },
+        // El select del ticket se extiende con id/category/organizationId (#50
+        // D5): son exactamente los datos que necesita el gate de encolado del
+        // outbox mas abajo. Se aprovecha la query que ya existia para el gate
+        // read-only en vez de sumar un round-trip nuevo por mensaje.
+        select: {
+          ticket: {
+            select: { id: true, status: true, category: true, organizationId: true },
+          },
+        },
       }),
     ]);
 
@@ -437,7 +459,110 @@ export class MessageService {
       );
     }
 
-    const message = await this.prisma.message.create({
+    // Gate de encolado al outbox de OSD (#50 R2.1): el mensaje viaja como
+    // comentario PUBLICO del ticket. Misma condicion que el resto de los encolados
+    // del proyecto (ticket.service / portal.service): solo los tickets de soporte
+    // estan en el scope de la integracion. Un canal sin ticket (DM, grupo, canal
+    // de proyecto) no encola nada. El flag maestro (ONNIX_SYNC_ENABLED) y la
+    // whitelist de orgs los aplica `enqueueTx` adentro — NO se repiten aca.
+    // Este metodo es el UNICO punto de entrada de WS (`message:send`) y REST
+    // (`POST /chat/channels/:id/messages`), asi que el gate no se duplica en el
+    // gateway.
+    const ticket = channel?.ticket;
+    const syncTicket =
+      ticket && ticket.category === 'SUPPORT_REQUEST' ? ticket : null;
+
+    // La transaccion se abre SOLO cuando hay algo que encolar, y es a proposito.
+    // Envolver SIEMPRE las 4 escrituras (como quedo en el primer pase de #50)
+    // metia un modo de falla NUEVO en el path caliente del chat para la enorme
+    // mayoria de los mensajes del producto — canales sin ticket, tickets fuera de
+    // SUPPORT_REQUEST, orgs fuera de la whitelist, flag apagado: como
+    // PrismaService no configura `transactionOptions`, regian los defaults de
+    // Prisma (maxWait 2s / timeout 5s), asi que bajo pico de chat o pool chico en
+    // Railway aparecia un P2024/P2028 donde antes no habia ninguno, el usuario
+    // comia un 500 y PERDIA el mensaje entero por rollback. Antes de #50 esas 4
+    // queries iban sueltas, sin limite agregado ni retencion de conexion: el
+    // mensaje se guardaba igual, solo que mas lento. Sin fila de outbox que
+    // atomizar no hay nada que ganar con la tx, asi que este camino vuelve a ser
+    // byte a byte el de antes de #50 (regla del dueño: probar el camino VIEJO con
+    // el flag APAGADO).
+    //
+    // Cuando SI hay que encolar, la tx es obligatoria: la fila del outbox tiene
+    // que nacer JUNTO con el mensaje — si el envio falla a mitad de camino, el
+    // rollback se lleva la fila y OSD nunca recibe el comentario de un mensaje que
+    // no existe (garantia nativa de Prisma, mismo molde que portal.service y
+    // ticket.service). A ese camino se le pasan `maxWait`/`timeout` EXPLICITOS y
+    // holgados (5s/15s) en vez de los defaults: un pico de carga no tiene por que
+    // costarle el mensaje al cliente, y 15s sigue siendo un techo sano para 5
+    // escrituras chicas. Dentro de la tx SOLO hay escrituras de Prisma: S3
+    // (`enrichMessage`) y el emit del WS quedan afuera para no estirar la
+    // transaccion con I/O externo.
+    //
+    // Payload `{ ticketId, messageId }` (R2.2): el dispatcher RELEE el Message al
+    // drenar; no se snapshotea el contenido (si el mensaje se borro antes del
+    // envio, el drain lo skipea).
+    const { messageId, final, enqueued } = syncTicket
+      ? await this.prisma.$transaction(
+          async (tx) => {
+            const written = await this.writeMessage(tx, channelId, userId, dto);
+            const wroteOutboxRow = await this.outbox.enqueueTx(tx, {
+              eventType: 'COMMENT_ADDED',
+              aggregateId: syncTicket.id,
+              organizationId: syncTicket.organizationId,
+              payload: { ticketId: syncTicket.id, messageId: written.messageId },
+            });
+            return { ...written, enqueued: wroteOutboxRow };
+          },
+          { maxWait: 5_000, timeout: 15_000 },
+        )
+      : {
+          ...(await this.writeMessage(this.prisma, channelId, userId, dto)),
+          enqueued: false,
+        };
+
+    // Drain-on-enqueue (#50 R4.3): POST-COMMIT, jamas adentro de la tx — si la tx
+    // revierte no hay nada que drenar. Solo si `enqueueTx` escribio fila de
+    // verdad (devolvio true); si el flag/whitelist lo dejaron en no-op no hay a
+    // quien avisar. Es best-effort: si el listener falla, la fila sigue
+    // `pending` y el cron horario la levanta.
+    if (enqueued) {
+      this.outbox.notifyEnqueued();
+    }
+
+    const enriched = await this.enrichMessage(final!);
+
+    this.eventEmitter.emit('message.sent', {
+      messageId,
+      channelId,
+      userId,
+      content: dto.content,
+      enrichedMessage: enriched,
+    });
+
+    this.logger.log(
+      `Mensaje enviado: ${messageId} en canal ${channelId}`,
+    );
+
+    return enriched;
+  }
+
+  /**
+   * Las escrituras del mensaje (create + link de archivos + re-fetch + touch del
+   * canal), extraidas para que el MISMO cuerpo corra en los dos modos SIN
+   * duplicarse: suelto contra `this.prisma` (canal sin ticket sincronizable) o
+   * dentro de la `$transaction` que ademas encola la fila del outbox. El
+   * comportamiento observable es identico en ambos; lo unico que cambia es si las
+   * queries comparten transaccion.
+   *
+   * @param db cliente Prisma o `tx` de la transaccion del caller.
+   */
+  private async writeMessage(
+    db: PrismaLike,
+    channelId: string,
+    userId: string,
+    dto: SendMessageDto,
+  ) {
+    const created = await db.message.create({
       data: {
         content: dto.content,
         channelId,
@@ -448,41 +573,27 @@ export class MessageService {
 
     // Link uploaded files to this message
     if (dto.fileIds?.length) {
-      await this.prisma.file.updateMany({
+      await db.file.updateMany({
         where: { id: { in: dto.fileIds }, uploadedById: userId, messageId: null },
-        data: { messageId: message.id },
+        data: { messageId: created.id },
       });
     }
 
     // Re-fetch to include linked files
-    const final = dto.fileIds?.length
-      ? await this.prisma.message.findUnique({
-          where: { id: message.id },
+    const withFiles = dto.fileIds?.length
+      ? await db.message.findUnique({
+          where: { id: created.id },
           include: this.messageInclude,
         })
-      : message;
+      : created;
 
     // Update channel's updatedAt
-    await this.prisma.channel.update({
+    await db.channel.update({
       where: { id: channelId },
       data: { updatedAt: new Date() },
     });
 
-    const enriched = await this.enrichMessage(final!);
-
-    this.eventEmitter.emit('message.sent', {
-      messageId: message.id,
-      channelId,
-      userId,
-      content: dto.content,
-      enrichedMessage: enriched,
-    });
-
-    this.logger.log(
-      `Mensaje enviado: ${message.id} en canal ${channelId}`,
-    );
-
-    return enriched;
+    return { messageId: created.id, final: withFiles };
   }
 
   async update(messageId: string, userId: string, dto: UpdateMessageDto) {

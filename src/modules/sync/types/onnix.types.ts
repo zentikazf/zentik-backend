@@ -71,6 +71,30 @@ export interface OnnixSetEstadoBody {
 }
 
 /**
+ * Body de `POST /tickets/{code}/comentarios` (#50 R2/R3).
+ * `comment` tiene maxLength 10000 en el OpenAPI de Onnix — el dispatcher trunca
+ * ANTES de llamar (conservando el prefijo de autor), aca no se valida largo.
+ * `is_internal: true` = nota interna (checkbox "solo equipo" de OSD, R3.3).
+ */
+export interface OnnixAddComentarioBody {
+  comment: string;
+  is_internal: boolean;
+}
+
+/**
+ * Respuesta de `POST /tickets/{code}/comentarios` (schema `TicketComentario`).
+ * Solo `id` esta garantizado; el resto es informativo y NUNCA se loggea (el
+ * `comment` de vuelta es el mismo texto del cliente).
+ */
+export interface OnnixTicketComentario {
+  id: number;
+  comment?: string;
+  is_internal?: boolean;
+  author?: string;
+  created_at?: string;
+}
+
+/**
  * Resultado clasificado de una llamada Onnix, devuelto por OnnixClientService al
  * dispatcher para que decida terminal/reintentable/idempotente. El cliente NO
  * lanza para 422 — devuelve el status+message para que el dispatcher clasifique.

@@ -597,6 +597,12 @@ export class PortalService {
       }
     }
 
+    // #50 (D8/R4.3): bandera de scope EXTERNO a la tx. `enqueueTx` devuelve true
+    // solo si escribió fila (los gates de flag/whitelist de orgs viven adentro).
+    // El aviso al dispatcher (`notifyEnqueued`) va POST-COMMIT: adentro de la tx no
+    // serviría — si revierte, la fila desaparece con ella y no hay nada que drenar.
+    let outboxEnqueued = false;
+
     const ticket = await this.prisma.$transaction(async (tx) => {
       // Ticket relacionado (feature #11): si viene relatedTicketId, validar que
       // exista y pertenezca al MISMO cliente del user; si no, 400. Dentro de la tx
@@ -707,15 +713,23 @@ export class PortalService {
       // scope de la integración Onnix → todos los tickets del portal se encolan.
       // El gate por categoría solo aplica al admin (ticket.service.createTicket),
       // que sí puede crear otras categorías.
-      await this.outbox.enqueueTx(tx, {
+      const wrote = await this.outbox.enqueueTx(tx, {
         eventType: 'TICKET_CREATED',
         aggregateId: created.id,
         organizationId: project.organizationId,
         payload: { ticketId: created.id, clientId: client.id, projectId },
       });
+      if (wrote) outboxEnqueued = true;
 
       return created;
     });
+
+    // #50 (D8/R4.1): drain-on-enqueue. Recién acá, con la tx COMMITEADA, la fila
+    // existe y es visible para el dispatcher. Best-effort puro: si nadie escucha o
+    // el drain falla, el cron horario (R4.2) la levanta igual.
+    if (outboxEnqueued) {
+      this.outbox.notifyEnqueued();
+    }
 
     this.logger.log(`Ticket created: ${ticket.id} by client: ${client.id} for project: ${projectId}`);
 

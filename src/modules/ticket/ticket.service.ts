@@ -775,6 +775,13 @@ export class TicketService {
       effectiveAssigneeId = dto.assigneeId ?? null;
     }
 
+    // #50 (D8/R4.3): bandera de scope EXTERNO a la tx. `enqueueTx` devuelve true
+    // solo si realmente escribió fila (los gates de flag/whitelist de orgs viven
+    // adentro del service). El aviso al dispatcher (`notifyEnqueued`) se dispara
+    // POST-COMMIT, más abajo: adentro de la tx no serviría — si la tx revierte,
+    // la fila desaparece con ella y no hay nada que drenar.
+    let outboxEnqueued = false;
+
     const updated = await this.prisma.$transaction(async (tx) => {
       // #44 (D2.1): candado de tipificación. Ningún camino lleva a RESUELTO sin
       // que el equipo lo haya tipificado (ticketType + categoría interna). Corre
@@ -799,6 +806,28 @@ export class TicketService {
       if (wantsNotes) {
         data.adminNotes = dto.adminNotes ?? null;
       }
+
+      // #50 (R3.1): valor PREVIO de la nota, releído DENTRO de esta misma tx y
+      // ANTES del update. El punto es NO comparar contra el `findUnique` del
+      // arranque del método (que corre fuera de la tx y puede traer un valor ya
+      // viejo si otro PATCH escribió en el medio): acá se lee el valor fresco,
+      // justo antes de pisarlo, así el "no cambió nada → no encolar" se decide
+      // contra lo que realmente hay en la fila.
+      // OJO — esto NO es un candado: `findUnique` es un SELECT sin `FOR UPDATE` y
+      // la tx corre en READ COMMITTED (el proyecto no pide `isolationLevel` en
+      // ningún lado), así que dos PATCH REALMENTE concurrentes sobre el mismo
+      // ticket pueden leer los dos el mismo previo y encolar los dos. Consecuencia
+      // concreta: doble click en "Guardar" → la misma nota interna llega duplicada
+      // a OSD. El fix de verdad (SELECT ... FOR UPDATE o update condicional) es una
+      // decisión de diseño fuera de T5 y la toma el dueño.
+      const previousAdminNotes = wantsNotes
+        ? (
+            await tx.ticket.findUnique({
+              where: { id: ticketId },
+              select: { adminNotes: true },
+            })
+          )?.adminNotes ?? null
+        : null;
 
       const result = Object.keys(data).length > 0
         ? await tx.ticket.update({
@@ -896,12 +925,13 @@ export class TicketService {
         // tampoco se encoló. `ticket.category` viene del findUnique con include
         // (objeto completo) al inicio de updateTicket.
         if (ticket.category === 'SUPPORT_REQUEST') {
-          await this.outbox.enqueueTx(tx, {
+          const wrote = await this.outbox.enqueueTx(tx, {
             eventType: 'STATUS_CHANGED',
             aggregateId: ticketId,
             organizationId: ticket.organizationId,
             payload: { ticketId },
           });
+          if (wrote) outboxEnqueued = true;
         }
 
         // 3.b) Audit timeline para hitos SLA: FIRST_RESPONSE / RESOLVED.
@@ -923,6 +953,42 @@ export class TicketService {
             source: 'TICKET',
             userId,
           });
+        }
+      }
+
+      // 3.c) Outbox sync Onnix (#50 R3): la nota interna viaja a OSD como
+      // comentario con `is_internal: true` (el checkbox "Nota interna (solo
+      // equipo)"). Mismo gate por categoría que el resto del módulo: el scope de
+      // la integración son los tickets de soporte.
+      if (wantsNotes && ticket.category === 'SUPPORT_REQUEST') {
+        // El trim NO cambia lo que se persiste (`data.adminNotes` sigue siendo
+        // `dto.adminNotes ?? null`): solo decide si vale la pena encolar y fija el
+        // texto que viaja a OSD.
+        const snapshot = (dto.adminNotes ?? '').trim();
+        const wasEmptyOrSame =
+          // R3.4: borrar/vaciar la nota NO genera comentario (OSD tampoco tiene
+          // borrado de comentario, mandar vacío solo ensuciaría el hilo).
+          snapshot === '' ||
+          // R3.1: solo si CAMBIÓ respecto del previo leído en esta misma tx.
+          // Re-guardar el mismo texto (el "Guardar" repetido de la UI) no debe
+          // duplicar el comentario en OSD.
+          snapshot === (previousAdminNotes ?? '').trim();
+
+        if (!wasEmptyOrSame) {
+          const wrote = await this.outbox.enqueueTx(tx, {
+            eventType: 'COMMENT_ADDED',
+            aggregateId: ticketId,
+            organizationId: ticket.organizationId,
+            // ⚠️ R3.2: el texto viaja como SNAPSHOT en el payload y el dispatcher
+            // NO relee el ticket al drenar (a diferencia del chat, que sí relee su
+            // Message). Motivo: dos guardados rápidos generan DOS filas; si ambas
+            // releyeran el valor final, OSD recibiría el mismo texto dos veces y se
+            // perdería la versión intermedia. Con snapshot, OSD guarda el historial
+            // fiel de versiones. `authorUserId` es para el prefijo `[Nombre]` que
+            // arma el dispatcher (R3.3): OSD atribuye todo al usuario de servicio.
+            payload: { ticketId, adminNoteSnapshot: snapshot, authorUserId: userId },
+          });
+          if (wrote) outboxEnqueued = true;
         }
       }
 
@@ -950,6 +1016,13 @@ export class TicketService {
 
     // ── Emit domain events AFTER transaction commits ─────────
     this.flushPendingEvents();
+
+    // #50 (D8/R4.1): drain-on-enqueue. Recién acá, con la tx COMMITEADA, las filas
+    // existen y son visibles para el dispatcher. El aviso es best-effort puro: si
+    // nadie lo escucha o el drain falla, el cron horario (R4.2) las levanta igual.
+    if (outboxEnqueued) {
+      this.outbox.notifyEnqueued();
+    }
 
     if (wantsStatus) {
       this.eventEmitter.emit('ticket.updated', {
@@ -1042,6 +1115,10 @@ export class TicketService {
 
     const previousStatus = ticket.status;
 
+    // #50 (D8/R4.3): igual que en updateTicket — la bandera vive FUERA de la tx y
+    // el aviso al dispatcher se dispara post-commit.
+    let outboxEnqueued = false;
+
     await this.prisma.$transaction(async (tx) => {
       await tx.ticket.update({
         where: { id: ticketId },
@@ -1072,12 +1149,13 @@ export class TicketService {
       // cliente cambió → replicar a Onnix (slug 'cerrado' via STATUS_SLUG).
       // Mismo gate por categoría que el resto del módulo.
       if (ticket.category === 'SUPPORT_REQUEST') {
-        await this.outbox.enqueueTx(tx, {
+        const wrote = await this.outbox.enqueueTx(tx, {
           eventType: 'STATUS_CHANGED',
           aggregateId: ticketId,
           organizationId: ticket.organizationId,
           payload: { ticketId },
         });
+        if (wrote) outboxEnqueued = true;
       }
 
       // R1b.4: cancelar el ticket lleva la task SIEMPRE a CANCELLED (el enum
@@ -1103,6 +1181,11 @@ export class TicketService {
     });
 
     this.flushPendingEvents();
+
+    // #50 (D8/R4.1): drain-on-enqueue post-commit. Ver comentario en updateTicket.
+    if (outboxEnqueued) {
+      this.outbox.notifyEnqueued();
+    }
 
     this.eventEmitter.emit('ticket.closed', {
       ...domainEvent('ticket.closed', 'ticket', ticketId, ticket.organizationId, userId),
@@ -1435,6 +1518,9 @@ export class TicketService {
       }
     }
 
+    // #50 (D8/R4.3): bandera fuera de la tx; el aviso al dispatcher va post-commit.
+    let outboxEnqueued = false;
+
     const ticket = await this.prisma.$transaction(async (tx) => {
       // Ticket relacionado (feature #11): si viene relatedTicketId, validar que
       // exista y pertenezca al MISMO cliente; si no, 400. Dentro de la tx para
@@ -1546,7 +1632,7 @@ export class TicketService {
       // NEW_DEVELOPMENT / NEW_PROJECT), por eso acá SÍ se gatea: solo se encola
       // si es SUPPORT_REQUEST. Los demás tipos no se replican a Onnix.
       if (dto.category === 'SUPPORT_REQUEST') {
-        await this.outbox.enqueueTx(tx, {
+        const wrote = await this.outbox.enqueueTx(tx, {
           eventType: 'TICKET_CREATED',
           aggregateId: created.id,
           organizationId: orgId,
@@ -1556,10 +1642,16 @@ export class TicketService {
             projectId: dto.projectId,
           },
         });
+        if (wrote) outboxEnqueued = true;
       }
 
       return created;
     });
+
+    // #50 (D8/R4.1): drain-on-enqueue post-commit. Ver comentario en updateTicket.
+    if (outboxEnqueued) {
+      this.outbox.notifyEnqueued();
+    }
 
     this.logger.log(`Ticket created by admin: ${ticket.id} for client: ${dto.clientId}`);
 
