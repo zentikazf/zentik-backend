@@ -125,9 +125,10 @@ export class AppConfigService {
   get onnixHttpTimeoutMs(): number {
     return Number(this.configService.get<string>('ONNIX_HTTP_TIMEOUT_MS') ?? 15000);
   }
-  get onnixSyncCron(): string {
-    return this.configService.get<string>('ONNIX_SYNC_CRON') ?? '0 0 * * * *';
-  }
+  // La cadencia del @Cron del drenador NO es configurable por entorno: vive fija
+  // en el codigo (SYNC_CRON de sync-dispatcher.service.ts, cada 20 min). El getter
+  // que habia aca estaba muerto — el decorador @Cron se evalua al cargar la clase
+  // y leia process.env directo, nunca este getter.
   get onnixSyncBatchSize(): number {
     return Number(this.configService.get<string>('ONNIX_SYNC_BATCH_SIZE') ?? 50);
   }

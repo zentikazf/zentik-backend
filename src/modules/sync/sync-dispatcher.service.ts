@@ -34,6 +34,27 @@ const ORDER_GATE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 /** Fallback de nombre para el prefijo cuando el autor no tiene nombre cargado. */
 const UNKNOWN_AUTHOR = 'Usuario';
 /**
+ * Cadencia del cron del drenador: cada 20 minutos (formato de 6 campos, con
+ * segundos → :00, :20 y :40 de cada hora).
+ *
+ * Fijo en el codigo A PROPOSITO, sin env var (antes era
+ * `process.env.ONNIX_SYNC_CRON ?? '0 0 * * * *'`): el servidor no tiene que
+ * configurar nada para que el deploy quede con la cadencia correcta, y no hay
+ * forma de que una variable olvidada en Railway le gane al codigo y deje la red
+ * de seguridad en una hora sin que nadie se entere.
+ *
+ * Por que 20 minutos y no una hora: con #50 el cron CAMBIO DE TRABAJO. Antes era
+ * el camino de latencia (una hora alcanzaba para replicar tickets); ahora la
+ * latencia la resuelve el drain-on-enqueue y el cron paso a ser el camino de
+ * RECUPERACION — el que levanta lo que se perdio cuando la pista en memoria se
+ * evaporo (restart en la ventana del debounce, listener caido, fila devuelta a
+ * `pending`, comentario esperando en el ordering gate). Una red que tarda hasta
+ * 60 min en darse cuenta es demasiado para una conversacion. Un ciclo en vacio
+ * son dos queries indexadas (el claim que devuelve 0 filas + el chequeo de DLQ),
+ * asi que bajarlo es practicamente gratis.
+ */
+const SYNC_CRON = '0 */20 * * * *';
+/**
  * Resultado del procesamiento de una fila.
  * - `skipped` = ordering gate, no cuenta.
  * - `dry_run` = simulacro (ONNIX_SYNC_DRY_RUN): pipeline completo SIN POST a Onnix;
@@ -44,7 +65,7 @@ type RowOutcome = 'synced' | 'failed' | 'skipped' | 'dry_run';
 /**
  * Drenador del outbox → Onnix (feature #13, D2/D5/D7/D10).
  *
- * Disparado por `@Cron` horario (anti-solapamiento `waitForCompletion`) y por el
+ * Disparado por `@Cron` cada 20 min (anti-solapamiento `waitForCompletion`) y por el
  * endpoint admin (mismo método `processPending`). `@OnEvent` es solo trigger de
  * baja latencia (best-effort), NUNCA fuente de verdad (R3, R4). El claim atómico
  * de `OutboxService` garantiza que dos drains concurrentes no tomen la misma fila.
@@ -66,7 +87,7 @@ export class SyncDispatcherService implements OnModuleDestroy {
 
   // ── Disparadores ───────────────────────────────────────────────────────────
 
-  @Cron(process.env.ONNIX_SYNC_CRON ?? '0 0 * * * *', {
+  @Cron(SYNC_CRON, {
     name: 'onnix-sync',
     waitForCompletion: true,
   })

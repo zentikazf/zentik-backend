@@ -12,7 +12,7 @@ import {
  * Evento interno de baja latencia (#50 R4): "se escribio una fila en el outbox".
  * Lo escucha SyncDispatcherService para agendar el drenado con debounce. Es un
  * trigger best-effort, NUNCA fuente de verdad (la verdad es la fila; el cron
- * horario sigue siendo la red de seguridad).
+ * sigue siendo la red de seguridad).
  */
 export const OUTBOX_ENQUEUED_EVENT = 'outbox.enqueued';
 
@@ -80,7 +80,7 @@ export class OutboxService {
    * `enqueueTx` devolvio `true`.
    *
    * Emision sincrona y sin await a proposito: es best-effort puro. Si nadie
-   * escucha o el listener falla, la fila sigue en `pending` y el cron horario la
+   * escucha o el listener falla, la fila sigue en `pending` y el cron la
    * levanta. El gate del flag lo aplica el listener (SyncDispatcherService).
    */
   notifyEnqueued(): void {

@@ -95,9 +95,10 @@ export const envSchema = z.object({
   ONNIX_SYNC_ORG_IDS: z.string().optional(),
   // Timeout por call HTTP a Onnix (ms) — molde de MCP_HTTP_TIMEOUT_MS.
   ONNIX_HTTP_TIMEOUT_MS: z.coerce.number().default(15000),
-  // Expresion del @Cron del drenador. Default: cada hora en punto (R34).
-  // El boton manual cubre lo inmediato. Formato: 6 campos (con segundos).
-  ONNIX_SYNC_CRON: z.string().default('0 0 * * * *'),
+  // ONNIX_SYNC_CRON se retiro a proposito: la cadencia del drenador vive fija en
+  // el codigo (SYNC_CRON de sync-dispatcher.service.ts, cada 20 min). Si quedo
+  // seteada en Railway es inofensiva — el schema no es `.strict()`, asi que Zod
+  // descarta las claves que sobran.
   // Cap de filas drenadas por ciclo (batch size).
   ONNIX_SYNC_BATCH_SIZE: z.coerce.number().default(50),
   // Cap de reintentos antes de marcar la fila failed (R32).

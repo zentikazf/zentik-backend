@@ -31,7 +31,7 @@ type WritableConfig = { -readonly [K in keyof AppConfigService]: AppConfigServic
  *
  * #50 suma: T6 (COMMENT_ADDED — gate de orden, prefijos, snapshot de nota interna,
  * truncado, dry-run, clasificacion de errores) y T7 (drain-on-enqueue con debounce
- * + el cron horario que sigue siendo la red de seguridad).
+ * + el cron que sigue siendo la red de seguridad).
  */
 describe('SyncDispatcherService', () => {
   let service: SyncDispatcherService;
@@ -741,7 +741,7 @@ describe('SyncDispatcherService', () => {
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('drain-on-enqueue'));
     });
 
-    it('R4.2: el cron horario SIGUE registrado y sigue llamando processPending', async () => {
+    it('R4.2: el cron SIGUE registrado, corre cada 20 min y sigue llamando processPending', async () => {
       // El drain-on-enqueue es best-effort; la red de seguridad (reintentos, filas
       // que quedaron colgadas) es el cron. Si alguien lo saca "porque ya hay evento",
       // este test lo caza.
@@ -754,6 +754,13 @@ describe('SyncDispatcherService', () => {
       expect(cronMeta?.name).toBe('onnix-sync');
       // Anti-solapamiento del cron: ya existia, no se duplico en #50.
       expect(cronMeta?.waitForCompletion).toBe(true);
+      // Cadencia FIJA en el codigo (SYNC_CRON), sin env var: cada 20 min (:00/:20/:40).
+      // Con #50 el cron dejo de ser el camino de latencia y paso a ser el de
+      // RECUPERACION; una hora es demasiado para levantar un mensaje cuya pista en
+      // memoria se perdio. Si alguien lo devuelve a '0 0 * * * *' o lo vuelve a atar
+      // a process.env (donde una variable olvidada en Railway le ganaria al codigo),
+      // este assert lo caza.
+      expect(cronMeta?.cronTime).toBe('0 */20 * * * *');
 
       await service.tick();
       expect(drainSpy).toHaveBeenCalledTimes(1);

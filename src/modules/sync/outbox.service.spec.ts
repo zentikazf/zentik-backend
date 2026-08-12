@@ -168,7 +168,7 @@ describe('OutboxService', () => {
       expect(events.emit).toHaveBeenCalledWith(OUTBOX_ENQUEUED_EVENT);
       expect(OUTBOX_ENQUEUED_EVENT).toBe('outbox.enqueued');
       // Es un trigger best-effort puro: no lee ni escribe la tabla (la verdad
-      // sigue siendo la fila `pending`; el cron horario es la red de seguridad).
+      // sigue siendo la fila `pending`; el cron es la red de seguridad).
       expect(prisma.outboxEvent.create).not.toHaveBeenCalled();
       expect(prisma.outboxEvent.update).not.toHaveBeenCalled();
       expect(prisma.outboxEvent.updateMany).not.toHaveBeenCalled();
