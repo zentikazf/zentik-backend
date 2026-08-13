@@ -813,21 +813,54 @@ export class TicketService {
       // viejo si otro PATCH escribió en el medio): acá se lee el valor fresco,
       // justo antes de pisarlo, así el "no cambió nada → no encolar" se decide
       // contra lo que realmente hay en la fila.
-      // OJO — esto NO es un candado: `findUnique` es un SELECT sin `FOR UPDATE` y
-      // la tx corre en READ COMMITTED (el proyecto no pide `isolationLevel` en
-      // ningún lado), así que dos PATCH REALMENTE concurrentes sobre el mismo
-      // ticket pueden leer los dos el mismo previo y encolar los dos. Consecuencia
-      // concreta: doble click en "Guardar" → la misma nota interna llega duplicada
-      // a OSD. El fix de verdad (SELECT ... FOR UPDATE o update condicional) es una
-      // decisión de diseño fuera de T5 y la toma el dueño.
-      const previousAdminNotes = wantsNotes
-        ? (
-            await tx.ticket.findUnique({
-              where: { id: ticketId },
-              select: { adminNotes: true },
-            })
-          )?.adminNotes ?? null
-        : null;
+      // #51 (R1/D1): y se lee con `SELECT ... FOR NO KEY UPDATE`, que es lo que
+      // convierte esa relectura en un candado de verdad. Un `findUnique` es un
+      // SELECT plano: en READ COMMITTED (el proyecto no pide `isolationLevel` en
+      // ningún lado) no bloquea a nadie, así que dos PATCH REALMENTE concurrentes
+      // sobre el mismo ticket leían los dos el mismo previo, los dos concluían
+      // "cambió" y la misma nota interna llegaba duplicada a OSD (doble click en
+      // "Guardar"). Con el lock explícito la segunda tx espera el commit de la
+      // primera, después lee el valor YA NUEVO, compara y no encola.
+      // Va con tagged template (bind param, nunca concatenación — regla del módulo).
+      //
+      // POR QUÉ `FOR NO KEY UPDATE` y no `FOR UPDATE`: lo único que hace falta acá
+      // es exclusión mutua entre ESCRITORES del ticket (R1.4). `FOR NO KEY UPDATE`
+      // ya la da —dos de estos conflictúan entre sí— y es exactamente el modo que
+      // toma por su cuenta el `tx.ticket.update` de abajo, porque no toca columnas
+      // de índice único referenciadas por FK. `FOR UPDATE` es estrictamente más
+      // fuerte: además conflictúa con `FOR KEY SHARE`, o sea que bloquearía a
+      // cualquier tx concurrente que inserte una fila hija con FK a este ticket
+      // (hoy `ticket_events`, mañana lo que se agregue) mientras dure esta tx. Ese
+      // bloqueo extra no compra nada para el dedup y sí agrega contención — al
+      // revés de lo que decía el comentario original, tomar el lock acá NO es
+      // gratis: lo adelanta al principio de la tx, así que la ventana en la que la
+      // fila queda tomada es más larga que si esperáramos al `update`. Es a
+      // propósito (dos PATCH del mismo ticket se serializan al entrar en vez de a
+      // mitad de camino), pero es un costo real, no cero.
+      //
+      // #51 (Fix 12): gateado por la MISMA condición que decide encolar más abajo
+      // (`wantsNotes && category === 'SUPPORT_REQUEST'`). El único consumidor de
+      // `previousAdminNotes` es esa decisión, así que para un ticket fuera del
+      // scope Onnix el lock era trabajo muerto: con el flag de la integración
+      // apagado —o con la org fuera de la whitelist— el comportamiento a nivel DB
+      // tiene que ser idéntico al de antes de #51, y el lock es la primera palanca
+      // que se va a tirar si aparece contención. Cuando no aplica, esto queda en
+      // `null` y la rama de encolado ni se evalúa.
+      //
+      // ORDEN DE LOCK: del lado ticket siempre es tickets → tasks (acá se toma el
+      // ticket y recién al final `syncTaskToStatus` toca la task). OJO: existe un
+      // ABBA PRE-EXISTENTE con `TaskService.updateTask`, que lockea tasks primero
+      // (`tx.task.update`) y después el ticket vinculado (`tx.ticket.update`). #51
+      // no lo agrava —ese camino ya cruzaba los dos recursos en orden inverso antes
+      // de este lock— pero queda documentado: si algún día aparecen deadlocks entre
+      // PATCH de ticket y PATCH de task, el orden a normalizar es el de allá.
+      const previousAdminNotes =
+        wantsNotes && ticket.category === 'SUPPORT_REQUEST'
+          ? (
+              await tx.$queryRaw<{ admin_notes: string | null }[]>`
+                SELECT admin_notes FROM tickets WHERE id = ${ticketId} FOR NO KEY UPDATE`
+            )[0]?.admin_notes ?? null
+          : null;
 
       const result = Object.keys(data).length > 0
         ? await tx.ticket.update({
