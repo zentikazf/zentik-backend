@@ -125,14 +125,20 @@ export class AppConfigService {
   get onnixHttpTimeoutMs(): number {
     return Number(this.configService.get<string>('ONNIX_HTTP_TIMEOUT_MS') ?? 15000);
   }
-  get onnixSyncCron(): string {
-    return this.configService.get<string>('ONNIX_SYNC_CRON') ?? '0 0 * * * *';
-  }
+  // La cadencia del @Cron del drenador NO es configurable por entorno: vive fija
+  // en el codigo (SYNC_CRON de sync-dispatcher.service.ts, cada 20 min). El getter
+  // que habia aca estaba muerto — el decorador @Cron se evalua al cargar la clase
+  // y leia process.env directo, nunca este getter.
   get onnixSyncBatchSize(): number {
     return Number(this.configService.get<string>('ONNIX_SYNC_BATCH_SIZE') ?? 50);
   }
+  // Default 8 (era 3, #51 FIX 11). Con los reintentos espaciados por backoff, 3 se
+  // consumen en minutos: una caida corta de OSD mandaba la cola entera a la DLQ y
+  // recuperarla es trabajo manual. Tiene que espejar el default de env.validation.ts
+  // — validateEnv NO inyecta los defaults de Zod de vuelta a process.env, asi que si
+  // los dos numeros se desincronizan gana ESTE en runtime y el otro solo valida.
   get onnixSyncMaxAttempts(): number {
-    return Number(this.configService.get<string>('ONNIX_SYNC_MAX_ATTEMPTS') ?? 3);
+    return Number(this.configService.get<string>('ONNIX_SYNC_MAX_ATTEMPTS') ?? 8);
   }
   get onnixSyncStaleLockMs(): number {
     return Number(this.configService.get<string>('ONNIX_SYNC_STALE_LOCK_MS') ?? 120000);
@@ -142,6 +148,12 @@ export class AppConfigService {
   }
   get onnixDlqMaxAgeMin(): number {
     return Number(this.configService.get<string>('ONNIX_DLQ_MAX_AGE_MIN') ?? 1440);
+  }
+  // Debounce del drain-on-enqueue (#50 R4.1): al encolar una fila se agenda UN
+  // drenado tras esta ventana, para agrupar rafagas de conversacion en un solo
+  // drain. 2-5s segun R4.1; default 3000. El cron horario sigue como red (R4.2).
+  get onnixSyncDrainDebounceMs(): number {
+    return Number(this.configService.get<string>('ONNIX_SYNC_DRAIN_DEBOUNCE_MS') ?? 3000);
   }
 
   // === Botmaker Billing (feature #23) ===

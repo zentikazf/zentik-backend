@@ -5,6 +5,7 @@ import { ChatGateway } from './chat.gateway';
 import { MessageService } from './chat.service';
 import { PrismaService } from '../../database/prisma.service';
 import { StorageService } from '../../infrastructure/storage/storage.service';
+import { OutboxService } from '../sync/outbox.service';
 import { SessionValidityService } from '../auth/session-validity.service';
 
 /**
@@ -27,6 +28,7 @@ describe('Chat — WS hardening P1 (#19)', () => {
   let prisma: DeepMockProxy<PrismaService>;
   let eventEmitter: DeepMockProxy<EventEmitter2>;
   let storage: DeepMockProxy<StorageService>;
+  let outbox: DeepMockProxy<OutboxService>;
   let sessionValidity: DeepMockProxy<SessionValidityService>;
   let messageService: MessageService;
   let gateway: ChatGateway;
@@ -35,9 +37,13 @@ describe('Chat — WS hardening P1 (#19)', () => {
     prisma = mockDeep<PrismaService>();
     eventEmitter = mockDeep<EventEmitter2>();
     storage = mockDeep<StorageService>();
+    // OutboxService: 4º parametro del constructor desde #50 D5. Aca `create` nunca
+    // corre de verdad (los tests la espian o la stubbean), pero el mock es lo que
+    // permite construir MessageService.
+    outbox = mockDeep<OutboxService>();
     sessionValidity = mockDeep<SessionValidityService>();
 
-    messageService = new MessageService(prisma, eventEmitter, storage);
+    messageService = new MessageService(prisma, eventEmitter, storage, outbox);
     gateway = new ChatGateway(messageService, prisma, sessionValidity);
   });
 
