@@ -5,11 +5,11 @@ import { TicketStatus } from '@prisma/client';
 import { SyncDispatcherService } from './sync-dispatcher.service';
 import { PrismaService } from '../../database/prisma.service';
 import { AppConfigService } from '../../config/app.config';
-import { OutboxService } from './outbox.service';
+import { OutboxService, SKIPPED_MESSAGE_DELETED_EXTERNAL_ID } from './outbox.service';
 import { OnnixClientService } from './onnix-client.service';
 import { OnnixMappingService } from './onnix-mapping.service';
 import { OnnixUpstreamError } from './errors';
-import { OutboxEventType, OutboxRow } from './types/outbox.types';
+import { OutboxEventType, OutboxRow, OutboxStatus } from './types/outbox.types';
 import {
   OnnixCallOutcome,
   OnnixTicketComentario,
@@ -68,6 +68,14 @@ describe('SyncDispatcherService', () => {
       .mockResolvedValue(undefined);
     // checkDlqAge no es el foco de estos tests.
     prisma.outboxEvent.findFirst.mockResolvedValue(null);
+    // #51 D2.2: el chequeo anti-duplicado del comentario solo corre con
+    // `attempts > 0`. Defaults EXPLICITOS (mockDeep no devuelve ni un array ni el
+    // objeto de estado: el `.find` / el `.unanchored` explotarian y el test pasaria
+    // por la razon equivocada, via el catch de processComment). "No hay nada en OSD,
+    // nada reclamado y NINGUNA fila sin ancla" = el dedup esta activo y no encuentra
+    // nada, asi que se postea normal.
+    onnix.listComments.mockResolvedValue([]);
+    outbox.getCommentClaimState.mockResolvedValue({ claimedIds: [], unanchored: 0 });
   });
 
   /**
@@ -373,7 +381,10 @@ describe('SyncDispatcherService', () => {
       expect(code).toBe('TK-2026-000123');
       expect(comment).toBe('[Cliente · Ana Lopez] Hola, sigue el error');
       expect(isInternal).toBe(false);
-      expect(outbox.markSynced).toHaveBeenCalledWith('row_c2');
+      // #51 D2.1: el id que devuelve el 201 de OSD se persiste como externalId de la
+      // fila. Es el ancla del dedup: sin dueño, el mismo comentario en OSD podria
+      // ser adoptado por otra fila y perderiamos un mensaje.
+      expect(outbox.markSynced).toHaveBeenCalledWith('row_c2', '99');
     });
 
     it('R2.3: mensaje de STAFF (sin clientId) -> prefijo "[Nombre] " y is_internal=false', async () => {
@@ -415,7 +426,16 @@ describe('SyncDispatcherService', () => {
       expect(res).toEqual({ synced: 0, failed: 0 }); // 'skipped' no incrementa contadores
       expect(onnix.addComment).not.toHaveBeenCalled();
       expect(outbox.markFailed).not.toHaveBeenCalled();
-      expect(outbox.markSynced).toHaveBeenCalledWith('row_c5');
+      // Con CENTINELA, no con externalId null (#51 FIX D): una fila COMMENT_ADDED
+      // `synced` sin ancla cuenta como `unanchored`, y `unanchored > 0` desactiva
+      // la adopcion del ticket ENTERO para siempre — un solo mensaje borrado
+      // apagaba el anti-duplicado de ese ticket y cada timeout posterior de OSD
+      // duplicaba. El centinela dice la verdad ("no hay comentario que anclar") y
+      // no puede colisionar con un id de OSD, que es numerico.
+      expect(outbox.markSynced).toHaveBeenCalledWith(
+        'row_c5',
+        SKIPPED_MESSAGE_DELETED_EXTERNAL_ID,
+      );
       expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('mensaje inexistente'));
     });
 
@@ -539,7 +559,7 @@ describe('SyncDispatcherService', () => {
       expect(outbox.markSynced).not.toHaveBeenCalled();
     });
 
-    it('5xx -> retry intra-drain y despues handleUpstreamFailure (reintentable, attempts++)', async () => {
+    it('5xx -> UN solo POST y handleUpstreamFailure (reintentable, attempts++)', async () => {
       // attempts=0, cap=3 -> 0+1 < 3 -> NO capea: vuelve a pending para el proximo ciclo.
       outbox.claim.mockResolvedValueOnce([
         makeNoteRow('row_c9', 'nota', 'user_admin', { attempts: 0 }),
@@ -550,8 +570,12 @@ describe('SyncDispatcherService', () => {
       const res = await service.processPending();
 
       expect(res).toEqual({ synced: 0, failed: 1 });
-      // retryWithJitter(attempts=2): el 5xx se reintenta UNA vez dentro del drain.
-      expect(onnix.addComment).toHaveBeenCalledTimes(2);
+      // #51 D2.3: el comentario ya NO se reintenta intra-drain. Ese reintento corria
+      // con attempts todavia en 0 —el punto ciego del chequeo anti-duplicado— y
+      // disparaba a los ~300ms, con OSD probablemente procesando el primer POST.
+      // Un solo camino de reintento (vuelta a pending) = un solo lugar donde
+      // preguntar "¿ya llego?". La latencia la cubre el drenado de seguimiento (D3).
+      expect(onnix.addComment).toHaveBeenCalledTimes(1);
       expect(outbox.markFailed).toHaveBeenCalledWith(
         'row_c9',
         expect.stringContaining('503'),
@@ -767,6 +791,402 @@ describe('SyncDispatcherService', () => {
     });
   });
 
+  // ── #51 FIX A — un solo drenado por proceso ────────────────────────────────
+
+  /**
+   * El cron era el UNICO disparador que llamaba `processPending()` sin mirar
+   * `this.running` (`onTicketEvent` y el timer del debounce si lo miraban), y
+   * `waitForCompletion` solo evita que el cron se solape CONSIGO MISMO: no sabe
+   * del timer ni del endpoint admin. Dos `processPending` solapados eran la raiz
+   * de casi todos los caminos de perdida/duplicado de #51.
+   *
+   * Igual que en el FIX 3 de #50, aca NO se mockea `processPending`: hace falta el
+   * `running` real, sostenido con un `claim` diferido.
+   */
+  describe('#51 FIX A — el cron no se solapa con el timer ni con el endpoint', () => {
+    let drainSpy: jest.SpyInstance;
+    let releaseClaim: (rows: OutboxRow[]) => void;
+    let inFlight: Promise<unknown>;
+
+    beforeEach(() => {
+      spyLog('log');
+      drainSpy = jest.spyOn(service, 'processPending');
+      // Default ANTES del `once`: si la guarda no estuviera y arrancara un SEGUNDO
+      // drenado, su `claim` tiene que resolver limpio (lote vacio) para que lo que
+      // se rompa sea el ASSERT de "una sola llamada" y no un TypeError adentro del
+      // service. Un test que falla crasheando no dice cual es el invariante roto.
+      outbox.claim.mockResolvedValue([]);
+      outbox.claim.mockReturnValueOnce(
+        new Promise<OutboxRow[]>((resolve) => {
+          releaseClaim = resolve;
+        }),
+      );
+      inFlight = service.processPending();
+    });
+
+    afterEach(async () => {
+      releaseClaim([]);
+      await inFlight;
+    });
+
+    it('tick() con un drenado EN VUELO no arranca un segundo processPending', async () => {
+      await service.tick();
+
+      // Solo el drenado en vuelo. Perder el tick no cuesta nada: el cron vuelve en
+      // 20 min y el drenado vivo esta procesando la MISMA cola ahora mismo.
+      expect(drainSpy).toHaveBeenCalledTimes(1);
+      expect(outbox.claim).toHaveBeenCalledTimes(1);
+    });
+
+    it('isDraining() expone el estado real y vuelve a false al terminar', async () => {
+      expect(service.isDraining()).toBe(true);
+
+      releaseClaim([]);
+      await inFlight;
+
+      expect(service.isDraining()).toBe(false);
+    });
+
+    it('tick() vuelve a drenar una vez que el drenado en vuelo termino', async () => {
+      releaseClaim([]);
+      await inFlight;
+      outbox.claim.mockResolvedValueOnce([]);
+
+      await service.tick();
+
+      expect(drainSpy).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // ── #51 FIX C — el lock se refresca POR FILA ───────────────────────────────
+
+  /**
+   * `claim` estampa `locked_at` UNA vez para las hasta 50 filas del lote, asi que
+   * el reloj de ONNIX_SYNC_STALE_LOCK_MS (120s) corre POR LOTE. Con OSD lento la
+   * ultima fila puede empezar a procesarse ~25 min despues del claim: otro drenado
+   * la rescata como lock vencido y la postea mientras esta todavia la tiene en
+   * memoria => comentario duplicado en OSD, que no tiene delete.
+   */
+  describe('#51 FIX C — refresco de lock por fila antes de procesarla', () => {
+    it('refresca el lock de CADA fila del lote, por id, antes de tocarla', async () => {
+      const r1 = makeChatRow('row_lk1', 'msg_1');
+      const r2 = makeChatRow('row_lk2', 'msg_2');
+      outbox.claim.mockResolvedValueOnce([r1, r2]);
+      outbox.renewClaimLock.mockResolvedValue('applied');
+      outbox.getCreatedExternalId.mockResolvedValue('TK-2026-000123');
+      (prisma.message.findUnique as unknown as jest.Mock).mockImplementation(() =>
+        Promise.resolve(makeMessage('hola', { name: 'Ana', clientId: null })),
+      );
+      onnix.addComment.mockResolvedValue(okComment());
+
+      await service.processPending();
+
+      // Uno por fila (no uno por lote): es lo que hace que el reloj del lock corra
+      // por fila y el rescate solo pueda pasar si ESA fila de verdad se colgo.
+      expect(outbox.renewClaimLock.mock.calls.map((c) => c[0])).toEqual([
+        'row_lk1',
+        'row_lk2',
+      ]);
+      // Y ANTES de tocarla, no despues: refrescar el lock DESPUES del POST no
+      // evitaria nada — para entonces el otro drenado ya rescato la fila y el
+      // comentario duplicado ya esta en OSD, que no tiene delete. El orden es el
+      // fix; la cantidad de llamadas sola no lo prueba.
+      expect(outbox.renewClaimLock.mock.invocationCallOrder[0]).toBeLessThan(
+        onnix.addComment.mock.invocationCallOrder[0],
+      );
+      expect(outbox.renewClaimLock.mock.invocationCallOrder[1]).toBeLessThan(
+        onnix.addComment.mock.invocationCallOrder[1],
+      );
+    });
+
+    it('fila que ya no es nuestra ("lost") se SALTEA: no se postea ni se escribe nada', async () => {
+      const mine = makeChatRow('row_mine', 'msg_1');
+      const stolen = makeChatRow('row_stolen', 'msg_2');
+      outbox.claim.mockResolvedValueOnce([stolen, mine]);
+      // La primera fila se la llevo otro drenado tras vencer su lock.
+      outbox.renewClaimLock.mockResolvedValueOnce('lost').mockResolvedValueOnce('applied');
+      outbox.getCreatedExternalId.mockResolvedValue('TK-2026-000123');
+      (prisma.message.findUnique as unknown as jest.Mock).mockImplementation(() =>
+        Promise.resolve(makeMessage('hola', { name: 'Ana', clientId: null })),
+      );
+      onnix.addComment.mockResolvedValue(okComment());
+      const logSpy = spyLog('log');
+
+      const res = await service.processPending();
+
+      // Procesarla igual produciria EXACTAMENTE el duplicado que este refresco vino
+      // a evitar, y no se pierde nada: el otro drenado la termina.
+      expect(prisma.message.findUnique).toHaveBeenCalledTimes(1);
+      expect(onnix.addComment).toHaveBeenCalledTimes(1);
+      expect(outbox.markSynced).toHaveBeenCalledTimes(1);
+      expect(outbox.markSynced).toHaveBeenCalledWith('row_mine', expect.anything());
+      // La fila robada no es ni exito ni fallo de este ciclo.
+      expect(res).toEqual({ synced: 1, failed: 0 });
+      // `lost>0` es el sintoma directo de dos drenados solapados: tiene que quedar
+      // en el log de cierre o un duplicado en OSD no tiene por donde auditarse.
+      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('lost=1'));
+    });
+  });
+
+  /**
+   * Contracara OBLIGATORIA de la guarda: `if (this.running) return` es una linea
+   * que, mal puesta, apaga el cron entero sin que nada mas se ponga rojo (el resto
+   * de los tests llaman `processPending` directo, no `tick`). Este describe corre
+   * SIN drenado en vuelo a proposito — es el unico lugar del archivo que prueba
+   * que el camino normal del disparador sigue existiendo.
+   */
+  describe('#51 FIX A — sin drenado en vuelo, el camino normal es el de siempre', () => {
+    it('tick() drena igual que antes (la guarda no apaga el cron)', async () => {
+      spyLog('log');
+      outbox.claim.mockResolvedValueOnce([]);
+      const drainSpy = jest.spyOn(service, 'processPending');
+
+      await service.tick();
+
+      expect(drainSpy).toHaveBeenCalledTimes(1);
+      expect(outbox.claim).toHaveBeenCalledTimes(1);
+      // Y la bandera queda limpia para el proximo disparador: si `processPending`
+      // no la apagara en el `finally`, el primer tick del proceso dejaria mudos a
+      // los otros tres disparadores para siempre.
+      expect(service.isDraining()).toBe(false);
+    });
+
+    it('tick() con el flag maestro apagado no drena (la guarda vieja sigue primero)', async () => {
+      config.onnixSyncEnabled = false;
+      const drainSpy = jest.spyOn(service, 'processPending');
+
+      await service.tick();
+
+      expect(drainSpy).not.toHaveBeenCalled();
+      expect(outbox.claim).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── #51 FIX D — un mensaje borrado no apaga el anti-duplicado ───────────────
+
+  /**
+   * EL test del FIX D, y el unico que prueba la consecuencia real: el skip por
+   * mensaje borrado marcaba la fila `synced` con `externalId = null`, o sea una
+   * fila COMMENT_ADDED sincronizada SIN ancla para siempre. `unanchored > 0`
+   * DESACTIVA la adopcion del ticket ENTERO, asi que un unico mensaje que un
+   * usuario borrara apagaba el anti-duplicado de ese ticket de forma permanente y
+   * cada timeout posterior de OSD ahi duplicaba el comentario.
+   *
+   * Por eso NO se mockea `OutboxService`: con el mock, `getCommentClaimState`
+   * devolveria lo que elija el test y el encadenamiento —lo que la fila borrada
+   * ESCRIBE es lo que la fila siguiente LEE— no se ejerceria. Se arma un
+   * OutboxService REAL contra una tabla en memoria que aplica los `where` de
+   * verdad, que es la unica forma sin DB de que las dos filas se hablen.
+   */
+  describe('#51 FIX D — el centinela del mensaje borrado', () => {
+    const ROW_AT = new Date('2026-08-01T10:00:00.000Z');
+    const AFTER_ROW = '2026-08-01T10:00:07.000Z';
+
+    /** Fila de la tabla en memoria: solo las columnas que miran estos where. */
+    type StoredRow = {
+      id: string;
+      aggregateId: string;
+      eventType: OutboxEventType;
+      status: OutboxStatus;
+      externalId: string | null;
+    };
+
+    type WriteArgs = {
+      where?: { id?: string; status?: OutboxStatus };
+      data?: { status?: OutboxStatus; externalId?: string };
+    };
+
+    /**
+     * Cablea `outboxEvent` contra `table` aplicando los where de verdad. Ojo con
+     * `update`: se cablea con la MISMA implementacion pero IGNORANDO el status del
+     * where, que es exactamente lo que hacia la version pre-FIX B. Asi, si alguien
+     * revierte cualquiera de los dos fixes, la tabla queda en el estado equivocado
+     * y el test se pone rojo solo en vez de pasar contra un mock complaciente.
+     */
+    function wireOutboxTable(
+      outboxPrisma: DeepMockProxy<PrismaService>,
+      table: StoredRow[],
+    ): void {
+      const write = (args: WriteArgs, ignoreStatus: boolean): StoredRow[] => {
+        const where = args?.where ?? {};
+        const hit = table.filter(
+          (r) =>
+            (where.id === undefined || r.id === where.id) &&
+            (ignoreStatus || where.status === undefined || r.status === where.status),
+        );
+        for (const r of hit) {
+          if (args?.data?.status !== undefined) r.status = args.data.status;
+          if (args?.data?.externalId !== undefined) r.externalId = args.data.externalId;
+        }
+        return hit;
+      };
+      (outboxPrisma.outboxEvent.updateMany as unknown as jest.Mock).mockImplementation(
+        (args: WriteArgs) => Promise.resolve({ count: write(args, false).length }),
+      );
+      (outboxPrisma.outboxEvent.update as unknown as jest.Mock).mockImplementation(
+        (args: WriteArgs) => Promise.resolve(write(args, true)[0] ?? null),
+      );
+      // getCommentClaimState: filtra por aggregate + eventType + status y proyecta
+      // solo externalId, igual que el select del service.
+      (outboxPrisma.outboxEvent.findMany as unknown as jest.Mock).mockImplementation(
+        (args: {
+          where: { aggregateId: string; eventType: OutboxEventType; status: OutboxStatus };
+        }) =>
+          Promise.resolve(
+            table
+              .filter(
+                (r) =>
+                  r.aggregateId === args.where.aggregateId &&
+                  r.eventType === args.where.eventType &&
+                  r.status === args.where.status,
+              )
+              .map((r) => ({ externalId: r.externalId })),
+          ),
+      );
+      // getCreatedExternalId: el code del ticket para el gate de orden.
+      (outboxPrisma.outboxEvent.findFirst as unknown as jest.Mock).mockImplementation(
+        (args: { where: { aggregateId: string; eventType?: OutboxEventType } }) =>
+          Promise.resolve(
+            table.find(
+              (r) =>
+                r.aggregateId === args.where.aggregateId &&
+                r.eventType === args.where.eventType &&
+                r.externalId !== null,
+            ) ?? null,
+          ),
+      );
+    }
+
+    it('⚠️ un mensaje borrado NO apaga el dedup del ticket: la fila siguiente SIGUE adoptando', async () => {
+      const outboxPrisma = mockDeep<PrismaService>();
+      config.onnixSyncStaleLockMs = 120_000;
+      const table: StoredRow[] = [
+        // El ticket ya existe en OSD: el gate de orden deja pasar los comentarios.
+        {
+          id: 'row_created',
+          aggregateId: 'ticket_1',
+          eventType: 'TICKET_CREATED',
+          status: 'synced',
+          externalId: 'TK-2026-000123',
+        },
+        // La del mensaje que el usuario borro entre el encolado y el drenado.
+        {
+          id: 'row_borrado',
+          aggregateId: 'ticket_1',
+          eventType: 'COMMENT_ADDED',
+          status: 'in_flight',
+          externalId: null,
+        },
+        // Y una POSTERIOR del mismo ticket que vuelve de un fallo ambiguo: su POST
+        // si habia llegado a OSD. Es la que paga el precio si el borrado apago el
+        // dedup — postearia de nuevo un comentario que ya esta en el hilo.
+        {
+          id: 'row_perdida',
+          aggregateId: 'ticket_1',
+          eventType: 'COMMENT_ADDED',
+          status: 'in_flight',
+          externalId: null,
+        },
+      ];
+      wireOutboxTable(outboxPrisma, table);
+      const realOutbox = new OutboxService(
+        outboxPrisma,
+        config,
+        mockDeep<EventEmitter2>(),
+      );
+      // El ORDEN importa: primero la borrada (escribe el centinela), despues la
+      // que consulta la contabilidad. Al reves el test no probaria nada.
+      (outboxPrisma.$queryRaw as unknown as jest.Mock).mockResolvedValue([
+        makeChatRow('row_borrado', 'msg_borrado', { created_at: ROW_AT }),
+        makeNoteRow('row_perdida', 'la nota que se perdio', 'user_admin', {
+          attempts: 1,
+          created_at: ROW_AT,
+        }),
+      ]);
+      prisma.message.findUnique.mockResolvedValue(null); // el usuario lo borro
+      prisma.user.findUnique.mockResolvedValue({ name: 'Josu' } as never);
+      // El POST perdido de `row_perdida` SI esta en OSD: cumple las cinco
+      // condiciones de adopcion, asi que lo unico que puede frenarla es el dedup
+      // apagado por la fila borrada.
+      onnix.listComments.mockResolvedValue([
+        {
+          id: 777,
+          comment: '[Josu] la nota que se perdio',
+          is_internal: true,
+          created_at: AFTER_ROW,
+        },
+      ]);
+      onnix.addComment.mockResolvedValue(okComment());
+
+      const svc = new SyncDispatcherService(prisma, config, realOutbox, onnix, mapping);
+      jest
+        .spyOn((svc as unknown as { logger: Logger }).logger, 'log')
+        .mockImplementation(() => undefined);
+      jest
+        .spyOn(svc as unknown as { sleep: (ms: number) => Promise<void> }, 'sleep')
+        .mockResolvedValue(undefined);
+
+      const res = await svc.processPending();
+
+      // ⚠️ EL ASSERT, y va PRIMERO a proposito: lo que importa es la CONSECUENCIA
+      // (el ticket sigue sin duplicar), no el mecanismo. Con `externalId = null` en
+      // la fila borrada, esta fila veria unanchored=1, el kill-switch apagaria la
+      // adopcion y este POST saldria duplicado — y asi cada reintento de ese ticket,
+      // para siempre, porque una fila sin ancla no gana un externalId nunca.
+      expect(onnix.addComment).not.toHaveBeenCalled();
+      expect(table.find((r) => r.id === 'row_perdida')).toMatchObject({
+        status: 'synced',
+        externalId: '777',
+      });
+      // La borrada no cuenta (skipped) y la otra se adopta.
+      expect(res).toEqual({ synced: 1, failed: 0 });
+      // Y el mecanismo que lo hace posible: la fila del mensaje borrado queda
+      // ANCLADA con el centinela — dice la verdad ("no hay comentario en OSD que
+      // esta fila deba reclamar") en vez de sumar para siempre a `unanchored`.
+      expect(table.find((r) => r.id === 'row_borrado')).toMatchObject({
+        status: 'synced',
+        externalId: SKIPPED_MESSAGE_DELETED_EXTERNAL_ID,
+      });
+    });
+
+    it('el centinela dentro de `claimedIds` NO bloquea la adopcion de un id REAL de OSD', async () => {
+      // La propiedad que hace segura la decision de arriba: los ids de comentario
+      // de OSD son numericos y el dedup compara contra `String(c.id)`, asi que el
+      // centinela es inerte dentro del set de reclamados. Si alguna vez matcheara,
+      // el fix habria cambiado un duplicado por una PERDIDA de mensaje.
+      outbox.claim.mockResolvedValueOnce([
+        makeNoteRow('row_cent', 'la nota que se perdio', 'user_admin', {
+          attempts: 1,
+          created_at: ROW_AT,
+        }),
+      ]);
+      outbox.getCreatedExternalId.mockResolvedValue('TK-2026-000123');
+      prisma.user.findUnique.mockResolvedValue({ name: 'Josu' } as never);
+      onnix.addComment.mockResolvedValue(okComment());
+      onnix.listComments.mockResolvedValueOnce([
+        {
+          id: 777,
+          comment: '[Josu] la nota que se perdio',
+          is_internal: true,
+          created_at: AFTER_ROW,
+        },
+      ]);
+      // Contabilidad completa (unanchored 0) y el UNICO reclamo es el centinela.
+      outbox.getCommentClaimState.mockResolvedValueOnce({
+        claimedIds: [SKIPPED_MESSAGE_DELETED_EXTERNAL_ID],
+        unanchored: 0,
+      });
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 1, failed: 0 });
+      expect(onnix.addComment).not.toHaveBeenCalled();
+      expect(outbox.markSynced).toHaveBeenCalledWith('row_cent', '777');
+      // Y el centinela no es un numero: `String(777)` jamas puede ser igual a el.
+      expect(Number.isNaN(Number(SKIPPED_MESSAGE_DELETED_EXTERNAL_ID))).toBe(true);
+    });
+  });
+
   // ── #50 FIX 1 — orden cronologico del claim, punta a punta ──────────────────
 
   /**
@@ -782,6 +1202,12 @@ describe('SyncDispatcherService', () => {
       const outboxPrisma = mockDeep<PrismaService>();
       const realOutbox = new OutboxService(outboxPrisma, config, mockDeep<EventEmitter2>());
       config.onnixSyncStaleLockMs = 120_000;
+      // OutboxService REAL: el refresco de lock por fila (#51 FIX C) y las
+      // escrituras terminales (FIX B) van por `updateMany` y leen el `count` para
+      // saber si la fila sigue siendo nuestra. `count: 1` = lo sigue siendo.
+      outboxPrisma.outboxEvent.updateMany.mockResolvedValue({ count: 1 } as {
+        count: number;
+      });
       // El ticket ya existe en OSD: el gate de orden deja pasar los 3 comentarios.
       outboxPrisma.outboxEvent.findFirst.mockResolvedValue({
         externalId: 'TK-2026-000123',
@@ -1111,6 +1537,833 @@ describe('SyncDispatcherService', () => {
         },
       );
     }
+  });
+
+  // ── #51 T3 — idempotencia del comentario ante fallo ambiguo ────────────────
+
+  /**
+   * El pipeline es at-least-once y un timeout NO prueba que OSD no haya procesado
+   * el POST (`rawFetch` aborta a los 15s y clasifica como transitorio). OSD no
+   * tiene delete de comentario, asi que cada POST de mas es una linea de mas en la
+   * conversacion que ve el cliente — y cada mensaje de menos es peor todavia.
+   *
+   * El fix son cuatro piezas que se sostienen entre si (D2.1 a D2.4) y el test que
+   * las cierra es el del "ok" repetido: es el unico que distingue un dedup correcto
+   * de uno que PIERDE mensajes.
+   */
+  describe('#51 T3 — idempotencia del comentario ante fallo ambiguo (R2/D2)', () => {
+    /**
+     * Reloj EXPLICITO del dedup. La ventana temporal (`created_at` del comentario de
+     * OSD >= `created_at` de la fila) es una de las cinco condiciones de adopcion,
+     * asi que las fechas son parte del contrato de estos tests y no ruido de fixture:
+     * un fixture "sin fecha" no se adopta, y un test que dependiera de eso pasaria
+     * aunque el guard que dice probar no existiera.
+     */
+    const ROW_AT = new Date('2026-08-01T10:00:00.000Z');
+    /** Posterior a la fila: candidato valido por ventana temporal. */
+    const AFTER_ROW = '2026-08-01T10:00:07.000Z';
+    /** Anterior a la fila: no puede ser el POST perdido de ESA fila. */
+    const BEFORE_ROW = '2026-08-01T09:59:53.000Z';
+
+    beforeEach(() => {
+      outbox.getCreatedExternalId.mockResolvedValue('TK-2026-000123');
+      prisma.user.findUnique.mockResolvedValue({ name: 'Josu' } as never);
+      onnix.addComment.mockResolvedValue(okComment());
+    });
+
+    /**
+     * Fila de nota interna que YA salio a la ruta (`attempts > 0` es lo unico que
+     * gatea el chequeo anti-duplicado) y con `created_at` fijo, para poder colocar
+     * los comentarios remotos de un lado u otro de la ventana temporal.
+     */
+    function retryNoteRow(id: string, snapshot: string, attempts = 1): OutboxRow {
+      return makeNoteRow(id, snapshot, 'user_admin', { attempts, created_at: ROW_AT });
+    }
+
+    /**
+     * Comentario remoto que cumple LAS CINCO condiciones de adopcion, para el texto
+     * que produce `retryNoteRow(_, 'la nota que se perdio')`.
+     *
+     * ⚠️ Los tests de PERDIDA de abajo rompen UNA sola condicion cada uno, a
+     * proposito: si el fixture fuera invalido por dos motivos a la vez, el test
+     * seguiria verde aunque el guard bajo prueba desapareciera — probaria el otro.
+     */
+    function adoptable(
+      overrides: Partial<OnnixTicketComentario> = {},
+    ): OnnixTicketComentario {
+      return {
+        id: 777,
+        comment: '[Josu] la nota que se perdio',
+        is_internal: true,
+        created_at: AFTER_ROW,
+        ...overrides,
+      };
+    }
+
+    it('D2.1: el id del comentario que devuelve el 201 se persiste como externalId de la fila', async () => {
+      // Es EL ancla del dedup: sin dueño, ese mismo comentario en OSD queda
+      // "libre" y otra fila con el mismo texto podria adoptarlo → mensaje perdido.
+      outbox.claim.mockResolvedValueOnce([
+        makeNoteRow('row_ext', 'nota con ancla', 'user_admin'),
+      ]);
+      onnix.addComment.mockResolvedValueOnce({ ok: true, status: 201, data: { id: 4321 } });
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 1, failed: 0 });
+      expect(outbox.markSynced).toHaveBeenCalledWith('row_ext', '4321');
+    });
+
+    it('GUARD D2.1: un 200 SIN body no rompe ni escribe un externalId basura', async () => {
+      // Contrato roto de OSD (200 sin cuerpo). La fila SI se sincronizo, asi que
+      // markSynced va igual — pero sin ancla, nunca con el string "undefined",
+      // que quedaria reclamado para siempre y envenenaria el dedup del ticket.
+      outbox.claim.mockResolvedValueOnce([
+        makeNoteRow('row_sin_body', 'nota', 'user_admin'),
+      ]);
+      onnix.addComment.mockResolvedValueOnce({ ok: true, status: 200 });
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 1, failed: 0 });
+      expect(outbox.markSynced).toHaveBeenCalledWith('row_sin_body', undefined);
+    });
+
+    it('✅ R2.2 CAMINO SANO: reintento, comentario nuestro sin reclamar y sin filas sin ancla -> SE ADOPTA', async () => {
+      // `attempts: 1` = esta fila ya salio y volvio con un fallo ambiguo. El POST
+      // habia llegado; lo que se perdio fue la respuesta. Las cinco condiciones se
+      // cumplen (id numerico, texto exacto, misma visibilidad, no reclamado,
+      // posterior a la fila) Y la contabilidad esta completa (unanchored=0).
+      outbox.claim.mockResolvedValueOnce([retryNoteRow('row_dedup', 'la nota que se perdio')]);
+      onnix.listComments.mockResolvedValueOnce([adoptable()]);
+      // Nadie lo reclamo y NO hay filas sin ancla: el dedup esta habilitado.
+      outbox.getCommentClaimState.mockResolvedValueOnce({ claimedIds: [], unanchored: 0 });
+      const logSpy = spyLog('log');
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 1, failed: 0 });
+      // Lo central: NO se duplica el comentario en el hilo del cliente.
+      expect(onnix.addComment).not.toHaveBeenCalled();
+      expect(outbox.markSynced).toHaveBeenCalledWith('row_dedup', '777');
+      expect(onnix.listComments).toHaveBeenCalledWith('TK-2026-000123', expect.any(String));
+      expect(outbox.getCommentClaimState).toHaveBeenCalledWith('ticket_1');
+      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('dedup'));
+    });
+
+    it('✅ borde de la ventana: `created_at` EXACTAMENTE igual al de la fila SI adopta (el corte es `>=`)', async () => {
+      // El corte tiene que dejar entrar el caso normal —OSD sella el comentario en
+      // el mismo instante en que se creo la fila— o el dedup no adoptaria nunca y
+      // cada reintento duplicaria. La direccion segura del borde se prueba abajo.
+      outbox.claim.mockResolvedValueOnce([retryNoteRow('row_borde_eq', 'la nota que se perdio')]);
+      onnix.listComments.mockResolvedValueOnce([
+        adoptable({ created_at: ROW_AT.toISOString() }),
+      ]);
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 1, failed: 0 });
+      expect(onnix.addComment).not.toHaveBeenCalled();
+      expect(outbox.markSynced).toHaveBeenCalledWith('row_borde_eq', '777');
+    });
+
+    // ── ⚠️ CAMINOS DE PERDIDA DE MENSAJE ──────────────────────────────────────
+    //
+    // R2: PERDER UN MENSAJE ES MUCHO PEOR QUE DUPLICARLO. OSD no tiene delete ni
+    // update de comentario, asi que un duplicado se limpia a ojo pero un mensaje
+    // que no se postea se pierde para siempre Y EN SILENCIO (la fila queda
+    // `synced`). Cada test de acá abajo rompe UNA condicion de adopcion y exige
+    // que el resultado sea POSTEAR. Si alguien saca esa guarda, el test se pone
+    // rojo porque el mensaje deja de salir.
+
+    it('⚠️ PERDIDA 1: con UNA fila synced SIN externalId el dedup NO adopta NADA -> postea + WARN', async () => {
+      // El comentario remoto es un match PERFECTO: sin el kill-switch se adoptaria.
+      // Pero el ticket tiene comentarios nuestros sin ancla, o sea que NO sabemos
+      // cuales de los comentarios "libres" de OSD ya son nuestros: ese 777 puede ser
+      // de otra fila, y adoptarlo daria por enviado un mensaje que nunca salio.
+      outbox.claim.mockResolvedValueOnce([retryNoteRow('row_sin_ancla', 'la nota que se perdio')]);
+      onnix.listComments.mockResolvedValueOnce([adoptable()]);
+      outbox.getCommentClaimState.mockResolvedValueOnce({ claimedIds: [], unanchored: 1 });
+      const warnSpy = spyLog('warn');
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 1, failed: 0 });
+      // EL assert: el mensaje SALE igual (duplicado recuperable > perdida silenciosa).
+      expect(onnix.addComment).toHaveBeenCalledTimes(1);
+      expect(onnix.addComment.mock.calls[0][1]).toBe('[Josu] la nota que se perdio');
+      // Y reclama SU propio id, no el 777 ajeno.
+      expect(outbox.markSynced).toHaveBeenCalledWith('row_sin_ancla', '99');
+      // El estado degradado no puede ser invisible: sin este WARN nadie entiende por
+      // que ese ticket empezo a duplicar.
+      const logged = warnSpy.mock.calls.map((c) => String(c[0])).join('\n');
+      expect(logged).toContain('dedup DESACTIVADO');
+      expect(logged).toContain('ticketId=ticket_1');
+      expect(logged).toContain('rowId=row_sin_ancla');
+      // NUNCA el cuerpo: el WARN termina en Railway/Sentry.
+      expect(logged).not.toContain('la nota que se perdio');
+    });
+
+    it('⚠️ PERDIDA 1b: el kill-switch se reactiva solo en cuanto no quedan filas sin ancla', async () => {
+      // Es un estado degradado TRANSITORIO (filas pre-#51, o un 201 sin id), no un
+      // apagado permanente: si no se reactivara, el ticket duplicaria para siempre.
+      outbox.claim.mockResolvedValueOnce([retryNoteRow('row_reactiva', 'la nota que se perdio')]);
+      onnix.listComments.mockResolvedValueOnce([adoptable()]);
+      outbox.getCommentClaimState.mockResolvedValueOnce({ claimedIds: [], unanchored: 0 });
+
+      await service.processPending();
+
+      expect(onnix.addComment).not.toHaveBeenCalled();
+      expect(outbox.markSynced).toHaveBeenCalledWith('row_reactiva', '777');
+    });
+
+    it('⚠️ PERDIDA 2: comentario remoto con `id` NO numerico -> NO se adopta, se postea', async () => {
+      // Si OSD devuelve el id como string (cast de Laravel), `typeof c.id === number`
+      // falla y NO hay match: se postea. Sin ese guard se adoptaria un id de forma
+      // desconocida y se grabaria como ancla algo que quizas no identifica nada.
+      outbox.claim.mockResolvedValueOnce([retryNoteRow('row_id_str', 'la nota que se perdio')]);
+      onnix.listComments.mockResolvedValueOnce([
+        adoptable({ id: '777' as unknown as number }),
+      ]);
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 1, failed: 0 });
+      expect(onnix.addComment).toHaveBeenCalledTimes(1);
+      expect(outbox.markSynced).toHaveBeenCalledWith('row_id_str', '99');
+    });
+
+    it('⚠️ PERDIDA 2b: comentario remoto SIN `id` -> se postea y JAMAS se graba el string "undefined"', async () => {
+      // El peor caso del predicado viejo: `String(c.id)` daba 'undefined', que nunca
+      // esta en el set de reclamados, asi que ese comentario matcheaba SIEMPRE por
+      // texto — y la fila quedaba `synced` con externalId 'undefined': mensaje
+      // perdido Y el dedup del ticket envenenado para siempre.
+      const sinId = { comment: '[Josu] la nota que se perdio', is_internal: true, created_at: AFTER_ROW };
+      outbox.claim.mockResolvedValueOnce([retryNoteRow('row_sin_id', 'la nota que se perdio')]);
+      onnix.listComments.mockResolvedValueOnce([sinId as unknown as OnnixTicketComentario]);
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 1, failed: 0 });
+      expect(onnix.addComment).toHaveBeenCalledTimes(1);
+      expect(outbox.markSynced).toHaveBeenCalledWith('row_sin_id', '99');
+      // Doble reja: ni por el predicado ni por el `!= null` del call site.
+      expect(outbox.markSynced).not.toHaveBeenCalledWith('row_sin_id', 'undefined');
+    });
+
+    it('⚠️ PERDIDA 3: mismo texto pero `is_internal` DISTINTO -> NO se adopta, se postea', async () => {
+      // El prefijo de la nota interna de un admin y el de su mensaje de chat son
+      // IDENTICOS (`[Josu] `). Sin este guard, la nota interna se contabiliza contra
+      // el mensaje publico: la nota nunca viaja y el cliente nunca ve su mensaje.
+      outbox.claim.mockResolvedValueOnce([retryNoteRow('row_vis', 'la nota que se perdio')]);
+      onnix.listComments.mockResolvedValueOnce([adoptable({ is_internal: false })]);
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 1, failed: 0 });
+      expect(onnix.addComment).toHaveBeenCalledTimes(1);
+      // Y sale con la visibilidad correcta, que es lo que estaba en juego.
+      expect(onnix.addComment.mock.calls[0][2]).toBe(true);
+      expect(outbox.markSynced).toHaveBeenCalledWith('row_vis', '99');
+    });
+
+    it('⚠️ PERDIDA 3b: si OSD NO devuelve `is_internal`, no se adivina la visibilidad -> se postea', async () => {
+      const sinVis = { id: 777, comment: '[Josu] la nota que se perdio', created_at: AFTER_ROW };
+      outbox.claim.mockResolvedValueOnce([retryNoteRow('row_vis_null', 'la nota que se perdio')]);
+      onnix.listComments.mockResolvedValueOnce([sinVis as OnnixTicketComentario]);
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 1, failed: 0 });
+      expect(onnix.addComment).toHaveBeenCalledTimes(1);
+      expect(outbox.markSynced).toHaveBeenCalledWith('row_vis_null', '99');
+    });
+
+    it('⚠️ PERDIDA 4: comentario remoto ANTERIOR a `row.created_at` -> NO se adopta, se postea', async () => {
+      // Un comentario que ya existia cuando la fila ni siquiera se habia escrito no
+      // puede ser su POST perdido: es de otra fila o lo escribio un humano en OSD.
+      // Adoptarlo es perder este mensaje.
+      outbox.claim.mockResolvedValueOnce([retryNoteRow('row_viejo', 'la nota que se perdio')]);
+      onnix.listComments.mockResolvedValueOnce([adoptable({ created_at: BEFORE_ROW })]);
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 1, failed: 0 });
+      expect(onnix.addComment).toHaveBeenCalledTimes(1);
+      expect(outbox.markSynced).toHaveBeenCalledWith('row_viejo', '99');
+    });
+
+    it('⚠️ PERDIDA 4b: sin `created_at` o con una fecha que no parsea -> NO se adopta, se postea', async () => {
+      // Sin fecha no hay forma de saber si es nuestro: la duda resuelve a postear.
+      outbox.claim.mockResolvedValueOnce([
+        retryNoteRow('row_sin_fecha', 'la nota que se perdio'),
+        retryNoteRow('row_fecha_basura', 'la nota que se perdio'),
+      ]);
+      onnix.listComments
+        .mockResolvedValueOnce([adoptable({ created_at: undefined })])
+        .mockResolvedValueOnce([adoptable({ created_at: 'ayer a la tarde' })]);
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 2, failed: 0 });
+      expect(onnix.addComment).toHaveBeenCalledTimes(2);
+    });
+
+    it('⚠️ PERDIDA 5: las dos lecturas van SECUENCIALES (OSD primero, reclamos despues), nunca en Promise.all', async () => {
+      // En paralelo el snapshot de reclamos es de t0 y el de OSD de t0+latencia (el
+      // GET puede tardar hasta 15s). Un comentario que OTRO drenado postea y marca
+      // `synced` DENTRO de esa ventana aparece en el listado de OSD pero NO en los
+      // reclamos: se ve huerfano, esta fila lo adopta y su mensaje se pierde.
+      // Preguntando a OSD PRIMERO, todo lo que exista en el listado ya tuvo su
+      // chance de figurar como reclamado.
+      const order: string[] = [];
+      onnix.listComments.mockImplementation(async () => {
+        order.push('osd:in');
+        await Promise.resolve();
+        await Promise.resolve();
+        order.push('osd:out');
+        return [];
+      });
+      outbox.getCommentClaimState.mockImplementation(async () => {
+        order.push('reclamos:in');
+        await Promise.resolve();
+        return { claimedIds: [], unanchored: 0 };
+      });
+      outbox.claim.mockResolvedValueOnce([retryNoteRow('row_secuencial', 'nota')]);
+
+      await service.processPending();
+
+      // Con `Promise.all` el orden seria osd:in, reclamos:in, osd:out.
+      expect(order).toEqual(['osd:in', 'osd:out', 'reclamos:in']);
+    });
+
+    it('GUARD R2.2: el match es por texto EXACTO (prefijo incluido), no por parecido', async () => {
+      // El mismo cuerpo SIN el prefijo de autor es OTRO comentario (lo escribio un
+      // humano en OSD). Si alguien afloja el `===` a un includes/startsWith,
+      // adoptariamos comentarios ajenos y el mensaje nuestro no viajaria nunca.
+      outbox.claim.mockResolvedValueOnce([retryNoteRow('row_parecido', 'la nota')]);
+      // Todo lo demas es adoptable: lo UNICO que falla es el texto.
+      onnix.listComments.mockResolvedValueOnce([
+        adoptable({ id: 888, comment: 'la nota' }),
+      ]);
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 1, failed: 0 });
+      expect(onnix.addComment).toHaveBeenCalledTimes(1);
+      expect(outbox.markSynced).toHaveBeenCalledWith('row_parecido', '99');
+    });
+
+    /**
+     * ⚠️ EL TEST DEL SPEC. Dos filas distintas con el MISMO texto exacto ("ok",
+     * "gracias", "dale" — lo mas normal del mundo en un chat). La primera ya posteo
+     * y RECLAMO su id; la segunda entra por el camino de reintento.
+     *
+     * Si la segunda adopta el "ok" de la primera, el fix es peor que el bug que
+     * arregla: en vez de duplicar un mensaje, PERDEMOS uno del cliente y nadie se
+     * entera (la fila queda `synced`). Por eso el POST tiene que salir igual.
+     *
+     * Se simulan VIVOS el hilo de OSD y nuestra tabla: lo que se postea entra al
+     * hilo, y lo que se marca synced con id queda reclamado. Con constantes fijas
+     * el test no probaria nada — el resultado lo estariamos eligiendo nosotros.
+     */
+    it('⚠️ PERDIDA 6 — "ok" repetido: la segunda fila SI se postea, no adopta el comentario de la primera', async () => {
+      const osdThread: OnnixTicketComentario[] = [];
+      const claimedIds: string[] = [];
+      let nextOsdId = 700;
+      onnix.addComment.mockImplementation((_code, comment, isInternal) => {
+        // El hilo simulado devuelve lo MISMO que devolveria OSD: id, texto,
+        // visibilidad y sello de tiempo. Con un fixture pobre (sin is_internal ni
+        // created_at) la segunda fila no adoptaria por culpa de esas guardas y el
+        // test pasaria sin probar lo que dice probar (el set de reclamados).
+        const created: OnnixTicketComentario = {
+          id: nextOsdId++,
+          comment,
+          is_internal: isInternal,
+          created_at: new Date().toISOString(),
+        };
+        osdThread.push(created);
+        return Promise.resolve({ ok: true, status: 201, data: created });
+      });
+      onnix.listComments.mockImplementation(() => Promise.resolve([...osdThread]));
+      outbox.markSynced.mockImplementation((_id, externalId) => {
+        if (externalId) claimedIds.push(externalId);
+        return Promise.resolve();
+      });
+      // Contabilidad COMPLETA (unanchored 0): el dedup esta activo a pleno, asi que
+      // lo unico que puede frenar la adopcion es que el "ok" de la primera fila ya
+      // tenga dueño. Ese es exactamente el mecanismo bajo prueba.
+      outbox.getCommentClaimState.mockImplementation(() =>
+        Promise.resolve({ claimedIds: [...claimedIds], unanchored: 0 }),
+      );
+
+      outbox.claim.mockResolvedValueOnce([
+        makeNoteRow('row_ok_1', 'ok', 'user_admin', {
+          attempts: 0,
+          created_at: new Date(Date.now() - 1000),
+        }),
+        // Ya fallo una vez: pasa por el chequeo anti-duplicado, con el "ok" de la
+        // primera fila ya en el hilo de OSD.
+        makeNoteRow('row_ok_2', 'ok', 'user_admin', {
+          attempts: 1,
+          created_at: new Date(Date.now() - 1000),
+        }),
+      ]);
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 2, failed: 0 });
+      // LOS DOS mensajes llegan. Si baja a 1, se perdio uno.
+      expect(onnix.addComment).toHaveBeenCalledTimes(2);
+      expect(onnix.addComment.mock.calls.map((c) => c[1])).toEqual([
+        '[Josu] ok',
+        '[Josu] ok',
+      ]);
+      expect(osdThread.map((c) => c.id)).toEqual([700, 701]);
+      // Y cada fila reclama SU id: la segunda nunca se cuelga del de la primera.
+      expect(outbox.markSynced).toHaveBeenNthCalledWith(1, 'row_ok_1', '700');
+      expect(outbox.markSynced).toHaveBeenNthCalledWith(2, 'row_ok_2', '701');
+    });
+
+    it('R2.4: el primer intento (attempts === 0) NO paga el GET de dedup', async () => {
+      // El camino feliz —el 99,9% de los drenados— no puede pagar una request extra
+      // por ticket para cubrir un caso de reintento.
+      outbox.claim.mockResolvedValueOnce([
+        makeNoteRow('row_feliz', 'nota', 'user_admin', { attempts: 0 }),
+      ]);
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 1, failed: 0 });
+      expect(onnix.listComments).not.toHaveBeenCalled();
+      expect(outbox.getCommentClaimState).not.toHaveBeenCalled();
+      expect(onnix.addComment).toHaveBeenCalledTimes(1);
+    });
+
+    it('D2.3: un 5xx del comentario postea UNA vez; el de TICKET_CREATED SIGUE reintentando intra-drain', async () => {
+      // El contraste es el punto: `retryWithJitter` se saco SOLO del comentario.
+      // La creacion tiene el guard de external_id y el estado es last-write-wins,
+      // asi que para ellos el reintento inmediato es gratis; para el comentario era
+      // el disparo con MAS chances de duplicar (a los ~300ms, con OSD todavia
+      // procesando el primero) y encima corria con attempts en 0, el punto ciego
+      // del chequeo anti-duplicado.
+      outbox.claim.mockResolvedValueOnce([
+        makeNoteRow('row_5xx_c', 'nota', 'user_admin', { attempts: 0 }),
+        makeRow('row_5xx_t', 'TICKET_CREATED', { external_id: null, attempts: 0 }),
+      ]);
+      prisma.ticket.findUnique.mockResolvedValue(makeTicket());
+      mapping.resolveClientId.mockResolvedValue(555);
+      mapping.resolveProjectId.mockResolvedValue(777);
+      mapping.resolveCatalogIds.mockResolvedValue({
+        ticketTypeId: 10,
+        ticketCategoryId: 20,
+        ticketPriorityId: 30,
+      });
+      onnix.addComment.mockRejectedValue(new OnnixUpstreamError(503, 'add-comment'));
+      onnix.createTicket.mockRejectedValue(new OnnixUpstreamError(503, 'create-ticket'));
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 0, failed: 2 });
+      expect(onnix.addComment).toHaveBeenCalledTimes(1);
+      expect(onnix.createTicket).toHaveBeenCalledTimes(2);
+      await service.onModuleDestroy(); // corta el drenado de seguimiento (D3)
+    });
+
+    it('D2.4: el Idempotency-Key es el id de la fila (estable por fila, distinto entre dos filas del mismo texto)', async () => {
+      // Esa semantica es exactamente la que hace falta: el mismo valor en los
+      // reintentos de UNA fila, distinto entre dos mensajes iguales. El dia que OSD
+      // honre el header, el duplicado se corta del otro lado sin tocar nada aca.
+      outbox.claim.mockResolvedValueOnce([
+        makeNoteRow('row_key_1', 'ok', 'user_admin'),
+        makeNoteRow('row_key_2', 'ok', 'user_admin'),
+      ]);
+
+      await service.processPending();
+
+      expect(onnix.addComment).toHaveBeenNthCalledWith(
+        1,
+        'TK-2026-000123',
+        '[Josu] ok',
+        true,
+        expect.any(String),
+        'row_key_1',
+      );
+      expect(onnix.addComment).toHaveBeenNthCalledWith(
+        2,
+        'TK-2026-000123',
+        '[Josu] ok',
+        true,
+        expect.any(String),
+        'row_key_2',
+      );
+    });
+
+    it('R2.6: el re-post tras fallo ambiguo deja un WARN rastreable y NUNCA el cuerpo del comentario', async () => {
+      // El re-post es el unico momento en que puede nacer un duplicado (R2.7), asi
+      // que tiene que quedar auditable a mano: ticket, code, fila e intentos. El
+      // cuerpo no: es conversacion del cliente en un log que termina en Railway.
+      outbox.claim.mockResolvedValueOnce([
+        makeNoteRow('row_warn', 'datos confidenciales del cliente', 'user_admin', {
+          attempts: 2,
+        }),
+      ]);
+      onnix.listComments.mockResolvedValueOnce([]); // OSD no tiene huella del intento anterior
+      const warnSpy = spyLog('warn');
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 1, failed: 0 });
+      expect(onnix.addComment).toHaveBeenCalledTimes(1);
+      const logged = warnSpy.mock.calls.map((c) => String(c[0])).join('\n');
+      expect(logged).toContain('rowId=row_warn');
+      expect(logged).toContain('ticketId=ticket_1');
+      expect(logged).toContain('code=TK-2026-000123');
+      expect(logged).toContain('attempts=2');
+      expect(logged).not.toContain('datos confidenciales del cliente');
+    });
+
+    it('si el GET de dedup falla, NO se postea a ciegas: la fila vuelve a pending', async () => {
+      // Si no podemos preguntar "¿ya llego?", postear seria apostar a que no. Un
+      // ciclo mas de espera es barato; un comentario duplicado en OSD no se borra.
+      outbox.claim.mockResolvedValueOnce([
+        makeNoteRow('row_ciego', 'nota', 'user_admin', { attempts: 1 }),
+      ]);
+      onnix.listComments.mockRejectedValueOnce(
+        new OnnixUpstreamError(503, 'list-comments'),
+      );
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 0, failed: 1 });
+      expect(onnix.addComment).not.toHaveBeenCalled();
+      expect(outbox.markFailed).toHaveBeenCalledWith(
+        'row_ciego',
+        expect.stringContaining('503'),
+        false, // reintentable: el proximo drenado vuelve a preguntar
+      );
+      await service.onModuleDestroy(); // corta el drenado de seguimiento (D3)
+    });
+
+    it('GUARD D5: el externalId nuevo de COMMENT_ADDED NO confunde a getCreatedExternalId (#13)', async () => {
+      // Antes de #51 el unico externalId era el `code` de TICKET_CREATED. Ahora las
+      // filas COMMENT_ADDED tambien lo tienen, asi que el ordering gate podria
+      // empezar a leer un id de comentario como si fuera el code del ticket.
+      // OutboxService REAL contra un findFirst que emula el filtrado de Prisma: si
+      // alguien saca el `eventType: 'TICKET_CREATED'` del where, esto lo caza.
+      const outboxPrisma = mockDeep<PrismaService>();
+      const realOutbox = new OutboxService(outboxPrisma, config, mockDeep<EventEmitter2>());
+      const stored = [
+        { eventType: 'COMMENT_ADDED', externalId: '99' },
+        { eventType: 'TICKET_CREATED', externalId: 'TK-2026-000123' },
+      ];
+      (outboxPrisma.outboxEvent.findFirst as unknown as jest.Mock).mockImplementation(
+        (args: { where: { eventType?: string } }) =>
+          Promise.resolve(stored.find((r) => r.eventType === args.where.eventType) ?? null),
+      );
+
+      await expect(realOutbox.getCreatedExternalId('ticket_1')).resolves.toBe(
+        'TK-2026-000123',
+      );
+      expect(outboxPrisma.outboxEvent.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ eventType: 'TICKET_CREATED' }),
+        }),
+      );
+    });
+  });
+
+  // ── #51 T4 — drenado de seguimiento (R4/D3) ────────────────────────────────
+
+  /**
+   * Sacar el reintento intra-drain del comentario (D2.3) deja un hueco: una fila
+   * que falla por un blip de OSD esperaria al cron —hasta 20 min— que es justo lo
+   * que #50 R4 vino a eliminar. El cierre es re-agendar el drenado al terminar,
+   * reusando `scheduleDrain` (mismo debounce, misma guarda de re-armado, misma
+   * limpieza en el shutdown): cero maquinaria nueva.
+   *
+   * Se mide por `jest.getTimerCount()` en vez de espiar el metodo privado: lo que
+   * importa es que quede un drenado AGENDADO de verdad, no que se llame una funcion.
+   */
+  describe('#51 T4 — drenado de seguimiento al cerrar processPending (R4/D3)', () => {
+    /**
+     * Espera del seguimiento cuando quedaron filas REINTENTABLES (#51 FIX 4). NO es
+     * el debounce de 3s: con `ONNIX_SYNC_MAX_ATTEMPTS` y 3s entre intentos el
+     * presupuesto se quema en segundos y una caida corta de OSD manda el outbox
+     * entero a la DLQ. Duplicado aca (no importado) a proposito: si alguien cambia
+     * la constante del service, estos tests tienen que ponerse rojos y obligar a
+     * mirar por que.
+     */
+    const RETRY_BACKOFF_MS = 60_000;
+    const DEBOUNCE_MS = 3000;
+
+    beforeEach(() => {
+      jest.useFakeTimers();
+      outbox.getCreatedExternalId.mockResolvedValue('TK-2026-000123');
+      prisma.user.findUnique.mockResolvedValue({ name: 'Josu' } as never);
+      onnix.addComment.mockResolvedValue(okComment());
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    it('R4.1/FIX 4: un fallo transitorio agenda con RETRY_BACKOFF_MS, NO con el debounce', async () => {
+      outbox.claim.mockResolvedValueOnce([
+        makeNoteRow('row_t4_retry', 'nota', 'user_admin', { attempts: 0 }),
+      ]);
+      onnix.addComment.mockRejectedValue(new OnnixUpstreamError(503, 'add-comment'));
+
+      const res = await service.processPending();
+
+      // La fila volvio a pending (reintentable), no quedo terminal en la DLQ.
+      expect(res).toEqual({ synced: 0, failed: 1 });
+      expect(outbox.markFailed).toHaveBeenCalledWith(
+        'row_t4_retry',
+        expect.stringContaining('503'),
+        false,
+      );
+      expect(jest.getTimerCount()).toBe(1);
+
+      const drainSpy = jest
+        .spyOn(service, 'processPending')
+        .mockResolvedValue({ synced: 0, failed: 0 });
+      // A los 3s NO tiene que reintentar: con el debounce corto, tres intentos se
+      // consumen en ~9 segundos y un blip de 60s de OSD manda todo a la DLQ.
+      jest.advanceTimersByTime(RETRY_BACKOFF_MS - 1);
+      expect(drainSpy).not.toHaveBeenCalled();
+
+      // Y ese timer SI es un drenado: al vencer el backoff corre processPending.
+      jest.advanceTimersByTime(1);
+      expect(drainSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('R4.1: un lote LLENO con avance agenda seguimiento con el DEBOUNCE corto (es latencia, no reintento)', async () => {
+      // `claimed === batchSize` significa que habia al menos tantas pendientes como
+      // el batch: casi seguro quedo trabajo atras. Aplica a TODOS los eventTypes.
+      config.onnixSyncBatchSize = 2;
+      outbox.claim.mockResolvedValueOnce([
+        makeNoteRow('row_t4_full_a', 'uno', 'user_admin'),
+        makeNoteRow('row_t4_full_b', 'dos', 'user_admin'),
+      ]);
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 2, failed: 0 });
+      expect(jest.getTimerCount()).toBe(1);
+
+      const drainSpy = jest
+        .spyOn(service, 'processPending')
+        .mockResolvedValue({ synced: 0, failed: 0 });
+      jest.advanceTimersByTime(DEBOUNCE_MS - 1);
+      expect(drainSpy).not.toHaveBeenCalled();
+      jest.advanceTimersByTime(1);
+      expect(drainSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('⚠️ FIX 3: un lote LLENO de puros `skipped` (ordering gate) NO agenda NADA', async () => {
+      // El busy-loop que estuvo 24h vivo en produccion: `claimed === batchSize` a
+      // secas lo cumple un lote entero de filas que el gate LIBERA sin avanzar nada
+      // (claim de N, N release, "synced=0 failed=0", re-agenda a los 3s, otra vez).
+      // ~28.800 ciclos y ~2,9M de escrituras muertas por dia contra la DB, durante
+      // las 24h que tarda el fondo de pozo en declararlas terminales. Esas filas no
+      // consumieron intento: las despierta su TICKET_CREATED via notifyEnqueued.
+      config.onnixSyncBatchSize = 2;
+      outbox.claim.mockResolvedValueOnce([
+        makeChatRow('row_t4_gate_a', 'msg_a', { created_at: new Date() }),
+        makeChatRow('row_t4_gate_b', 'msg_b', { created_at: new Date() }),
+      ]);
+      outbox.getCreatedExternalId.mockResolvedValue(null); // el ticket aun no esta en OSD
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 0, failed: 0 });
+      expect(outbox.release).toHaveBeenCalledTimes(2);
+      expect(jest.getTimerCount()).toBe(0);
+    });
+
+    it('FIX 3: lote lleno con UNA sola fila que avanzo -> SI agenda (el corte es "hubo trabajo util")', async () => {
+      // La contracara del anterior: la condicion no es "todo avanzo", es "avanzo
+      // algo". Si se endureciera de mas, un lote mixto dejaria de encadenar y el
+      // backlog volveria a depender del cron de 20 min.
+      config.onnixSyncBatchSize = 2;
+      outbox.claim.mockResolvedValueOnce([
+        makeChatRow('row_t4_mix_gate', 'msg_gate', { created_at: new Date() }),
+        makeNoteRow('row_t4_mix_ok', 'nota', 'user_admin'),
+      ]);
+      outbox.getCreatedExternalId
+        .mockResolvedValueOnce(null) // la primera queda en el gate
+        .mockResolvedValueOnce('TK-2026-000123');
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 1, failed: 0 });
+      expect(jest.getTimerCount()).toBe(1);
+    });
+
+    it('⚠️ FIX 3: batchSize 0 (env var VACIA en Railway) NO agenda: `0 === 0` era un bucle infinito', async () => {
+      // `Number('') === 0` y pasa la validacion. Con la condicion vieja
+      // (`claimed === batchSize`) un lote vacio cumplia `0 === 0` y el drenado se
+      // re-agendaba para siempre con la cola MUERTA: nada se sincronizaba y la DB
+      // comia un claim cada 3 segundos. Por eso se exige tambien `claimed > 0`.
+      config.onnixSyncBatchSize = 0;
+      outbox.claim.mockResolvedValueOnce([]);
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 0, failed: 0 });
+      expect(outbox.claim).toHaveBeenCalledWith(0);
+      expect(jest.getTimerCount()).toBe(0);
+    });
+
+    it('todo synced y lote CORTO -> NO agenda nada (no se drena en vacio en bucle)', async () => {
+      // La contracara. Si esto se rompe, cada drenado agenda otro para siempre.
+      outbox.claim.mockResolvedValueOnce([
+        makeNoteRow('row_t4_ok', 'nota', 'user_admin'),
+      ]);
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 1, failed: 0 });
+      expect(jest.getTimerCount()).toBe(0);
+    });
+
+    it('un failed TERMINAL (cap de intentos) NO agenda: esa fila ya no se mueve sola', async () => {
+      // Aca esta el porque de distinguir `retry` de `failed` en vez de contar
+      // `result.failed`: la fila capeo y quedo en la DLQ, asi que re-agendar seria
+      // un drenado en vacio en bucle hasta que alguien la saque a mano.
+      outbox.claim.mockResolvedValueOnce([
+        makeNoteRow('row_t4_cap', 'nota', 'user_admin', { attempts: 2 }), // cap = 3
+      ]);
+      onnix.addComment.mockRejectedValue(new OnnixUpstreamError(500, 'add-comment'));
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 0, failed: 1 });
+      expect(outbox.markFailed).toHaveBeenCalledWith('row_t4_cap', expect.any(String), true);
+      expect(jest.getTimerCount()).toBe(0);
+    });
+
+    it('el ordering gate (skipped) NO agenda por si solo: su TICKET_CREATED la despierta', async () => {
+      // Esa fila no consumio intento y lo que le falta es el code del ticket, que
+      // llega por notifyEnqueued cuando el TICKET_CREATED se sincroniza. Agendar
+      // por ella seria drenar en vacio cada debounce hasta las 24h del fondo de pozo.
+      outbox.claim.mockResolvedValueOnce([
+        makeChatRow('row_t4_gate', 'msg_1', { created_at: new Date() }),
+      ]);
+      outbox.getCreatedExternalId.mockResolvedValueOnce(null);
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 0, failed: 0 });
+      expect(outbox.release).toHaveBeenCalledWith('row_t4_gate');
+      expect(jest.getTimerCount()).toBe(0);
+    });
+
+    it('con el flag maestro apagado no agenda seguimiento (ni siquiera reclama)', async () => {
+      config.onnixSyncEnabled = false;
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 0, failed: 0 });
+      expect(outbox.claim).not.toHaveBeenCalled();
+      expect(jest.getTimerCount()).toBe(0);
+    });
+
+    it('el seguimiento reusa scheduleDrain: onModuleDestroy lo corta y no drena en el shutdown', async () => {
+      outbox.claim.mockResolvedValueOnce([
+        makeNoteRow('row_t4_destroy', 'nota', 'user_admin', { attempts: 0 }),
+      ]);
+      onnix.addComment.mockRejectedValue(new OnnixUpstreamError(503, 'add-comment'));
+
+      await service.processPending();
+      expect(jest.getTimerCount()).toBe(1);
+
+      await service.onModuleDestroy();
+
+      // Si el seguimiento usara un setTimeout propio en vez de scheduleDrain,
+      // `drainTimer` no lo apuntaria y el shutdown no lo cortaria.
+      expect(jest.getTimerCount()).toBe(0);
+      const drainSpy = jest.spyOn(service, 'processPending');
+      jest.advanceTimersByTime(60_000);
+      expect(drainSpy).not.toHaveBeenCalled();
+    });
+
+    it('si el seguimiento vence con OTRO drenado en vuelo, re-arma en vez de solaparse', async () => {
+      // La guarda de #50 FIX 3 tiene que seguir cubriendo tambien a este disparo:
+      // dos processPending solapados vuelven a desordenar la conversacion en OSD.
+      outbox.claim.mockResolvedValueOnce([
+        makeNoteRow('row_t4_rearm', 'nota', 'user_admin', { attempts: 0 }),
+      ]);
+      onnix.addComment.mockRejectedValueOnce(new OnnixUpstreamError(503, 'add-comment'));
+      await service.processPending();
+      expect(jest.getTimerCount()).toBe(1);
+
+      // Segundo drenado EN VUELO (claim diferido): `running` queda en true.
+      let releaseClaim!: (rows: OutboxRow[]) => void;
+      outbox.claim.mockReturnValueOnce(
+        new Promise<OutboxRow[]>((resolve) => {
+          releaseClaim = resolve;
+        }),
+      );
+      const inFlight = service.processPending();
+      const drainSpy = jest.spyOn(service, 'processPending');
+
+      // El timer pendiente es el del BACKOFF (el ciclo cerro con una fila
+      // reintentable), asi que hay que llegar hasta los 60s para que venza.
+      jest.advanceTimersByTime(RETRY_BACKOFF_MS);
+
+      expect(drainSpy).not.toHaveBeenCalled(); // no arranco un tercero en paralelo
+      expect(jest.getTimerCount()).toBe(1); // el disparo no se perdio: re-armado
+
+      releaseClaim([]);
+      await inFlight;
+      await service.onModuleDestroy();
+    });
+
+    // ── FIX 4: un solo timer, dos esperas de proposito opuesto ────────────────
+
+    it('⚠️ FIX 4: un pedido mas CORTO reemplaza al backoff pendiente (un mensaje nuevo no espera 60s)', async () => {
+      // Si el backoff no se pudiera adelantar, un mensaje escrito durante la ventana
+      // de reintento saldria recien un minuto despues: el drain-on-enqueue de #50
+      // quedaria anulado justo cuando OSD ya se recupero.
+      outbox.claim.mockResolvedValueOnce([
+        makeNoteRow('row_t4_corto', 'nota', 'user_admin', { attempts: 0 }),
+      ]);
+      onnix.addComment.mockRejectedValueOnce(new OnnixUpstreamError(503, 'add-comment'));
+      await service.processPending(); // arma el backoff de 60s
+      expect(jest.getTimerCount()).toBe(1);
+
+      const drainSpy = jest
+        .spyOn(service, 'processPending')
+        .mockResolvedValue({ synced: 0, failed: 0 });
+      service.onOutboxEnqueued(); // llega un mensaje: pide 3s
+
+      // Sigue habiendo UN solo timer (se reemplazo, no se sumo) y vence a los 3s.
+      expect(jest.getTimerCount()).toBe(1);
+      jest.advanceTimersByTime(DEBOUNCE_MS);
+      expect(drainSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('⚠️ FIX 4: un backoff NO atrasa un debounce ya agendado (el reintento no puede frenar la rafaga)', async () => {
+      // La direccion contraria. Si el pedido largo pisara al corto, cada ciclo con
+      // una fila reintentable empujaria el drenado de los mensajes NUEVOS a 60s.
+      service.onOutboxEnqueued(); // debounce de 3s armado
+      expect(jest.getTimerCount()).toBe(1);
+
+      outbox.claim.mockResolvedValueOnce([
+        makeNoteRow('row_t4_largo', 'nota', 'user_admin', { attempts: 0 }),
+      ]);
+      onnix.addComment.mockRejectedValueOnce(new OnnixUpstreamError(503, 'add-comment'));
+      await service.processPending(); // pide 60s: tiene que ser IGNORADO
+
+      expect(jest.getTimerCount()).toBe(1);
+      const drainSpy = jest
+        .spyOn(service, 'processPending')
+        .mockResolvedValue({ synced: 0, failed: 0 });
+      jest.advanceTimersByTime(DEBOUNCE_MS);
+      expect(drainSpy).toHaveBeenCalledTimes(1); // salio a los 3s, no a los 60s
+    });
   });
 });
 

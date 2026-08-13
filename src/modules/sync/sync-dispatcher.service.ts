@@ -4,7 +4,11 @@ import { OnEvent } from '@nestjs/event-emitter';
 import { randomUUID } from 'crypto';
 import { PrismaService } from '../../database/prisma.service';
 import { AppConfigService } from '../../config/app.config';
-import { OutboxService, OUTBOX_ENQUEUED_EVENT } from './outbox.service';
+import {
+  OutboxService,
+  OUTBOX_ENQUEUED_EVENT,
+  SKIPPED_MESSAGE_DELETED_EXTERNAL_ID,
+} from './outbox.service';
 import { OnnixClientService } from './onnix-client.service';
 import { OnnixMappingService } from './onnix-mapping.service';
 import { OnnixUpstreamError } from './errors';
@@ -55,20 +59,53 @@ const UNKNOWN_AUTHOR = 'Usuario';
  */
 const SYNC_CRON = '0 */20 * * * *';
 /**
+ * Espera del drenado de seguimiento cuando quedaron filas REINTENTABLES (#51 FIX 4).
+ *
+ * El debounce de `onnixSyncDrainDebounceMs` (3s) esta pensado para una rafaga de
+ * chat: agrupa mensajes nuevos y baja la latencia. Reusarlo para el REINTENTO era
+ * un error de categoria: con ONNIX_SYNC_MAX_ATTEMPTS=3 y 3s entre intentos, el cap
+ * se quema en ~6-9 SEGUNDOS. Antes de #51 los intentos los espaciaba el cron (20
+ * min), asi que una caida corta de OSD costaba UN intento; con el seguimiento
+ * corriendo cada 3s un 502 de 60s manda el outbox ENTERO a la DLQ — la feature de
+ * "robustez" dejaria al sistema MENOS tolerante a una interrupcion breve.
+ *
+ * Un minuto es el orden de magnitud de un blip de upstream (deploy, restart,
+ * failover) y deja los 3 intentos cubriendo ~2 min de caida sin capear, mientras
+ * el cron de 20 min sigue como red de seguridad para lo que dure mas. No es env
+ * var a proposito (mismo molde que SHUTDOWN_TIMEOUT_MS / ORDER_GATE_MAX_AGE_MS):
+ * es una decision de diseño del reintento, no tuning por entorno.
+ */
+const RETRY_BACKOFF_MS = 60_000;
+/**
  * Resultado del procesamiento de una fila.
  * - `skipped` = ordering gate, no cuenta.
  * - `dry_run` = simulacro (ONNIX_SYNC_DRY_RUN): pipeline completo SIN POST a Onnix;
  *   no cuenta como synced (no hay external_id real) ni como failed real.
+ * - `retry` = fallo transitorio que volvio a `pending` con attempts++ (#51 D3). Se
+ *   cuenta como `failed` en el DrainResult (es un fallo de este ciclo, y asi lo
+ *   reportaba #13/#50), pero se distingue del `failed` TERMINAL porque es la unica
+ *   señal de "quedo trabajo pendiente" que dispara el drenado de seguimiento.
  */
-type RowOutcome = 'synced' | 'failed' | 'skipped' | 'dry_run';
+type RowOutcome = 'synced' | 'failed' | 'retry' | 'skipped' | 'dry_run';
 
 /**
  * Drenador del outbox → Onnix (feature #13, D2/D5/D7/D10).
  *
- * Disparado por `@Cron` cada 20 min (anti-solapamiento `waitForCompletion`) y por el
- * endpoint admin (mismo método `processPending`). `@OnEvent` es solo trigger de
- * baja latencia (best-effort), NUNCA fuente de verdad (R3, R4). El claim atómico
- * de `OutboxService` garantiza que dos drains concurrentes no tomen la misma fila.
+ * Disparado por `@Cron` cada 20 min, por el timer del drain-on-enqueue y por el
+ * endpoint admin (todos el mismo método `processPending`). `@OnEvent` es solo
+ * trigger de baja latencia (best-effort), NUNCA fuente de verdad (R3, R4).
+ *
+ * ⚠️ UN SOLO DRENADO POR PROCESO (#51 FIX A). Los CUATRO disparadores consultan
+ * `this.running` antes de arrancar; `waitForCompletion` del `@Cron` solo cubre al
+ * cron contra si mismo. Dos `processPending` solapados eran la raiz de casi todos
+ * los caminos de perdida/duplicado de #51: locks que vencen mientras el otro drena,
+ * escrituras terminales que pisan filas ajenas, conversacion desordenada en OSD y
+ * el `finally` del primero apagando `running` con el otro todavia vivo.
+ *
+ * Contra el solapamiento ENTRE PROCESOS (dos instancias del backend, un redeploy
+ * con superposicion) `running` no puede nada: ahi protegen el claim atomico
+ * (`FOR UPDATE SKIP LOCKED`), el refresco de lock por fila y las escrituras
+ * condicionadas a `in_flight` de `OutboxService`.
  */
 @Injectable()
 export class SyncDispatcherService implements OnModuleDestroy {
@@ -76,6 +113,13 @@ export class SyncDispatcherService implements OnModuleDestroy {
   private running = false;
   /** Timer del debounce del drain-on-enqueue (#50 R4.1). null = no hay drenado agendado. */
   private drainTimer: NodeJS.Timeout | null = null;
+  /**
+   * Vencimiento (epoch ms) del timer vigente (#51 FIX 4). Con un solo timer y DOS
+   * esperas distintas (debounce corto de rafaga vs backoff largo de reintento) hace
+   * falta saber CUANDO vence el que ya esta armado para decidir si el pedido nuevo
+   * lo reemplaza: gana siempre el mas CORTO. null cuando no hay timer.
+   */
+  private drainTimerDueAt: number | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -87,13 +131,47 @@ export class SyncDispatcherService implements OnModuleDestroy {
 
   // ── Disparadores ───────────────────────────────────────────────────────────
 
+  /**
+   * ⚠️ MISMA guarda que `onTicketEvent` y que el timer del debounce (#51 FIX A).
+   * `waitForCompletion` evita que el cron se solape CONSIGO MISMO y nada mas: no
+   * sabe del timer del drain-on-enqueue ni del endpoint admin. El cron era el unico
+   * disparador que llamaba `processPending()` sin mirar `this.running`, asi que un
+   * tick que caia con el drenado del debounce en vuelo arrancaba un SEGUNDO drenado
+   * en el mismo proceso — la raiz de casi todos los caminos de perdida/duplicado de
+   * #51 (locks que vencen mientras el otro drena, escrituras terminales que pisan
+   * filas ajenas, comentarios desordenados en el hilo de OSD, y el `finally` del
+   * primero en terminar apagando `running` con el otro todavia vivo).
+   *
+   * Perder el tick no cuesta nada: el cron vuelve en 20 min y el drenado en vuelo
+   * esta procesando la MISMA cola ahora mismo (con su propio seguimiento agendado
+   * si quedo trabajo). Por eso retorna a secas y no re-agenda.
+   */
   @Cron(SYNC_CRON, {
     name: 'onnix-sync',
     waitForCompletion: true,
   })
   async tick(): Promise<void> {
-    if (!this.config.onnixSyncEnabled) return;
+    if (!this.config.onnixSyncEnabled || this.running) return;
     await this.processPending();
+  }
+
+  /**
+   * ¿Hay un drenado en vuelo EN ESTE PROCESO? Solo lectura (#51 FIX A): el
+   * endpoint admin la consulta para no arrancar un segundo drenado solapado. Se
+   * expone como metodo —y no como `public running`— para que nadie pueda escribir
+   * la bandera desde afuera: `running` es del ciclo de vida de `processPending`.
+   *
+   * El chequeo-y-llamada del caller NO tiene ventana de carrera: `processPending`
+   * pone `running = true` de forma SINCRONA (antes de su primer `await`), asi que
+   * el event loop no puede intercalar un segundo drenado entre el `isDraining()` y
+   * el `processPending()` de otro request.
+   *
+   * Ojo con el alcance: es memoria del proceso, no un lock distribuido. Dos
+   * instancias del backend NO se ven entre si; contra eso protege el claim atomico
+   * (`FOR UPDATE SKIP LOCKED`) mas el refresco de lock por fila (FIX C).
+   */
+  isDraining(): boolean {
+    return this.running;
   }
 
   /** Trigger best-effort: despierta el drenado. NUNCA usa el payload como verdad. */
@@ -119,15 +197,35 @@ export class SyncDispatcherService implements OnModuleDestroy {
   }
 
   /**
-   * Agenda UN drenado tras el debounce. Una rafaga de conversacion (varios
-   * mensajes seguidos) cae toda dentro de la misma ventana: el primero agenda y
-   * los siguientes salen por el `if (this.drainTimer)` → un solo drain para el
-   * lote. El anti-solapamiento contra el cron ya lo dan `waitForCompletion` + el
-   * claim atomico, no se duplica aca.
+   * Agenda UN drenado tras `delayMs` (default: el debounce del drain-on-enqueue).
+   * Una rafaga de conversacion (varios mensajes seguidos) cae toda dentro de la
+   * misma ventana: el primero agenda y los siguientes no adelantan nada → un solo
+   * drain para el lote. El anti-solapamiento contra el cron ya lo dan
+   * `waitForCompletion` + el claim atomico, no se duplica aca.
+   *
+   * ⚠️ Hay UN solo timer para dos esperas de proposito opuesto (#51 FIX 4): el
+   * debounce corto (3s, latencia de chat) y el backoff del reintento
+   * (RETRY_BACKOFF_MS, para no quemar el cap de intentos en segundos). La regla que
+   * los concilia es "gana el mas corto":
+   * - si ya hay timer y el pedido nuevo vence DESPUES o igual, se ignora (un
+   *   reintento NUNCA pisa/atrasa un debounce de rafaga ya agendado);
+   * - si vence ANTES, se cancela el vigente y se re-agenda con el mas corto (un
+   *   mensaje nuevo durante el backoff sigue saliendo en 3s).
+   * Asi el backoff nunca se ADELANTA solo: cuando el drenado de rafaga corre
+   * primero, las filas reintentables que sigan fallando vuelven a pedir su propio
+   * backoff al cerrar ese ciclo.
    */
-  private scheduleDrain(): void {
+  private scheduleDrain(delayMs: number = this.config.onnixSyncDrainDebounceMs): void {
     if (!this.config.onnixSyncEnabled) return;
-    if (this.drainTimer) return;
+    const dueAt = Date.now() + delayMs;
+    if (this.drainTimer) {
+      // `?? 0` defensivo: sin vencimiento conocido no se puede comparar, y adelantar
+      // un drenado es inocuo (el claim atomico protege), atrasarlo no.
+      if (dueAt >= (this.drainTimerDueAt ?? 0)) return;
+      clearTimeout(this.drainTimer);
+      this.drainTimer = null;
+    }
+    this.drainTimerDueAt = dueAt;
     this.drainTimer = setTimeout(() => {
       // Guarda de solapamiento (#50): el timer no consultaba `running` (a
       // diferencia de `onTicketEvent`) y ponia `drainTimer = null` ANTES de
@@ -141,18 +239,24 @@ export class SyncDispatcherService implements OnModuleDestroy {
       // → se RE-ARMA el timer. Cada re-armado crea un timer nuevo con `unref`, y
       // `drainTimer` siempre apunta al vigente, asi que el `clearTimeout` de
       // `onModuleDestroy` lo sigue cortando aunque el drenado se cuelgue.
+      // Al re-armar se usa el debounce corto a proposito, aunque este timer viniera
+      // del backoff: el drenado en vuelo esta procesando la cola AHORA, asi que lo
+      // unico que hace falta es una pasada corta detras de el. Si esas filas siguen
+      // fallando, ese ciclo vuelve a pedir su propio RETRY_BACKOFF_MS.
       if (this.running) {
         this.drainTimer = null;
+        this.drainTimerDueAt = null;
         this.scheduleDrain();
         return;
       }
       this.drainTimer = null;
+      this.drainTimerDueAt = null;
       void this.processPending().catch((e: unknown) =>
         this.logger.warn(
           `drain-on-enqueue falló (el cron lo recupera): ${(e as Error)?.message ?? e}`,
         ),
       );
-    }, this.config.onnixSyncDrainDebounceMs);
+    }, delayMs);
     // No debe mantener vivo el proceso ni frenar un shutdown limpio; el cron
     // recupera lo que quede pendiente. `?.` porque con fake timers puede faltar.
     this.drainTimer.unref?.();
@@ -163,6 +267,7 @@ export class SyncDispatcherService implements OnModuleDestroy {
     if (this.drainTimer) {
       clearTimeout(this.drainTimer);
       this.drainTimer = null;
+      this.drainTimerDueAt = null;
     }
     const start = Date.now();
     while (this.running && Date.now() - start < SHUTDOWN_TIMEOUT_MS) {
@@ -178,13 +283,51 @@ export class SyncDispatcherService implements OnModuleDestroy {
     const traceId = randomUUID();
     const result: DrainResult = { synced: 0, failed: 0 };
     let dryRun = 0;
+    /** Filas que volvieron a `pending` por fallo transitorio (#51 D3). */
+    let retryable = 0;
+    /** Filas que quedaron TERMINALES en la DLQ (422, payload corrupto, cap). */
+    let terminal = 0;
+    /** Filas que el ordering gate libero sin consumir intento (no es trabajo hecho). */
+    let skipped = 0;
+    /**
+     * Filas del lote que dejaron de ser nuestras ANTES de procesarlas (#51 FIX C):
+     * el refresco del lock encontro que ya no estaban `in_flight`. No son ni exito
+     * ni fallo de este ciclo —las esta procesando otro drenado—, pero son la señal
+     * de que hubo solapamiento y por eso viajan al log de cierre.
+     */
+    let lost = 0;
+    /** Tamaño del lote reclamado; fuera del try para decidir el seguimiento. */
+    let claimed = 0;
+    // Se lee UNA vez: el mismo numero decide el LIMIT del claim y la condicion de
+    // "lote lleno". Releerlo abajo compararia contra un valor que pudo cambiar.
+    const batchSize = this.config.onnixSyncBatchSize;
     this.running = true;
     try {
       // `claim` devuelve las filas ordenadas por created_at ASC (garantizado por
       // el CTE, ver OutboxService.claim): este loop es secuencial, asi que ese
       // orden ES el orden en que los comentarios aparecen en el hilo de OSD.
-      const rows = await this.outbox.claim(this.config.onnixSyncBatchSize);
+      const rows = await this.outbox.claim(batchSize);
+      claimed = rows.length;
       for (const row of rows) {
+        // Lock POR FILA, no por lote (#51 FIX C). `claim` estampa `locked_at` una
+        // sola vez para las hasta `batchSize` filas, asi que el reloj de
+        // ONNIX_SYNC_STALE_LOCK_MS (120s) empieza a correr para TODAS al mismo
+        // tiempo. Con OSD lento (cada call aborta a los 15s, y una fila en reintento
+        // paga GET + POST) la ultima fila de un lote de 50 puede empezar a
+        // procesarse ~25 min despues del claim: otro drenado ya la vio como lock
+        // vencido, la rescato y la posteo, mientras esta todavia la tiene en memoria
+        // y tambien la va a postear → comentario duplicado en OSD, que no tiene
+        // delete. Refrescando el lock justo antes de tocarla, el reloj corre por
+        // FILA y el rescate solo puede pasar si ESA fila de verdad se colgo.
+        //
+        // `'lost'` = la fila ya no esta `in_flight`: otro drenado se la llevo y la
+        // esta procesando. Saltearla es lo correcto — procesarla igual produce
+        // exactamente el duplicado que este refresco vino a evitar, y no se pierde
+        // nada porque el otro drenado la termina.
+        if ((await this.outbox.renewClaimLock(row.id)) === 'lost') {
+          lost++;
+          continue;
+        }
         let outcome: RowOutcome;
         try {
           outcome = await this.processRow(row, traceId);
@@ -192,17 +335,65 @@ export class SyncDispatcherService implements OnModuleDestroy {
           outcome = await this.handleUpstreamFailure(row, err);
         }
         if (outcome === 'synced') result.synced++;
-        else if (outcome === 'failed') result.failed++;
-        else if (outcome === 'dry_run') dryRun++;
+        // `retry` cuenta como failed hacia afuera (el contrato de DrainResult no
+        // cambia) pero se lleva su propio contador para el drenado de seguimiento.
+        else if (outcome === 'failed') {
+          result.failed++;
+          terminal++;
+        } else if (outcome === 'retry') {
+          result.failed++;
+          retryable++;
+        } else if (outcome === 'dry_run') dryRun++;
+        else skipped++;
       }
       await this.checkDlqAge();
     } finally {
       this.running = false;
     }
+    // Drenado de seguimiento (#51 R4.1/D3). Sin esto, al sacar el reintento
+    // intra-drain del comentario (D2.3) un blip de OSD dejaria el mensaje esperando
+    // hasta el proximo cron — justo lo que #50 R4 vino a eliminar. Reusa
+    // `scheduleDrain` (mismo timer, misma guarda de re-armado, misma limpieza en el
+    // shutdown) y aplica a TODOS los eventTypes.
+    //
+    // ⚠️ La condicion mira si el ciclo hizo TRABAJO UTIL, no solo si el lote volvio
+    // lleno (#51 FIX 3). El `claimed === batchSize` a secas era un busy-loop: un lote
+    // LLENO de filas que el ordering gate libera (`skipped`) lo cumple sin haber
+    // avanzado nada → claim de 50, 50 release, "synced=0 failed=0", re-agenda a los
+    // 3s, y otra vez. Son ~28.800 ciclos y ~2,9M de escrituras muertas por dia contra
+    // la DB, durante las 24h que tarda el fondo de pozo del gate en declararlas
+    // terminales; pre-#51 ese mismo estado costaba UN ciclo cada 20 min. Peor: con
+    // `batchSize = 0` (una env var DEFINIDA PERO VACIA en Railway da `Number('') === 0`
+    // y pasa la validacion) `0 === 0` re-agendaba para siempre con la cola muerta —
+    // por eso tambien se exige `claimed > 0`.
+    //
+    // Dos motivos legitimos, con esperas distintas:
+    // - `retryable > 0`: quedaron filas en `pending` por un transitorio. Va con
+    //   RETRY_BACKOFF_MS, NO con el debounce: a 3s el cap de intentos se quema en
+    //   segundos y una caida corta de OSD manda todo a la DLQ (#51 FIX 4).
+    // - lote lleno Y con avance real (`synced + terminal + dryRun > 0`): hay backlog
+    //   y la cola se esta moviendo. Va con el debounce normal (es latencia, no
+    //   reintento).
+    // Un lote que solo tuvo `skipped` NO agenda nada: esas filas no consumieron
+    // intento y su TICKET_CREATED las despierta via notifyEnqueued cuando se cree.
+    // Va DESPUES del `finally` (running ya en false) y antes del log de cierre.
+    const progressed = result.synced + terminal + dryRun;
+    if (retryable > 0) {
+      this.scheduleDrain(RETRY_BACKOFF_MS);
+    } else if (claimed > 0 && claimed === batchSize && progressed > 0) {
+      this.scheduleDrain();
+    }
     if (dryRun > 0) result.dryRun = dryRun;
     this.logger.log(
       `onnix-sync drain done traceId=${traceId} synced=${result.synced} failed=${result.failed}` +
-        (dryRun > 0 ? ` dryRun=${dryRun}` : ''),
+        (dryRun > 0 ? ` dryRun=${dryRun}` : '') +
+        // claimed/skipped/retryable no cambian el contrato de DrainResult, pero son
+        // la unica forma de leer en los logs el estado que causaba el busy-loop
+        // (claimed=batchSize con skipped=batchSize = cola tapada por el gate).
+        // `lost` > 0 significa que OTRO drenado se llevo filas de este lote: es el
+        // sintoma directo de dos drenados solapados y la primera cosa que hay que
+        // mirar si aparece un comentario duplicado en OSD.
+        ` claimed=${claimed} skipped=${skipped} retryable=${retryable} lost=${lost}`,
     );
     return result;
   }
@@ -430,7 +621,17 @@ export class SyncDispatcherService implements OnModuleDestroy {
         // Mensaje borrado entre el encolado y el drenado (R2.2): NO es un defecto.
         // markSynced (no markFailed) para no ensuciar la DLQ ni disparar la alerta
         // de edad por algo que el usuario deshizo a proposito.
-        await this.outbox.markSynced(row.id);
+        //
+        // ⚠️ CON CENTINELA (#51 FIX D). Marcarla `synced` con `externalId = null`
+        // la dejaba, para siempre, como una fila COMMENT_ADDED sincronizada SIN
+        // ancla; `getCommentClaimState` la contaba en `unanchored`, y `unanchored >
+        // 0` DESACTIVA la adopcion del ticket ENTERO. O sea: un unico mensaje
+        // borrado apagaba el anti-duplicado de ese ticket de forma permanente, y a
+        // partir de ahi cada timeout de OSD en ese ticket duplicaba el comentario.
+        // El centinela dice la verdad —"esta fila nunca posteo nada, no hay
+        // comentario de OSD que anclar"— y no puede colisionar con un id real (los
+        // de OSD son numericos), asi que dentro del set de reclamados es inerte.
+        await this.outbox.markSynced(row.id, SKIPPED_MESSAGE_DELETED_EXTERNAL_ID);
         this.log(row, traceId, 'skipped', 'mensaje inexistente (borrado antes del drenado)');
         return 'skipped';
       }
@@ -469,11 +670,88 @@ export class SyncDispatcherService implements OnModuleDestroy {
     }
 
     try {
-      const outcome = await this.retryWithJitter(() =>
-        this.onnix.addComment(code, comment, isInternal, traceId),
+      // Chequeo anti-duplicado (#51 R2.2/D2.2), SOLO en reintentos. `attempts > 0`
+      // significa que esta fila ya salio a la ruta y volvio con un fallo AMBIGUO: un
+      // timeout NO prueba que OSD no haya procesado el POST (rawFetch aborta a los
+      // 15s y clasifica como transitorio). Antes de re-postear preguntamos si
+      // nuestro comentario ya esta alla. En el camino feliz (attempts === 0) esto no
+      // corre: el drenado normal no paga ni una request extra (R2.4).
+      if (row.attempts > 0) {
+        const orphan = await this.findUnclaimedComment(
+          code,
+          row,
+          comment,
+          isInternal,
+          traceId,
+        );
+        // `!= null` (no `!== null`) a proposito: si alguna vez vuelve `undefined`
+        // —un comentario de OSD sin `id`, contrato roto—, `!== null` lo dejaba pasar
+        // y se grababa el literal 'undefined' como externalId: la fila queda `synced`
+        // sin haber posteado NADA (mensaje perdido) y encima ese externalId basura
+        // envenena el dedup del ticket para siempre. El predicado de abajo ya exige
+        // `typeof id === 'number'`; esto es la segunda linea de defensa.
+        if (orphan != null) {
+          // Era nuestro POST perdido: se adopta en vez de duplicarlo. El id queda
+          // reclamado por ESTA fila, asi que ninguna otra lo va a confundir.
+          await this.outbox.markSynced(row.id, String(orphan));
+          this.log(
+            row,
+            traceId,
+            'synced',
+            `dedup: el POST anterior si habia llegado (osdId=${orphan})`,
+          );
+          return 'synced';
+        }
+        // No hay huella del intento anterior → se re-postea. Es el unico momento en
+        // que puede nacer un duplicado (R2.7: un humano escribio en OSD el mismo
+        // texto con prefijo incluido, o OSD lo acepto y no lo devuelve en el GET),
+        // asi que queda un WARN rastreable con todo lo necesario para auditarlo a
+        // mano (#51 R2.6/D2.6). NUNCA el cuerpo: es conversacion del cliente.
+        this.logger.warn(
+          `onnix-sync re-post de comentario tras fallo ambiguo (posible duplicado) ` +
+            `ticketId=${row.aggregate_id} code=${code} rowId=${row.id} ` +
+            `attempts=${row.attempts} traceId=${traceId}`,
+        );
+      }
+
+      // SIN retryWithJitter a proposito (#51 R2.3/D2.3): un solo camino de reintento.
+      // El intra-drain corria con `row.attempts` todavia en 0 —el punto ciego del
+      // chequeo de arriba— y disparaba a los ~300ms, con OSD probablemente todavia
+      // procesando el primer POST: era el reintento con MAS probabilidad de duplicar.
+      // Ahora un transitorio va derecho a handleUpstreamFailure (fila → pending,
+      // attempts++) y el proximo drenado —que D3 agenda en segundos— entra por D2.2.
+      // `createTicket` y `setEstado` lo CONSERVAN: son idempotentes por diseño.
+      const outcome = await this.onnix.addComment(
+        code,
+        comment,
+        isInternal,
+        traceId,
+        // Idempotency-Key (#51 R2.5/D2.4): el id de la fila. OSD hoy lo ignora.
+        row.id,
       );
       if (outcome.ok) {
-        await this.outbox.markSynced(row.id);
+        // Se persiste el id del comentario de OSD como externalId (#51 R2.1/D2.1):
+        // el 201 ya lo trae, cuesta cero y es EL ancla de todo el dedup — a partir de
+        // aca cada comentario nuestro en OSD tiene dueño. No afecta a
+        // `getCreatedExternalId`, que filtra por eventType 'TICKET_CREATED'.
+        // El ternario cubre el 200 sin body (contrato roto): markSynced sin id sigue
+        // siendo correcto —la fila SI se sincronizo—, solo queda sin ancla.
+        const osdId =
+          outcome.data?.id !== undefined ? String(outcome.data.id) : undefined;
+        const written = await this.outbox.markSynced(row.id, osdId);
+        // La fila dejo de ser nuestra entre el POST y el markSynced (#51 FIX B): el
+        // comentario SI existe en OSD pero su ancla no se pudo guardar en ningun
+        // lado. `OutboxService` ya loggeo el ERROR generico; aca se agrega lo unico
+        // que el operador necesita para re-anclarlo a mano (que id de OSD quedo
+        // suelto y en que ticket), porque ese huerfano es justo el que puede
+        // envenenar el dedup del ticket mas adelante.
+        if (written === 'lost') {
+          this.logger.error(
+            `onnix-sync comentario POSTEADO pero SIN anclar: la fila ${row.id} ya no era ` +
+              `nuestra al marcarla synced. ticketId=${row.aggregate_id} code=${code} ` +
+              `osdId=${osdId ?? 'desconocido'} traceId=${traceId}`,
+          );
+        }
         this.log(row, traceId, 'synced', `is_internal=${isInternal}`);
         return 'synced';
       }
@@ -491,6 +769,114 @@ export class SyncDispatcherService implements OnModuleDestroy {
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
+
+  /**
+   * Busca en OSD un comentario que sea el POST perdido de ESTA fila (#51 D2.2).
+   * Devuelve su `id` o `null` si hay que postear.
+   *
+   * ⚠️ REGLA RECTORA (R2): PERDER UN MENSAJE ES MUCHO PEOR QUE DUPLICARLO. OSD no
+   * tiene delete ni update de comentario, asi que un duplicado se resuelve a ojo
+   * pero un mensaje que no se postea se pierde para siempre Y EN SILENCIO (la fila
+   * queda `synced`). Por eso TODA duda —dato faltante, contabilidad incompleta,
+   * campo que no vino— resuelve a `null`: se postea.
+   *
+   * Adoptar exige que se cumplan TODAS estas condiciones:
+   * 1. `comment` IDENTICO al texto que ibamos a mandar (prefijo de autor incluido).
+   * 2. `id` numerico. Con `String(c.id)` un comentario sin `id` daba 'undefined',
+   *    jamas estaba en el set de reclamados y por lo tanto SIEMPRE matcheaba por
+   *    texto — el peor caso posible del predicado.
+   * 3. Ese `id` NO esta reclamado como `externalId` por otra outbox-row
+   *    COMMENT_ADDED `synced` del mismo ticket. Sin esto, dos mensajes identicos del
+   *    mismo autor ("ok", "gracias", "dale" — el 80% de una conversacion de soporte)
+   *    son indistinguibles: la segunda fila encontraria el "ok" de la primera y se
+   *    daria por enviada.
+   * 4. MISMA visibilidad (`is_internal`). El prefijo de una nota interna de un admin
+   *    y el de su mensaje de chat son IDENTICOS (`[Juan] `), asi que sin esto una
+   *    fila puede adoptar un comentario de visibilidad OPUESTA: la nota interna se
+   *    contabiliza contra el mensaje publico y el cliente nunca ve el suyo. Si OSD
+   *    no devuelve el campo, NO hay match (no se adivina la visibilidad).
+   * 5. Ventana temporal: `created_at` del comentario >= `created_at` de la fila. Un
+   *    comentario ANTERIOR a la existencia de la fila no puede ser su POST perdido.
+   *    Sin fecha o con fecha que no parsea, NO es candidato.
+   *
+   * Ademas, si el ticket tiene comentarios nuestros SIN ancla (`externalId` null:
+   * filas sincronizadas antes de #51 o un 200 sin body), el dedup se DESACTIVA
+   * entero para ese aggregate: la contabilidad de reclamos esta incompleta y no hay
+   * forma de distinguir "huerfano porque se perdio mi POST" de "huerfano porque
+   * nadie anoto quien es su dueño".
+   *
+   * ⚠️ Ese estado degradado NO "se reactiva solo" (lo decia este comentario y era
+   * FALSO — #51 FIX D). Una fila vieja sin ancla no adquiere `externalId` jamas: las
+   * filas nuevas suman anclas propias pero no arreglan a las viejas, asi que el
+   * contador queda en >0 y el ticket se queda sin adopcion mientras existan. Lo
+   * unico que se corrigio es la fuente que CRECIA sola: el skip por mensaje borrado
+   * marcaba `synced` sin externalId y sumaba una fila sin ancla por cada mensaje
+   * que un usuario borrara — un solo borrado apagaba el dedup del ticket para
+   * siempre. Ahora esa fila lleva `SKIPPED_MESSAGE_DELETED_EXTERNAL_ID` y cuenta
+   * como anclada. El residual que queda (tickets con comentarios previos a #51, o
+   * un 200 sin body) es acotado y su efecto es POSTEAR: duplicado recuperable a
+   * ojo, nunca perdida.
+   *
+   * Si `listComments` falla, la excepcion sube al catch de `processComment` →
+   * `handleUpstreamFailure`: no se postea a ciegas cuando no se pudo preguntar.
+   */
+  private async findUnclaimedComment(
+    code: string,
+    row: OutboxRow,
+    comment: string,
+    isInternal: boolean,
+    traceId: string,
+  ): Promise<number | null> {
+    // ⚠️ SECUENCIAL, no `Promise.all` (#51 FIX 2). En paralelo el snapshot de
+    // reclamos es de t0 y el de OSD de t0+latencia (rawFetch aborta recien a los
+    // 15s). Un comentario que OTRO drenado postea y marca `synced` DENTRO de esa
+    // ventana aparece en el listado de OSD pero no en los reclamos → se ve huerfano,
+    // esta fila lo adopta y el mensaje de esta fila se pierde. Preguntando a OSD
+    // PRIMERO y leyendo los reclamos DESPUES, todo lo que exista en el listado ya
+    // tuvo su chance de estar reclamado. Cuesta un round-trip de DB en el camino de
+    // reintento, que ya paga un GET a OSD.
+    const remote = await this.onnix.listComments(code, traceId);
+    const state = await this.outbox.getCommentClaimState(row.aggregate_id);
+
+    if (state.unanchored > 0) {
+      this.logger.warn(
+        `onnix-sync dedup DESACTIVADO para ticketId=${row.aggregate_id}: ` +
+          `${state.unanchored} comentario(s) sincronizado(s) sin externalId (sin ancla). ` +
+          `La contabilidad de reclamos esta incompleta, asi que un comentario "libre" en OSD ` +
+          `puede ser de otra fila y adoptarlo perderia este mensaje: se postea (posible duplicado, ` +
+          // Sin "se reactiva solo" a proposito (#51 FIX D): esas filas no van a ganar
+          // un externalId nunca, asi que el ticket queda con el dedup apagado hasta
+          // que alguien ancle o limpie esas filas a mano.
+          `recuperable a ojo). NO se reactiva solo: esas filas no van a ganar un externalId, ` +
+          `hay que anclarlas o limpiarlas a mano si se quiere el dedup de vuelta en este ticket. ` +
+          `rowId=${row.id} code=${code} traceId=${traceId}`,
+      );
+      return null;
+    }
+
+    // Set de strings: `externalId` es texto en la DB y el id de OSD es numero.
+    const claimedIds = new Set(state.claimedIds);
+    // `new Date(...)` defensivo: la fila viene de $queryRaw crudo.
+    const rowCreatedAtMs = new Date(row.created_at).getTime();
+
+    const match = remote.find((c) => {
+      if (typeof c.id !== 'number') return false;
+      if (c.comment !== comment) return false;
+      // Comparacion estricta contra el booleano: `undefined !== true/false`, asi que
+      // un OSD que no devuelva el campo cae solo del lado de "no match".
+      if (c.is_internal !== isInternal) return false;
+      if (claimedIds.has(String(c.id))) return false;
+      // Estricto a proposito: si OSD trunca el timestamp a segundos, un comentario
+      // nuestro puede quedar milisegundos "antes" que la fila y no ser candidato.
+      // Ese error resuelve a POSTEAR (duplicado recuperable), que es el lado
+      // correcto de la regla rectora; aflojarlo abre la puerta a adoptar un
+      // comentario preexistente y perder el mensaje.
+      const remoteMs = c.created_at ? new Date(c.created_at).getTime() : NaN;
+      if (Number.isNaN(remoteMs) || remoteMs < rowCreatedAtMs) return false;
+      return true;
+    });
+    return match === undefined ? null : match.id;
+  }
 
   /**
    * Ordering gate sin code de creacion (R23 / R2.4), compartido por
@@ -533,8 +919,17 @@ export class SyncDispatcherService implements OnModuleDestroy {
    * Marca un fallo transitorio (5xx/red/timeout/auth). Reintentable mientras no se
    * alcance el cap (R31/R32); al cap → terminal `failed`. attempts++ lo hace
    * `markFailed(terminal=false)`.
+   *
+   * Devuelve `retry` cuando la fila volvio a `pending` (queda trabajo) y `failed`
+   * cuando capeo y quedo TERMINAL en la DLQ (#51 D3). Esa distincion es la que
+   * dispara —o no— el drenado de seguimiento: re-agendar por una fila que ya es
+   * terminal seria un drenado en vacio en bucle. Hacia afuera las dos siguen
+   * contando como `failed` en el DrainResult.
    */
-  private async handleUpstreamFailure(row: OutboxRow, err: unknown): Promise<'failed'> {
+  private async handleUpstreamFailure(
+    row: OutboxRow,
+    err: unknown,
+  ): Promise<'failed' | 'retry'> {
     const reason =
       err instanceof OnnixUpstreamError
         ? `${err.upstreamStatus} ${err.upstreamReason ?? ''}`.trim()
@@ -543,14 +938,21 @@ export class SyncDispatcherService implements OnModuleDestroy {
     await this.outbox.markFailed(row.id, reason.slice(0, 4000), willCap);
     if (willCap) {
       this.logger.warn(`onnix-sync fila ${row.id} alcanzó el cap de intentos → failed`);
+      return 'failed';
     }
-    return 'failed';
+    return 'retry';
   }
 
   /**
    * Reintento intra-drain con backoff exponencial + jitter (R33) SOLO para
    * transitorios (5xx/red/timeout). No modifica `common/utils/retry.ts` (global).
    * Los 422/401-auth no son transitorios y se propagan/clasifican afuera.
+   *
+   * ⚠️ Lo usan `createTicket` y `setEstado`, NUNCA `addComment` (#51 R2.3/D2.3).
+   * Esos dos son idempotentes ante un timeout —la creacion tiene el guard de
+   * `external_id` y el estado es last-write-wins—, asi que un reintento inmediato
+   * es gratis. Un comentario NO: cada POST que llega es una linea mas en la
+   * conversacion que ve el cliente, y OSD no tiene delete de comentario.
    */
   private async retryWithJitter<T>(
     fn: () => Promise<T>,

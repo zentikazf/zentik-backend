@@ -100,9 +100,25 @@ export const envSchema = z.object({
   // seteada en Railway es inofensiva — el schema no es `.strict()`, asi que Zod
   // descarta las claves que sobran.
   // Cap de filas drenadas por ciclo (batch size).
-  ONNIX_SYNC_BATCH_SIZE: z.coerce.number().default(50),
+  //
+  // `.int().positive()` NO es cosmetico (#51 FIX 11): `z.coerce.number()` convierte
+  // '' en 0, asi que una var DEFINIDA PERO VACIA en Railway (el tipico "la cree y la
+  // deje en blanco") pasaba el boot y el claim corria con LIMIT 0 — la sync quedaba
+  // MUERTA en silencio, sin un solo error, hasta que alguien mirara la DLQ. Con
+  // `.positive()` el boot rompe fuerte y se arregla en 30 segundos. Preferimos
+  // romper a degradar: un contenedor que no levanta se ve; una cola que no drena, no.
+  ONNIX_SYNC_BATCH_SIZE: z.coerce.number().int().positive().default(50),
   // Cap de reintentos antes de marcar la fila failed (R32).
-  ONNIX_SYNC_MAX_ATTEMPTS: z.coerce.number().default(3),
+  //
+  // Default 8 (era 3, subido en #51 FIX 11): con los reintentos ahora ESPACIADOS por
+  // backoff, 3 intentos se consumen en minutos. Una caida de OSD de un par de
+  // minutos —o un redeploy suyo— mandaba la cola ENTERA a la DLQ, y recuperarla es
+  // trabajo manual. 8 le da a la ventana de reintentos margen de horas sin cambiar
+  // nada estructural. El presupuesto ademas ahora se gasta un poco mas rapido: el
+  // rescate de lock vencido cuenta como intento (FIX 7) y el requeue de un
+  // COMMENT_ADDED arranca en 1 (FIX 6). Mismo `.int().positive()` que arriba: un 0
+  // haria que TODA fila cayera a `failed` en el primer fallo transitorio.
+  ONNIX_SYNC_MAX_ATTEMPTS: z.coerce.number().int().positive().default(8),
   // Reclamacion de filas in_flight colgadas (ms): un lock mas viejo que esto
   // vuelve a ser elegible (cubre crash entre claim y markSynced).
   ONNIX_SYNC_STALE_LOCK_MS: z.coerce.number().default(120000),
@@ -113,7 +129,10 @@ export const envSchema = z.object({
   // Debounce del drain-on-enqueue (#50 R4.1): ventana para agrupar una rafaga de
   // mensajes en UN solo drenado. Baja la latencia de horas a segundos sin pegarle
   // a Onnix un POST por mensaje. Default 3000 (rango pedido: 2-5s).
-  ONNIX_SYNC_DRAIN_DEBOUNCE_MS: z.coerce.number().default(3000),
+  // `.int().positive()` (#51 FIX 11): una var vacia coercionaba a 0 y el debounce
+  // degradaba a "un drenado por cada mensaje", justo lo que la ventana viene a
+  // evitar — y encima en silencio.
+  ONNIX_SYNC_DRAIN_DEBOUNCE_MS: z.coerce.number().int().positive().default(3000),
 
   // === Botmaker Billing (feature #23) ===
   // Feature flag maestro (molde Onnix). Con `false` (default) BASE_URL/ACCESS_TOKEN son opcionales:

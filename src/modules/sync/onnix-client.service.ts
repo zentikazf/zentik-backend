@@ -4,12 +4,14 @@ import { AppConfigService } from '../../config/app.config';
 import { OnnixConfigError, OnnixUpstreamError } from './errors';
 import {
   OnnixAddComentarioBody,
+  OnnixAddComentarioResponse,
   OnnixCallOutcome,
   OnnixCatalogItem,
   OnnixCatalogos,
   OnnixCreateTicketBody,
   OnnixEstado,
   OnnixLoginResponse,
+  OnnixListComentariosResponse,
   OnnixSetEstadoBody,
   OnnixTicketComentario,
   OnnixTicketDetalle,
@@ -178,12 +180,25 @@ export class OnnixClientService {
    * `isInternal` decide la nota interna de OSD (R3.3). El truncado a 10.000 chars
    * lo hace el dispatcher ANTES de llamar (tiene que conservar el prefijo de autor).
    * NUNCA se loggea el `comment`: es contenido de conversacion del cliente.
+   *
+   * `idempotencyKey` (#51 R2.5/D2.4) viaja como header `Idempotency-Key` y es el id
+   * de la outbox-row: estable entre reintentos de la MISMA fila y distinto entre
+   * dos filas con el mismo texto, que es exactamente la semantica que hace falta.
+   * OSD hoy lo ignora; el dia que lo honre, el duplicado se corta en el servidor y
+   * de este lado no hay que escribir una linea mas. Es obligatorio a proposito: si
+   * fuera opcional, un caller nuevo podria olvidarlo y perder la garantia en
+   * silencio el dia que OSD lo implemente.
+   *
+   * El body del 2xx se procesa con `extractComentario` (#51 FIX 8/FIX 9): de ahi
+   * sale el id que ancla el dedup, y ahi se detecta la nota interna degradada a
+   * publica. Ninguno de los dos puede fallar en silencio.
    */
   async addComment(
     code: string,
     comment: string,
     isInternal: boolean,
     traceId: string,
+    idempotencyKey: string,
   ): Promise<OnnixCallOutcome<OnnixTicketComentario>> {
     const body: OnnixAddComentarioBody = { comment, is_internal: isInternal };
     const res = await this.authedFetch(
@@ -191,15 +206,158 @@ export class OnnixClientService {
       'POST',
       body,
       traceId,
+      { 'Idempotency-Key': idempotencyKey },
     );
     if (res.status === 201 || res.status === 200) {
-      const data = (await this.parseJson(res)) as OnnixTicketComentario;
+      const raw = (await this.parseJson(res)) as OnnixAddComentarioResponse | null;
+      const data = this.extractComentario(raw, code, isInternal, traceId, idempotencyKey);
       return { ok: true, status: res.status, data };
     }
     if (res.status === 422) {
       return { ok: false, status: 422, message: await this.extractMessage(res) };
     }
     throw new OnnixUpstreamError(res.status, 'add-comment');
+  }
+
+  /**
+   * Normaliza el body del 2xx de `POST /tickets/{code}/comentarios` (#51 FIX 8/9).
+   * Vive aparte de `addComment` porque hace DOS chequeos de contrato que no pueden
+   * quedar sepultados en el camino feliz.
+   *
+   * FIX 8 — el ancla del dedup puede no existir nunca. El OpenAPI documenta el 201
+   * como un `TicketComentario` PELADO, pero el GET del MISMO path devuelve
+   * `{ data: [...] }`. Esa asimetria huele a anotacion escrita a mano sobre un
+   * `JsonResource` que en realidad envuelve. Si OSD responde `{ data: { id } }` y
+   * nosotros solo miramos `body.id`, el id es `undefined` SIEMPRE: ninguna fila
+   * COMMENT_ADDED queda anclada y el dedup se queda ciego para siempre. Y su modo de
+   * fallo NO es duplicar, es PERDER (ver `getCommentClaimState`). Por eso aceptamos
+   * los DOS envoltorios, y si aun asi no hay un id numerico usable dejamos un WARN
+   * explicito: el estado degradado se ve en los logs, nunca en silencio.
+   *
+   * FIX 9 — la nota interna puede publicarse como PUBLICA. El OpenAPI de OSD dice
+   * textual que `is_internal=true` requiere el permiso `tickets.internal_note` y que
+   * si el usuario NO lo tiene el comentario se guarda como PUBLICO — con 201, no con
+   * 403. Tratar ese 201 como exito sin mirar la respuesta significa que cada nota
+   * interna del staff ("el cliente no paga hace 3 meses") se publica VISIBLE PARA EL
+   * CLIENTE mientras de nuestro lado la fila queda `synced` sin una sola alerta. Es
+   * la fuga que el dueño marco como riesgo antes de aprobar #50. Si la respuesta trae
+   * `is_internal` y NO coincide con lo pedido, va un ERROR de alta severidad.
+   *
+   * NO se falla la fila en ninguno de los dos casos: el comentario YA esta en OSD y
+   * OSD no tiene delete ni update. Reintentar solo agregaria un duplicado igual de
+   * publico. Lo unico util es que un humano se entere.
+   *
+   * Metadata only en los dos logs (R27): `code`, rowId y traceId. NUNCA el cuerpo del
+   * comentario ni la respuesta completa — es conversacion del cliente.
+   */
+  private extractComentario(
+    raw: OnnixAddComentarioResponse | null,
+    code: string,
+    isInternal: boolean,
+    traceId: string,
+    rowId: string,
+  ): OnnixTicketComentario {
+    // Desenvuelve `{ data: {...} }` (Resource de Laravel) o toma el objeto pelado.
+    // El `in` distingue sin castear a any y sin romper si `raw` es null.
+    const envelope =
+      raw !== null && typeof raw === 'object' && 'data' in raw ? raw.data : raw;
+    const comentario = (envelope ?? {}) as Partial<OnnixTicketComentario>;
+
+    // El id de Laravel puede llegar como number o como string numerico segun el
+    // cast del modelo; normalizamos a number porque el dispatcher lo persiste como
+    // externalId y el dedup compara `String(id)`.
+    const id = Number(comentario.id);
+    const hasId = comentario.id !== undefined && comentario.id !== null && Number.isFinite(id);
+    if (!hasId) {
+      this.logger.warn(
+        `Onnix contrato roto: comentario sin id, la fila queda SIN ancla para el dedup ` +
+          `code=${code} rowId=${rowId} traceId=${traceId}`,
+      );
+    }
+
+    // FIX 9: solo se compara si OSD devolvio el campo. Ausente = no sabemos, y no
+    // vamos a gritar por una respuesta simplemente escueta.
+    if (typeof comentario.is_internal === 'boolean' && comentario.is_internal !== isInternal) {
+      this.logger.error(
+        `Onnix FUGA DE VISIBILIDAD: el comentario se guardo con is_internal=` +
+          `${comentario.is_internal} y se pidio ${isInternal}. Si se pidio interno y quedo ` +
+          `publico, el texto es VISIBLE PARA EL CLIENTE (falta el permiso ` +
+          `tickets.internal_note en el usuario de servicio). ` +
+          `code=${code} rowId=${rowId} traceId=${traceId}`,
+      );
+    }
+
+    // Se devuelve el objeto igual (sin id si no vino): la fila SI se sincronizo, solo
+    // queda sin ancla. El dispatcher ya contempla `outcome.data?.id === undefined`.
+    return { ...comentario, ...(hasId ? { id } : {}) } as OnnixTicketComentario;
+  }
+
+  /**
+   * Lista los comentarios de un ticket via `GET /tickets/{code}/comentarios`
+   * (#51 R2.2/D2.2). Unico consumidor: el chequeo anti-duplicado del dispatcher
+   * ANTES de re-postear un comentario cuya suerte quedo ambigua (timeout).
+   *
+   * Desenvuelve el `{ data: [...] }` de Laravel; si el body no trae `data` (contrato
+   * roto o ticket sin comentarios) devuelve `[]` en vez de romper — un dedup que no
+   * encuentra nada simplemente postea, que es el comportamiento pre-#51.
+   *
+   * Cualquier status != 2xx lanza `OnnixUpstreamError` (molde de `getCatalog`), y el
+   * dispatcher lo clasifica como transitorio: si NO podemos preguntar "¿ya llego?",
+   * NO se postea a ciegas — la fila vuelve a `pending` y se reintenta. Duplicar es
+   * peor que esperar un ciclo mas.
+   *
+   * NUNCA se loggea la respuesta: son los comentarios reales del ticket.
+   */
+  async listComments(code: string, traceId: string): Promise<OnnixTicketComentario[]> {
+    const res = await this.authedFetch(
+      `/tickets/${encodeURIComponent(code)}/comentarios`,
+      'GET',
+      undefined,
+      traceId,
+    );
+    if (!res.ok) throw new OnnixUpstreamError(res.status, 'list-comments');
+    const body = (await this.parseJson(res)) as OnnixListComentariosResponse | null;
+    const data = Array.isArray(body?.data) ? body.data : [];
+    this.warnIfPaginated(body, data.length, code, traceId);
+    return data;
+  }
+
+  /**
+   * Avisa si el GET de comentarios vino PAGINADO (#51 FIX 10).
+   *
+   * `{ data: [...] }` es exactamente el envoltorio de un `LengthAwarePaginator` de
+   * Laravel, y Laravel pagina por default las colecciones grandes. Si OSD pagina,
+   * este GET trae SOLO la primera pagina: en un ticket con conversacion larga el
+   * dedup compara contra una vista parcial del hilo, no encuentra su POST perdido y
+   * re-postea. La direccion del fallo es la buena (duplicar, no perder — R2), asi
+   * que NO implementamos la paginacion: no vale la pena traer N paginas de un ticket
+   * ruidoso en el camino de reintento. Pero tiene que ser VISIBLE, porque explica
+   * duplicados que si no parecerian un bug del dedup.
+   *
+   * Solo metadata (R27): cantidad y numeros de pagina, nunca los comentarios.
+   */
+  private warnIfPaginated(
+    body: OnnixListComentariosResponse | null,
+    received: number,
+    code: string,
+    traceId: string,
+  ): void {
+    if (!body) return;
+    const lastPage = body.meta?.last_page;
+    const total = body.meta?.total;
+    const hasMore =
+      // `links.next` no-null es la señal mas directa que da Laravel.
+      (body.links?.next ?? null) !== null ||
+      (typeof lastPage === 'number' && lastPage > 1) ||
+      // Red de seguridad si el paginator viene con otra forma: el total declarado no
+      // entra en lo que recibimos.
+      (typeof total === 'number' && total > received);
+    if (!hasMore) return;
+    this.logger.warn(
+      `Onnix comentarios PAGINADOS: el dedup corrio sobre una pagina parcial ` +
+        `(recibidos=${received} total=${total ?? '?'} lastPage=${lastPage ?? '?'}). ` +
+        `Un re-post duplicado en este ticket es esperable. code=${code} traceId=${traceId}`,
+    );
   }
 
   /** Trae los 4 catalogos para el mapeo (R19). El mapping los cachea (R20). */
@@ -226,24 +384,30 @@ export class OnnixClientService {
    * primer 401 invalida el token, re-loguea y reintenta UNA vez la MISMA llamada
    * SIN contar el intento como fallo de negocio (el caller no incrementa attempts).
    * Un segundo 401 = error de auth real → OnnixUpstreamError(401).
+   *
+   * `extraHeaders` (#51 D2.4) permite headers propios de una operacion —hoy solo
+   * `Idempotency-Key`— sin que cada llamada tenga que rearmar la capa HTTP. Viaja
+   * TAMBIEN en el reintento post-relogin: es la misma operacion de negocio, asi que
+   * tiene que llevar la misma clave de idempotencia.
    */
   private async authedFetch(
     path: string,
     method: 'GET' | 'POST',
     body: unknown,
     traceId: string,
+    extraHeaders?: Record<string, string>,
   ): Promise<Response> {
     const baseUrl = this.requireSecret('ONNIX_BASE_URL', this.config.onnixBaseUrl);
     const url = `${baseUrl}${path}`;
 
     let token = await this.getToken();
-    let res = await this.rawFetch(url, method, body, token, traceId);
+    let res = await this.rawFetch(url, method, body, token, traceId, extraHeaders);
 
     if (res.status === 401) {
       // Token expirado → re-login 1 vez (NO cuenta como intento de negocio).
       await this.invalidateToken();
       token = await this.login();
-      res = await this.rawFetch(url, method, body, token, traceId);
+      res = await this.rawFetch(url, method, body, token, traceId, extraHeaders);
       if (res.status === 401) {
         // 2do 401 = credenciales invalidas reales → error de auth (alerta).
         this.logger.error(`Onnix auth persistente 401 path=${path} traceId=${traceId}`);
@@ -264,6 +428,7 @@ export class OnnixClientService {
     body: unknown,
     token: string | undefined,
     traceId?: string,
+    extraHeaders?: Record<string, string>,
   ): Promise<Response> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.config.onnixHttpTimeoutMs);
@@ -276,6 +441,10 @@ export class OnnixClientService {
           Accept: 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
           ...(traceId ? { 'X-Trace-Id': traceId } : {}),
+          // Headers propios de la operacion (hoy solo Idempotency-Key, #51 D2.4).
+          // Van al final para que un header de negocio nunca quede tapado por los
+          // de transporte; ninguna key colisiona con las de arriba.
+          ...(extraHeaders ?? {}),
         },
         body: body !== undefined ? JSON.stringify(body) : undefined,
         signal: controller.signal,

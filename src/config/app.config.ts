@@ -132,8 +132,13 @@ export class AppConfigService {
   get onnixSyncBatchSize(): number {
     return Number(this.configService.get<string>('ONNIX_SYNC_BATCH_SIZE') ?? 50);
   }
+  // Default 8 (era 3, #51 FIX 11). Con los reintentos espaciados por backoff, 3 se
+  // consumen en minutos: una caida corta de OSD mandaba la cola entera a la DLQ y
+  // recuperarla es trabajo manual. Tiene que espejar el default de env.validation.ts
+  // — validateEnv NO inyecta los defaults de Zod de vuelta a process.env, asi que si
+  // los dos numeros se desincronizan gana ESTE en runtime y el otro solo valida.
   get onnixSyncMaxAttempts(): number {
-    return Number(this.configService.get<string>('ONNIX_SYNC_MAX_ATTEMPTS') ?? 3);
+    return Number(this.configService.get<string>('ONNIX_SYNC_MAX_ATTEMPTS') ?? 8);
   }
   get onnixSyncStaleLockMs(): number {
     return Number(this.configService.get<string>('ONNIX_SYNC_STALE_LOCK_MS') ?? 120000);
