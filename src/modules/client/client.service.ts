@@ -20,6 +20,19 @@ const MOVEMENT_BUCKETS: Record<string, string[]> = {
   DESCUENTO: ['USAGE', 'LOAN'],
 };
 
+// #56: el techo del ledger y el umbral de aviso viven JUNTOS y el umbral se DERIVA del techo (80%),
+// nunca como un segundo literal. El error clasico es dejar el techo en un lado y el umbral en otro:
+// alguien sube el techo, se olvida del umbral, y el aviso queda MUERTO justo cuando mas se necesita.
+// Si las dos no se mueven juntas, el aviso no sirve.
+export const HOURS_SUMMARY_MAX_LIMIT = 500;
+export const HOURS_SUMMARY_WARN_THRESHOLD = Math.floor(HOURS_SUMMARY_MAX_LIMIT * 0.8);
+// #53: el cap sube de 100 a 500 porque la vista de cards por mes del staff necesita el
+// ledger COMPLETO del cliente en una sola respuesta. Agrupar por mes sobre una pagina
+// parcial produce totales que MIENTEN: el total de la card seria el de la porcion del mes
+// que cayo en esa pagina, no el del mes entero. El cliente mas cargado hoy ronda los 100
+// movimientos, asi que 500 da varios anios de margen. Si algun cliente se acerca al techo
+// hay que pasar a paginacion por MES (agrupada en SQL), NO subir el numero.
+
 @Injectable()
 export class ClientService {
   private readonly logger = new Logger(ClientService.name);
@@ -664,13 +677,8 @@ export class ClientService {
     const available = Math.max(client.contractedHours - client.usedHours - client.loanedHours, 0);
 
     const safePage = Math.max(1, page);
-    // #53: el cap sube de 100 a 500 porque la vista de cards por mes del staff necesita el
-    // ledger COMPLETO del cliente en una sola respuesta. Agrupar por mes sobre una pagina
-    // parcial produce totales que MIENTEN: el total de la card seria el de la porcion del mes
-    // que cayo en esa pagina, no el del mes entero. El cliente mas cargado hoy ronda los 100
-    // movimientos, asi que 500 da varios anios de margen. Si algun cliente se acerca al techo
-    // hay que pasar a paginacion por MES (agrupada en SQL), NO subir el numero.
-    const safeLimit = Math.min(Math.max(1, limit), 500);
+    // Techo del ledger: ver HOURS_SUMMARY_MAX_LIMIT arriba (comentario de #53 con el porque).
+    const safeLimit = Math.min(Math.max(1, limit), HOURS_SUMMARY_MAX_LIMIT);
     const skip = (safePage - 1) * safeLimit;
 
     const where: Prisma.HoursTransactionWhereInput = { clientId, deletedAt: null };
@@ -701,6 +709,30 @@ export class ClientService {
         _sum: { priceAmount: true },
       }),
     ]);
+
+    // #56: aviso de que el ledger de este cliente se esta acercando al techo. Se emite SOLO al
+    // cruzar el umbral: por debajo, silencio absoluto — un warn que aparece siempre deja de leerse.
+    // Es REACTIVO a proposito (solo salta cuando alguien pide las horas de ese cliente): un cron
+    // que barra todos los clientes seria sobre-ingenieria para el volumen real, y la cobertura
+    // practica alcanza porque esta pantalla se abre para facturar y el ledger solo crece cuando
+    // alguien carga horas.
+    //
+    // `total` es el conteo DE ESTA VISTA, no el del cliente: cuando viene `movement` el count lleva
+    // el mismo `where.type` que filtra las filas, asi que cuenta solo el bucket elegido. Por eso el
+    // texto habla de la vista — decir "el cliente tiene N" hacia que el numero (y el aviso mismo)
+    // se moviera al apretar una pildora de filtro, y quien lo leyera concluia que el aviso era un
+    // error. NO se agrega un count sin filtro a proposito: seria una query mas en el camino caliente
+    // de la pantalla de facturacion, y sin filtro —el estado por defecto— la vista ES el ledger
+    // completo, que es el caso en el que este aviso importa.
+    if (total > HOURS_SUMMARY_WARN_THRESHOLD) {
+      this.logger.warn(
+        `Ledger de horas cerca del techo: la vista del cliente ${clientId} ya trae ${total} ` +
+          `movimientos (umbral ${HOURS_SUMMARY_WARN_THRESHOLD}, techo ${HOURS_SUMMARY_MAX_LIMIT}). ` +
+          `Al llegar al techo la respuesta deja de traer el ledger completo y los totales por mes ` +
+          `de la vista del staff vuelven a MENTIR (agrupan en el navegador). ` +
+          `La salida correcta NO es subir el techo: hay que paginar por MES agrupando en SQL.`,
+      );
+    }
 
     const totalAmount = billableAggregate._sum.priceAmount
       ? parseFloat(billableAggregate._sum.priceAmount.toString())
