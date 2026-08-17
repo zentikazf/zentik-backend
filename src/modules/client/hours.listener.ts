@@ -86,12 +86,21 @@ export class HoursListener {
       // (carrier legacy pre-H7) caemos al comportamiento anterior: la USAGE/LOAN más reciente.
       // H9a: deletedAt null → un cargo ya tombstoneado no se re-reembolsa (idempotencia blanda
       // ante re-entrega del evento; la garantía dura es el único parcial de reversesTransactionId).
+      // #54: rebilledFromTransactionId null → NUNCA elegir la fila ESPEJO de una nota de crédito.
+      // La espejo copia taskId y type (USAGE/LOAN) del movimiento original y nace DESPUÉS, así que
+      // en la rama NO keyed (evento sin entryVersion — `revertConfirmation`, que corre en cada
+      // aprobación/rechazo/reapertura) ganaba el `orderBy createdAt desc` y se llevaba el revert.
+      // Eso creaba un REFUND, la tombstoneaba (sacándola del pool facturable que la NC prometía
+      // re-facturar) y decrementaba usedHours/loanedHours sobre horas que la espejo NUNCA
+      // incrementó: cupo regalado al cliente. Una espejo no nació de un TimeEntry, por lo tanto
+      // jamás es el cargo que un revert de time entry debe revertir.
       const keyed = !!timeEntryId && entryVersion != null;
       const txn = await this.prisma.hoursTransaction.findFirst({
         where: {
           taskId,
           type: { in: ['USAGE', 'LOAN'] },
           deletedAt: null,
+          rebilledFromTransactionId: null,
           ...(keyed ? { timeEntryId, entryVersion } : {}),
         },
         orderBy: { createdAt: 'desc' },

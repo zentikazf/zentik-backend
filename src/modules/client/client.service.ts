@@ -775,6 +775,59 @@ export class ClientService {
       );
     }
 
+    // #54: la fila ESPEJO de una nota de crédito (rebilledFromTransactionId != null) SÍ se puede
+    // borrar, pero su delete es ASIMÉTRICO respecto de todos los demás tipos: NO revierte cupo.
+    //
+    // Por qué se permite: no existe flujo para "corregir el origen". No hay endpoint de anulación
+    // ni de borrado de NC, el modelo CreditNote no tiene status/cancelledAt, reabrir el ciclo con
+    // NCs tira CYCLE_HAS_CREDIT_NOTES y reemitir choca LINE_ALREADY_CREDITED por el @unique de
+    // creditedTransactionId. Como `returnHoursToBillable` es el DEFAULT, una espejo emitida por
+    // error quedaría inmutable, indeleteable y sin salida. Borrarla no desincroniza nada: el
+    // CreditNoteLine congelado sigue intacto; esto es literalmente "deshacer la devolución de
+    // horas al pool facturable", una acción legítima del admin.
+    //
+    // Por qué SIN reversa de contadores: la espejo nació "NO toca cupo"
+    // (client-billing.service.ts) — nunca incrementó usedHours/loanedHours. Correr el decrement
+    // de más abajo le regalaría ese cupo al cliente, que es exactamente el bug que #54 vino a
+    // matar. El EDIT sí sigue prohibido (ver editHoursTransaction): ahí el problema es distinto
+    // (dato derivado que se desincroniza del original), y borrar la fila es la salida.
+    if (tx.rebilledFromTransactionId) {
+      await this.prisma.hoursTransaction.update({
+        where: { id: transactionId },
+        data: { deletedAt: new Date(), deletedById, deleteReason: reason },
+      });
+
+      const deletedByMirror = await this.prisma.user.findUnique({
+        where: { id: deletedById },
+        select: { name: true, email: true },
+      });
+
+      this.logger.log(
+        `Hours transaction ${transactionId} (fila espejo de NC) deleted by ${deletedByMirror?.email} — ` +
+          `reason: ${reason} — cupo NO revertido (la espejo nunca lo movió)`,
+      );
+      await this.auditService.create({
+        organizationId: orgId,
+        action: 'client.hours.deleted',
+        resource: 'client',
+        resourceId: clientId,
+        oldData: {
+          transactionId,
+          type: tx.type,
+          hours: tx.hours,
+          note: tx.note,
+          rebilledFromTransactionId: tx.rebilledFromTransactionId,
+        },
+        newData: {
+          deletedBy: deletedByMirror?.name,
+          reason,
+          mirrorRow: true,
+          quotaReverted: false,
+        },
+      });
+      return;
+    }
+
     await this.prisma.$transaction(async (prisma) => {
       // Soft-delete the transaction
       await prisma.hoursTransaction.update({
@@ -851,6 +904,22 @@ export class ClientService {
         'TRANSACTION_BILLED',
         409,
         { transactionId, billedCycleId: tx.billedCycleId },
+      );
+    }
+
+    // #54: la fila ESPEJO de una nota de crédito (rebilledFromTransactionId != null) es
+    // inmutable. Va ANTES del guard de `type` a propósito: la espejo copia el type del original
+    // (USAGE/LOAN), así que ese guard la dejaría pasar. Es una COPIA derivada congelada al emitir
+    // la NC y nació SIN mover el cupo; editarla aplicaría el `increment` del delta sobre un
+    // contador que nunca tocó (sube "Consumidas" con horas que nadie trabajó) y la desincroniza
+    // del original. La salida es ELIMINAR la fila (deleteHoursTransaction la borra sin tocar cupo):
+    // no existe flujo de anulación ni de reemisión de NC, así que el mensaje no puede prometerlo.
+    if (tx.rebilledFromTransactionId) {
+      throw new AppException(
+        'La fila espejo de una nota de crédito no se edita: es una copia derivada del movimiento original. Si la devolución de horas fue un error, eliminá la fila.',
+        'MIRROR_ROW_READONLY',
+        409,
+        { transactionId, rebilledFromTransactionId: tx.rebilledFromTransactionId },
       );
     }
 
