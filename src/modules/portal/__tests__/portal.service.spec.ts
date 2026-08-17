@@ -158,3 +158,122 @@ describe('PortalService.getMyVariables (#23)', () => {
     expect(serialized).not.toContain('415.81');
   });
 });
+
+/**
+ * #55 — getMyHours: el portal NO deduce el acreditado desde la fila espejo. El backend lo resuelve
+ * con la línea de la nota de crédito (CreditNoteLine, @unique por transacción) y lo aplana a
+ * `creditNoteNumber` + `creditedDescription`. Prisma MOCKEADO.
+ */
+describe('PortalService.getMyHours — acreditado por nota de crédito (#55)', () => {
+  let prisma: DeepMockProxy<PrismaService>;
+  let service: PortalService;
+  const CLIENT = 'client-1';
+
+  beforeEach(() => {
+    prisma = mockDeep<PrismaService>();
+    service = new PortalService(
+      prisma,
+      mockDeep<EventEmitter2>(),
+      mockDeep<AuditService>(),
+      mockDeep<FileService>(),
+      mockDeep<StorageService>(),
+      mockDeep<OutboxService>(),
+      mockDeep<ClientBillingPdfService>(),
+    );
+    prisma.client.findFirst.mockResolvedValue({
+      id: CLIENT,
+      contractedHours: 10,
+      usedHours: 5,
+      loanedHours: 0,
+      currency: 'PYG',
+      developmentHourlyRate: null,
+      supportHourlyRate: null,
+    } as never);
+  });
+
+  it('incluye la línea de la nota de crédito (no infiere desde la fila espejo)', async () => {
+    prisma.hoursTransaction.findMany.mockResolvedValue([] as never);
+
+    await service.getMyHours('user-1');
+
+    const arg = prisma.hoursTransaction.findMany.mock.calls[0][0] as any;
+    // el número de la NC sale de la relación, no de parsear el `note` de ninguna fila
+    expect(arg.include.creditedByLine.select).toEqual({
+      description: true,
+      creditNote: { select: { number: true } },
+    });
+  });
+
+  it('expone creditNoteNumber + creditedDescription y descarta el objeto crudo de la relación', async () => {
+    prisma.hoursTransaction.findMany.mockResolvedValue([
+      {
+        id: 'tx-original',
+        hours: 5,
+        note: null,
+        priceAmount: '500000',
+        billedCycleId: 'cyc-1',
+        creditedByLine: {
+          description: 'Migración de datos',
+          creditNote: { number: 'NC-2026-00001' },
+        },
+      },
+    ] as never);
+
+    const res = await service.getMyHours('user-1');
+
+    expect(res.transactions[0]).toMatchObject({
+      id: 'tx-original',
+      creditNoteNumber: 'NC-2026-00001',
+      creditedDescription: 'Migración de datos',
+    });
+    expect((res.transactions[0] as any).creditedByLine).toBeUndefined();
+  });
+
+  it('sin devolución de horas (no hay fila espejo) el movimiento igual sale acreditado', async () => {
+    // El staff apagó "devolver horas al pool": NO existe la copia re-facturable, sólo la línea de la NC.
+    prisma.hoursTransaction.findMany.mockResolvedValue([
+      {
+        id: 'tx-original',
+        hours: 5,
+        priceAmount: '500000',
+        billedCycleId: 'cyc-1',
+        rebilledFromTransactionId: null,
+        creditedByLine: { description: 'Soporte', creditNote: { number: 'NC-2026-00002' } },
+      },
+    ] as never);
+
+    const res = await service.getMyHours('user-1');
+
+    expect(res.transactions).toHaveLength(1);
+    expect(res.transactions[0].creditNoteNumber).toBe('NC-2026-00002');
+  });
+
+  it('cliente SIN notas de crédito: ambos campos en null y el resto del payload intacto', async () => {
+    prisma.hoursTransaction.findMany.mockResolvedValue([
+      {
+        id: 'tx-1',
+        hours: 3,
+        note: 'Carga manual',
+        priceAmount: '300000',
+        billedCycleId: null,
+        creditedByLine: null,
+      },
+    ] as never);
+
+    const res = await service.getMyHours('user-1');
+
+    expect(res.transactions).toEqual([
+      {
+        id: 'tx-1',
+        hours: 3,
+        note: 'Carga manual',
+        priceAmount: '300000',
+        billedCycleId: null,
+        creditNoteNumber: null,
+        creditedDescription: null,
+      },
+    ]);
+    // el KPI "Pendiente de facturar" no cambia: sigue sumando lo que tiene precio y no fue facturado
+    expect(res.totalAmount).toBe(300000);
+  });
+});

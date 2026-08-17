@@ -820,6 +820,25 @@ export class PortalService {
             project: { select: { id: true, name: true } },
           },
         },
+        // #55 — FUENTE DE VERDAD de "a este movimiento se le emitió una nota de crédito".
+        //
+        // Es la línea de la NC (`CreditNoteLine.creditedTransactionId`, @unique en el schema), NO la
+        // existencia de la fila espejo re-facturable. La fila espejo sólo nace cuando el staff deja
+        // activado "devolver horas al pool" (es un switch del diálogo) y además se puede borrar, así
+        // que deducir el acreditado desde ella daba dos falsos negativos: el portal seguía mostrando
+        // el cargo firme al precio completo mientras /portal/invoices ya le mostraba al cliente la NC
+        // en negativo — las dos pantallas contradiciéndose sobre la misma plata.
+        //
+        // `description` es el concepto CONGELADO al emitir la NC (`task.title ?? note` de ese
+        // momento): sobrevive al borrado en duro de la tarea (onDelete SetNull) y es texto seguro
+        // para el cliente, a diferencia del `note` de la fila espejo, que es jerga interna
+        // ("Re-facturable por NC-…").
+        creditedByLine: {
+          select: {
+            description: true,
+            creditNote: { select: { number: true } },
+          },
+        },
       },
       orderBy: { createdAt: 'desc' },
       take: 100,
@@ -831,6 +850,16 @@ export class PortalService {
     const totalAmount = recentTransactions
       .filter((t) => t.priceAmount !== null && t.billedCycleId === null)
       .reduce((sum, t) => sum + parseFloat(t.priceAmount!.toString()), 0);
+
+    // #55 — se APLANA la relación a dos campos y se descarta el objeto crudo: el portal no expone
+    // entidades del dominio de facturación interna, sólo el número de la NC (que el cliente ya ve en
+    // /portal/invoices) y el concepto congelado. En un cliente sin ninguna NC ambos son null y el
+    // payload queda idéntico al de antes salvo por esos dos campos.
+    const transactions = recentTransactions.map(({ creditedByLine, ...t }) => ({
+      ...t,
+      creditNoteNumber: creditedByLine?.creditNote.number ?? null,
+      creditedDescription: creditedByLine?.description ?? null,
+    }));
 
     return {
       contractedHours: client.contractedHours,
@@ -844,7 +873,7 @@ export class PortalService {
       developmentHourlyRate: client.developmentHourlyRate,
       supportHourlyRate: client.supportHourlyRate,
       totalAmount,
-      transactions: recentTransactions,
+      transactions,
     };
   }
 
