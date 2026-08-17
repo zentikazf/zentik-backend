@@ -48,6 +48,34 @@ export const HOURS_SUMMARY_WARN_THRESHOLD = Math.floor(HOURS_SUMMARY_MAX_LIMIT *
 // igual — capear solo cambia CUAL pagina vacia se devuelve, no que se pierda informacion.
 export const HOURS_SUMMARY_MAX_PAGE = 100_000;
 
+// #57 (cierre): techos del LISTADO DE CLIENTES (`findAll`).
+//
+// El commit de #57 dijo que el techo de pagina iba en el SERVICE porque "cubre a cualquier
+// llamador", pero solo lo puso en `getHoursSummary`. `findAll`, en este MISMO archivo, seguia
+// haciendo `page ?? 1` / `limit ?? 50` sin NINGUN techo, con dos 500 reproducibles:
+//   - `?page=99999999999999999999` ⇒ skip ≈ 5e21 ⇒ Prisma "Unable to fit value into a 64-bit
+//     signed integer for field `skip`" ⇒ HTTP 500.
+//   - `?limit=1e21` ⇒ `take` gigante ⇒ el mismo 500. Y `?limit=1000000`, que NO revienta, es
+//     peor: devuelve la tabla `client` ENTERA con `_count.projects` + `user` + `users` en una
+//     sola respuesta. El saneo del controller no alcanza — `1e21` y los digitos planos son
+//     numeros VALIDOS para `parsePaginationParam`, que solo descarta basura sintactica.
+//
+// Constantes PROPIAS y no las de `getHoursSummary`: aquellas acotan el ledger de horas de UN
+// cliente (filas baratas, la pantalla de facturacion necesita el mes completo); estas acotan el
+// padron de clientes de la organizacion (filas con includes). Son dos cosas distintas y tienen
+// que poder moverse por separado — atarlas hacia que subir el ledger agrandara este payload.
+//
+// Por que 500 de limit: el front pide `?limit=200` en cinco pantallas (clientes, tickets,
+// dashboard, proyectos, miembros), asi que el techo deja margen de sobra y hoy no recorta
+// ninguna vista real. Si una organizacion llega a rozarlo, la salida NO es subir el numero: es
+// paginar de verdad esas pantallas.
+export const CLIENT_LIST_MAX_LIMIT = 500;
+// Por que 100_000 de page: el peor skip posible pasa a ser (100_000 - 1) * CLIENT_LIST_MAX_LIMIT
+// ≈ 5e7, once ordenes de magnitud por debajo del techo de int64 (~9.2e18). Se deriva del techo del
+// limit a proposito, igual que su hermano de horas. No recorta nada real: ninguna organizacion
+// tiene 100_000 paginas de clientes, asi que capear solo cambia CUAL pagina vacia se devuelve.
+export const CLIENT_LIST_MAX_PAGE = 100_000;
+
 @Injectable()
 export class ClientService {
   private readonly logger = new Logger(ClientService.name);
@@ -90,8 +118,14 @@ export class ClientService {
     orgId: string,
     params: { search?: string; page?: number; limit?: number; status?: string; withUsers?: boolean },
   ): Promise<PaginatedResult<any>> {
-    const page = params.page ?? 1;
-    const limit = params.limit ?? 50;
+    // Techos del listado: ver CLIENT_LIST_MAX_PAGE / CLIENT_LIST_MAX_LIMIT arriba (el porque de
+    // cada numero). Sin el techo de `page` el `skip` desborda int64 y Prisma tira 500; sin el de
+    // `limit` un `take` gigante hace lo mismo, y uno grande pero valido devuelve el padron entero.
+    // Van ACA y no solo en el controller: cubren a cualquier llamador (otro service, un test, un
+    // job), y el saneo del borde HTTP deja pasar numeros validos aunque sean absurdos.
+    // `Math.max(1, ...)` mantiene el piso: 0 y negativos caen en la pagina 1 / 1 fila.
+    const page = Math.min(Math.max(1, params.page ?? 1), CLIENT_LIST_MAX_PAGE);
+    const limit = Math.min(Math.max(1, params.limit ?? 50), CLIENT_LIST_MAX_LIMIT);
     const skip = (page - 1) * limit;
 
     const where: Prisma.ClientWhereInput = { organizationId: orgId };

@@ -811,7 +811,33 @@ export class PortalService {
         type: { in: ['USAGE', 'LOAN'] },
         deletedAt: null,
       },
-      include: {
+      // ⚠️ `select` EXPLÍCITO, nunca `include` a secas — misma regla que `getTicketDetail`
+      // (ver el comentario de ese método arriba). Este endpoint responde al CLIENTE: cada campo
+      // que se agregue acá tiene que poder leerlo el cliente.
+      //
+      // #55 escondió la jerga interna de la PANTALLA pero no del PAYLOAD: con `include` sin
+      // `select` de nivel superior, /portal/hours mandaba al navegador del cliente TODOS los
+      // escalares del ledger — `timeEntryId`, `entryVersion`, `reversesTransactionId`,
+      // `deletedById`, `deleteReason`, `clientId` — visibles con DevTools > Network. Ninguno lo
+      // usa el portal y ninguno es información del cliente: son plomería interna del ledger.
+      //
+      // La lista de abajo es EXACTAMENTE lo que consume `app/(portal)/portal/hours/page.tsx`
+      // (interface `HoursTransaction` + JSX) más lo que este mismo método necesita para el
+      // `totalAmount` (`priceAmount`, `billedCycleId`). Enumerar es donde es fácil dropear un
+      // campo vivo, así que si mañana el portal necesita uno nuevo hay que AGREGARLO acá — el
+      // síntoma de olvidarse es una columna en '—', no un error.
+      select: {
+        id: true,
+        type: true,
+        hours: true,
+        note: true, // alimenta el concepto del cliente cuando no hay tarea (ver `safeConceptOf`)
+        createdAt: true,
+        workedOn: true, // agrupa el mes (workedOn con fallback a createdAt, `monthKeyOf`)
+        priceAmount: true,
+        priceRate: true,
+        priceCurrency: true,
+        billedCycleId: true, // badge Facturado/Pendiente + KPI "Pendiente de facturar"
+        rebilledFromTransactionId: true, // empareja original y copia re-facturable
         task: {
           select: {
             id: true,
@@ -855,8 +881,16 @@ export class PortalService {
     // entidades del dominio de facturación interna, sólo el número de la NC (que el cliente ya ve en
     // /portal/invoices) y el concepto congelado. En un cliente sin ninguna NC ambos son null y el
     // payload queda idéntico al de antes salvo por esos dos campos.
+    //
+    // El `note` de una FILA ESPEJO (`rebilledFromTransactionId != null`) se manda en null: el
+    // backend la crea con "Re-facturable por NC-…", que es vocabulario del staff. El portal ya
+    // no lo pinta (`safeConceptOf` descarta el `note` de esas filas), pero seguía viajando en el
+    // JSON y se leía con DevTools > Network — que es justo lo que #55 vino a esconder. Es la
+    // MISMA regla, aplicada en el único lugar donde no se puede esquivar. No se toca el `note` de
+    // ninguna otra fila: ahí es el concepto que el cliente ve cuando el movimiento no tiene tarea.
     const transactions = recentTransactions.map(({ creditedByLine, ...t }) => ({
       ...t,
+      note: t.rebilledFromTransactionId ? null : t.note,
       creditNoteNumber: creditedByLine?.creditNote.number ?? null,
       creditedDescription: creditedByLine?.description ?? null,
     }));

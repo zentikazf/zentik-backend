@@ -197,8 +197,9 @@ describe('PortalService.getMyHours — acreditado por nota de crédito (#55)', (
     await service.getMyHours('user-1');
 
     const arg = prisma.hoursTransaction.findMany.mock.calls[0][0] as any;
-    // el número de la NC sale de la relación, no de parsear el `note` de ninguna fila
-    expect(arg.include.creditedByLine.select).toEqual({
+    // el número de la NC sale de la relación, no de parsear el `note` de ninguna fila.
+    // (Va bajo `select` y no bajo `include`: ver el bloque de tests del payload más abajo.)
+    expect(arg.select.creditedByLine.select).toEqual({
       description: true,
       creditNote: { select: { number: true } },
     });
@@ -275,5 +276,179 @@ describe('PortalService.getMyHours — acreditado por nota de crédito (#55)', (
     ]);
     // el KPI "Pendiente de facturar" no cambia: sigue sumando lo que tiene precio y no fue facturado
     expect(res.totalAmount).toBe(300000);
+  });
+});
+
+/**
+ * #55 (cierre) — getMyHours: la jerga interna se escondió de la PANTALLA pero no del PAYLOAD.
+ *
+ * El findMany usaba `include` sin `select` de nivel superior, así que /portal/hours mandaba al
+ * navegador del CLIENTE todos los escalares del ledger (`timeEntryId`, `entryVersion`,
+ * `reversesTransactionId`, `deletedById`, `deleteReason`, `clientId`) y el `note` "Re-facturable
+ * por NC-…" de la fila espejo — reproducible con DevTools > Network. Misma regla que ya seguía
+ * `getTicketDetail`: select explícito, nunca include a secas.
+ *
+ * Estos tests miran las DOS mitades del agujero:
+ *  - la FORMA de la query (qué campos se piden), que es lo que evita que un campo nuevo del
+ *    schema empiece a viajar solo;
+ *  - la FORMA de la respuesta (qué campos llegan), que es lo que el cliente ve de verdad.
+ * Prisma MOCKEADO.
+ */
+describe('PortalService.getMyHours — el payload no filtra plomería interna (#55 cierre)', () => {
+  let prisma: DeepMockProxy<PrismaService>;
+  let service: PortalService;
+  const CLIENT = 'client-1';
+
+  /** Campos que el portal del cliente SÍ consume (interface HoursTransaction + JSX). */
+  const CAMPOS_DEL_PORTAL = [
+    'id',
+    'type',
+    'hours',
+    'note',
+    'createdAt',
+    'workedOn',
+    'priceAmount',
+    'priceRate',
+    'priceCurrency',
+    'billedCycleId',
+    'rebilledFromTransactionId',
+  ];
+
+  /** Plomería interna del ledger: ninguno lo usa el portal y ninguno es del cliente. */
+  const CAMPOS_INTERNOS = [
+    'timeEntryId',
+    'entryVersion',
+    'reversesTransactionId',
+    'deletedById',
+    'deleteReason',
+    'deletedAt',
+    'clientId',
+  ];
+
+  beforeEach(() => {
+    prisma = mockDeep<PrismaService>();
+    service = new PortalService(
+      prisma,
+      mockDeep<EventEmitter2>(),
+      mockDeep<AuditService>(),
+      mockDeep<FileService>(),
+      mockDeep<StorageService>(),
+      mockDeep<OutboxService>(),
+      mockDeep<ClientBillingPdfService>(),
+    );
+    prisma.client.findFirst.mockResolvedValue({
+      id: CLIENT,
+      contractedHours: 10,
+      usedHours: 5,
+      loanedHours: 0,
+      currency: 'PYG',
+      developmentHourlyRate: null,
+      supportHourlyRate: null,
+    } as never);
+  });
+
+  const queryArg = (): any => prisma.hoursTransaction.findMany.mock.calls.at(-1)![0];
+
+  it('la query usa `select` explícito, no `include` a secas (B1)', async () => {
+    prisma.hoursTransaction.findMany.mockResolvedValue([] as never);
+
+    await service.getMyHours('user-1');
+
+    expect(queryArg().select).toBeDefined();
+    expect(queryArg().include).toBeUndefined();
+  });
+
+  it('ningún campo interno del ledger se pide en la query (B2)', async () => {
+    prisma.hoursTransaction.findMany.mockResolvedValue([] as never);
+
+    await service.getMyHours('user-1');
+
+    for (const campo of CAMPOS_INTERNOS) {
+      expect(queryArg().select[campo]).toBeUndefined();
+    }
+  });
+
+  it('TODOS los campos que consume la pantalla siguen pidiéndose (B3)', async () => {
+    // El riesgo de enumerar es dropear un campo vivo: esta lista es el contrato con
+    // app/(portal)/portal/hours/page.tsx. Si la pantalla necesita uno nuevo, se agrega en los dos.
+    prisma.hoursTransaction.findMany.mockResolvedValue([] as never);
+
+    await service.getMyHours('user-1');
+
+    for (const campo of CAMPOS_DEL_PORTAL) {
+      expect(queryArg().select[campo]).toBe(true);
+    }
+    // la tarea alimenta el concepto y el badge de tipo (Soporte / Desarrollo)
+    expect(queryArg().select.task.select).toMatchObject({
+      id: true,
+      title: true,
+      type: true,
+      project: { select: { id: true, name: true } },
+    });
+  });
+
+  it('el `note` de una FILA ESPEJO no viaja: la jerga "Re-facturable por NC-…" queda en el backend (B4)', async () => {
+    prisma.hoursTransaction.findMany.mockResolvedValue([
+      {
+        id: 'tx-espejo',
+        hours: 5,
+        note: 'Re-facturable por NC-2026-00001',
+        rebilledFromTransactionId: 'tx-original',
+        priceAmount: '500000',
+        billedCycleId: null,
+        creditedByLine: null,
+      },
+    ] as never);
+
+    const res = await service.getMyHours('user-1');
+
+    expect(res.transactions[0].note).toBeNull();
+    expect(JSON.stringify(res)).not.toContain('Re-facturable');
+    // el vínculo con el original SÍ se conserva: es lo que empareja las dos filas en la pantalla
+    expect(res.transactions[0].rebilledFromTransactionId).toBe('tx-original');
+  });
+
+  it('el `note` de una fila NORMAL sigue llegando: es el concepto cuando no hay tarea (B5)', async () => {
+    // El caso que hace peligroso el fix: si se dropea el `note` de todas las filas, la columna
+    // "Tarea" del cliente se llena de '—' en toda carga manual sin tarea asociada.
+    prisma.hoursTransaction.findMany.mockResolvedValue([
+      {
+        id: 'tx-manual',
+        hours: 2,
+        note: 'Ajuste de configuración solicitado por el cliente',
+        rebilledFromTransactionId: null,
+        task: null,
+        priceAmount: '200000',
+        billedCycleId: null,
+        creditedByLine: null,
+      },
+    ] as never);
+
+    const res = await service.getMyHours('user-1');
+
+    expect(res.transactions[0].note).toBe('Ajuste de configuración solicitado por el cliente');
+  });
+
+  it('el concepto congelado de la nota de crédito sigue llegando (B6)', async () => {
+    // `creditedDescription` es el concepto que ve el cliente cuando la tarea se borró en duro.
+    prisma.hoursTransaction.findMany.mockResolvedValue([
+      {
+        id: 'tx-original',
+        hours: 5,
+        note: null,
+        rebilledFromTransactionId: null,
+        priceAmount: '500000',
+        billedCycleId: 'cyc-1',
+        creditedByLine: {
+          description: 'Migración de datos',
+          creditNote: { number: 'NC-2026-00001' },
+        },
+      },
+    ] as never);
+
+    const res = await service.getMyHours('user-1');
+
+    expect(res.transactions[0].creditedDescription).toBe('Migración de datos');
+    expect(res.transactions[0].creditNoteNumber).toBe('NC-2026-00001');
   });
 });
