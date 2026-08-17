@@ -33,6 +33,21 @@ export const HOURS_SUMMARY_WARN_THRESHOLD = Math.floor(HOURS_SUMMARY_MAX_LIMIT *
 // movimientos, asi que 500 da varios anios de margen. Si algun cliente se acerca al techo
 // hay que pasar a paginacion por MES (agrupada en SQL), NO subir el numero.
 
+// #57: techo de `page`. El `limit` ya tenia techo (HOURS_SUMMARY_MAX_LIMIT) pero `page` no tenia
+// NINGUNO, y `skip = (page - 1) * limit` con un page gigante desborda el entero de 64 bits de
+// Postgres: Prisma corta con "Unable to fit value 2e+22 into a 64-bit signed integer for field
+// `skip`" ⇒ 500. NO es un problema de parseo del query param —`?page=99999999999999999999` en
+// digitos planos ya reventaba antes de que el controller saneara nada—, por eso el techo va ACA:
+// cubre a CUALQUIER llamador, venga del borde HTTP, de otro service o de un test.
+//
+// Por que 100_000: el peor skip posible pasa a ser (100_000 - 1) * HOURS_SUMMARY_MAX_LIMIT ≈ 5e7,
+// once ordenes de magnitud por debajo del techo de int64 (~9.2e18) y todavia holgado contra int32.
+// El valor se deriva del techo del limit a proposito: si manana alguien sube HOURS_SUMMARY_MAX_LIMIT
+// el margen sigue siendo absurdo. En terminos de producto tampoco recorta nada real: el ledger mas
+// cargado ronda los 100 movimientos, asi que cualquier pagina mas alla del techo devuelve vacio
+// igual — capear solo cambia CUAL pagina vacia se devuelve, no que se pierda informacion.
+export const HOURS_SUMMARY_MAX_PAGE = 100_000;
+
 @Injectable()
 export class ClientService {
   private readonly logger = new Logger(ClientService.name);
@@ -676,7 +691,9 @@ export class ClientService {
     const client = await this.findById(orgId, clientId);
     const available = Math.max(client.contractedHours - client.usedHours - client.loanedHours, 0);
 
-    const safePage = Math.max(1, page);
+    // Techo de pagina: ver HOURS_SUMMARY_MAX_PAGE arriba (comentario de #57 con el porque).
+    // Sin este `Math.min` el `skip` de abajo desborda int64 y Prisma tira un 500.
+    const safePage = Math.min(Math.max(1, page), HOURS_SUMMARY_MAX_PAGE);
     // Techo del ledger: ver HOURS_SUMMARY_MAX_LIMIT arriba (comentario de #53 con el porque).
     const safeLimit = Math.min(Math.max(1, limit), HOURS_SUMMARY_MAX_LIMIT);
     const skip = (safePage - 1) * safeLimit;
