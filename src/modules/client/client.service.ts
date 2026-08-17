@@ -664,7 +664,13 @@ export class ClientService {
     const available = Math.max(client.contractedHours - client.usedHours - client.loanedHours, 0);
 
     const safePage = Math.max(1, page);
-    const safeLimit = Math.min(Math.max(1, limit), 100);
+    // #53: el cap sube de 100 a 500 porque la vista de cards por mes del staff necesita el
+    // ledger COMPLETO del cliente en una sola respuesta. Agrupar por mes sobre una pagina
+    // parcial produce totales que MIENTEN: el total de la card seria el de la porcion del mes
+    // que cayo en esa pagina, no el del mes entero. El cliente mas cargado hoy ronda los 100
+    // movimientos, asi que 500 da varios anios de margen. Si algun cliente se acerca al techo
+    // hay que pasar a paginacion por MES (agrupada en SQL), NO subir el numero.
+    const safeLimit = Math.min(Math.max(1, limit), 500);
     const skip = (safePage - 1) * safeLimit;
 
     const where: Prisma.HoursTransactionWhereInput = { clientId, deletedAt: null };
