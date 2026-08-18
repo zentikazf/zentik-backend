@@ -14,6 +14,7 @@ import { OnnixMappingService } from './onnix-mapping.service';
 import { OnnixUpstreamError } from './errors';
 import { DrainResult, OutboxRow } from './types/outbox.types';
 import { OnnixCreateTicketBody } from './types/onnix.types';
+import { ASSIGN_REASON_MAX_LEN } from './onnix-user-map';
 
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 /** Limite duro de `comment` en Onnix (OpenAPI: maxLength 10000) — #50 R2.3. */
@@ -402,6 +403,7 @@ export class SyncDispatcherService implements OnModuleDestroy {
     if (row.event_type === 'TICKET_CREATED') return this.processCreate(row, traceId);
     if (row.event_type === 'STATUS_CHANGED') return this.processStatus(row, traceId);
     if (row.event_type === 'COMMENT_ADDED') return this.processComment(row, traceId);
+    if (row.event_type === 'ASSIGNEE_CHANGED') return this.processAssign(row, traceId);
     await this.outbox.markFailed(row.id, `eventType desconocido: ${row.event_type}`, true);
     return 'failed';
   }
@@ -416,6 +418,19 @@ export class SyncDispatcherService implements OnModuleDestroy {
     }
     const ticket = await this.prisma.ticket.findUnique({
       where: { id: row.aggregate_id },
+      // #52 R2.1: la asignación de Zentik vive en la task (`TaskAssignment`), no en
+      // el ticket. Se trae acá para que el ticket pueda NACER en OSD con su
+      // responsable en vez de quedar a nombre del usuario de servicio.
+      // `orderBy` explícito: el ticket es single-assignee pero su task es una task
+      // normal del kanban y acepta varios. Sin orden, dos drenados de la misma fila
+      // podían elegir responsables distintos.
+      include: {
+        task: {
+          select: {
+            assignments: { select: { userId: true }, orderBy: { userId: 'asc' } },
+          },
+        },
+      },
     });
     if (!ticket) {
       await this.outbox.markFailed(row.id, `ticket ${row.aggregate_id} no existe`, true);
@@ -450,6 +465,16 @@ export class SyncDispatcherService implements OnModuleDestroy {
       ticket.ticketTypeId,
     );
 
+    // #52 R2.1/R2.2: responsable con el que nace el ticket en OSD. `resolveUserId`
+    // devuelve null tanto si el ticket no tiene asignado como si ese usuario no
+    // está mapeado, y las DOS ramas terminan igual: el body sale SIN `assigned_to`,
+    // idéntico al de hoy. Nunca se falla un create por esto — un ticket sin
+    // responsable en OSD se arregla a mano; un ticket que no se creó, no.
+    const assignedTo = await this.mapping.resolveUserId(
+      ticket.organizationId,
+      ticket.task?.assignments[0]?.userId,
+    );
+
     const body: OnnixCreateTicketBody = {
       client_id: clientId,
       project_id: projectId,
@@ -459,6 +484,11 @@ export class SyncDispatcherService implements OnModuleDestroy {
       subject: ticket.title.slice(0, 255),
       description: ticket.description ?? ticket.title,
       origin: 'api',
+      // `typeof === 'number'` y no `!== null`: si el mapeo devolviera `undefined`
+      // (contrato roto), `!== null` dejaria pasar un `assigned_to: undefined` al
+      // body en vez de omitir el campo. La forma positiva solo agrega el campo
+      // cuando de verdad hay un id.
+      ...(typeof assignedTo === 'number' ? { assigned_to: assignedTo } : {}),
     };
 
     // Modo simulacro (R27/R43): pipeline completo resuelto, NO se hace el POST a
@@ -472,6 +502,10 @@ export class SyncDispatcherService implements OnModuleDestroy {
           `client_id=${body.client_id} project_id=${body.project_id ?? 'null'} ` +
           `ticket_type_id=${body.ticket_type_id} ticket_category_id=${body.ticket_category_id} ` +
           `ticket_priority_id=${body.ticket_priority_id} origin=${body.origin ?? 'api'} ` +
+          // #52 R5.3: el QA en dry-run tiene que poder ver si el responsable viaja.
+          // 'sin-mapeo' cubre las dos ramas de R2.2 (sin asignado / sin mapping):
+          // en las dos el body sale sin `assigned_to`, que es justo lo que se valida.
+          `assigned_to=${body.assigned_to ?? 'sin-mapeo'} ` +
           `traceId=${traceId}`,
       );
       await this.outbox.markFailed(
@@ -573,6 +607,243 @@ export class SyncDispatcherService implements OnModuleDestroy {
       return 'failed';
     } catch (err) {
       return this.handleUpstreamFailure(row, err);
+    }
+  }
+
+  // ── ASSIGNEE_CHANGED (#52) ───────────────────────────────────────────────────
+
+  /**
+   * Refleja en OSD el responsable del ticket (`POST /tickets/{code}/asignar`) — #52 R3.3.
+   *
+   * ⚠️ ESTE HANDLER ES LA EXCEPCION AL MANEJO 4xx DEL DISPATCHER. En todos los demas
+   * eventTypes un 422 es TERMINAL y la fila cae a la DLQ; acá NO. El rol
+   * `integracion` de OSD solo puede asignar a miembros de su propio equipo y dentro
+   * de su producto, y cuando el destinatario queda fuera de ese cerco OSD responde
+   * 422. Eso NO es un defecto nuestro: es un limite de permisos CONOCIDO, esperado y
+   * que ningun reintento ni requeue puede arreglar. Mandarlo a la DLQ llenaria la
+   * cola de filas incurables y haria sonar `checkDlqAge` por algo sano, tapando los
+   * fallos de verdad.
+   *
+   * La regla rectora de #50/#51 ("perder es peor que duplicar") NO aplica acá — es al
+   * revés (decision cerrada 3). Un comentario que no viaja es conversacion PERDIDA;
+   * una asignacion que no viaja solo deja el ticket a nombre del usuario de servicio,
+   * exactamente como estaba antes de #52. Degradacion honesta, visible en el warn.
+   *
+   * Los TRES caminos que cierran la fila sin llamar a OSD (sin responsable, sin
+   * mapping, 422 del cerco) usan `markSynced` y NO `markFailed`: la fila esta
+   * terminada, no fallida. `markFailed` la dejaria en `failed`, o sea en la DLQ, que
+   * es justo lo que R3.3 prohibe.
+   */
+  private async processAssign(row: OutboxRow, traceId: string): Promise<RowOutcome> {
+    // 1. Ordering gate (R3.3) — PRIMERO, antes de leer nada: no se puede asignar un
+    // ticket que todavia no existe en OSD. Mismo mecanismo que STATUS_CHANGED y
+    // COMMENT_ADDED, con el fondo de pozo de 24h de #51.
+    const code = await this.outbox.getCreatedExternalId(row.aggregate_id);
+    if (!code) return this.handleOrderingGateMiss(row, traceId);
+
+    const ticket = await this.prisma.ticket.findUnique({
+      where: { id: row.aggregate_id },
+      select: {
+        organizationId: true,
+        // Mismo `orderBy` que `updateTicket` y que `processCreate`: si la task
+        // quedó con varios asignados desde el kanban, los tres tienen que estar de
+        // acuerdo en cuál es "el" responsable, o el que viaja a OSD depende de qué
+        // devolvió el heap en esa lectura.
+        task: {
+          select: {
+            assignments: { select: { userId: true }, orderBy: { userId: 'asc' } },
+          },
+        },
+      },
+    });
+    if (!ticket) {
+      await this.outbox.markFailed(row.id, `ticket ${row.aggregate_id} no existe`, true);
+      return 'failed';
+    }
+
+    // 2. Responsable ACTUAL (R3.2), no snapshot: si hubo N reasignaciones seguidas
+    // se envia la final. Igual que STATUS_CHANGED — acá solo importa el estado
+    // final, a diferencia de las notas internas (#50 R3.2), donde cada version
+    // intermedia es una linea distinta en la conversacion y por eso SI se snapshotea.
+    const assigneeId = ticket.task?.assignments[0]?.userId ?? null;
+    if (!assigneeId) {
+      // Desasignado en Zentik (R3.3). OSD NO tiene desasignacion: `assigned_to` es
+      // OBLIGATORIO en `/asignar`, asi que no hay nada que mandar. LIMITACION
+      // DOCUMENTADA: OSD conserva el ultimo responsable. Se cierra la fila con log
+      // —no hay reintento que lo arregle— y sin ensuciar la DLQ.
+      await this.outbox.markSynced(row.id);
+      this.log(
+        row,
+        traceId,
+        'skipped',
+        'ticket sin responsable en Zentik (OSD no tiene desasignacion; conserva el ultimo)',
+      );
+      return 'skipped';
+    }
+
+    // 3. Mapping del responsable (R3.3). Sin par en OSD → skip con warn, NUNCA DLQ.
+    const assignedTo = await this.mapping.resolveUserId(
+      ticket.organizationId,
+      assigneeId,
+    );
+    // `typeof !== 'number'` y no `=== null`: un `undefined` (contrato roto del
+    // mapeo) tiene que caer en el skip, NO seguir de largo y mandarle a OSD un
+    // `assigned_to: undefined` que solo puede terminar en 422.
+    if (typeof assignedTo !== 'number') {
+      this.logger.warn(
+        `onnix-sync ASSIGNEE_CHANGED skipeado: el responsable ${assigneeId} no tiene mapping ` +
+          `de usuario en onnix_entity_mappings. El ticket queda en OSD con el responsable ` +
+          `anterior. Corre POST /admin/sync/onnix/seed-users y revisa la lista ` +
+          `"zentikUsersWithoutPair" del reporte. ticketId=${row.aggregate_id} code=${code} ` +
+          `traceId=${traceId}`,
+      );
+      await this.outbox.markSynced(row.id);
+      this.log(row, traceId, 'skipped', `responsable sin mapping: ${assigneeId}`);
+      return 'skipped';
+    }
+
+    const reason = await this.buildAssignReason(row.payload.assignedByUserId);
+
+    // Modo simulacro (R5.3): se resolvio code + assigned_to + reason, NO se hace el
+    // POST. La fila se marca terminal-no-loop con texto DRY_RUN (mismo molde que el
+    // resto). NO se reafirma el estado: sin POST, OSD no movio nada.
+    if (this.config.onnixSyncDryRun) {
+      this.logger.warn(
+        `onnix-sync DRY_RUN (simulacro, NO enviado a Onnix) eventType=${row.event_type} ` +
+          `ticketId=${row.aggregate_id} code=${code} assigned_to=${assignedTo} ` +
+          `zentikAssigneeId=${assigneeId} reason=${reason} traceId=${traceId}`,
+      );
+      await this.outbox.markFailed(row.id, 'DRY_RUN: simulacro, no enviado a Onnix', true);
+      return 'dry_run';
+    }
+
+    try {
+      // CON retryWithJitter, igual que `createTicket`/`setEstado` y a diferencia de
+      // `addComment`: asignar es idempotente por diseño (last-write-wins sobre un
+      // solo campo), asi que un reintento inmediato ante un 5xx es gratis. Repetir
+      // una asignacion no agrega nada al hilo que el cliente ve.
+      const outcome = await this.retryWithJitter(() =>
+        this.onnix.assignTicket(code, { assigned_to: assignedTo, reason }, traceId),
+      );
+      if (outcome.ok) {
+        await this.outbox.markSynced(row.id);
+        this.log(row, traceId, 'synced', `assigned_to=${assignedTo}`);
+        // R3.4: OSD mueve el ticket a "asignado" al asignar. Se reafirma el estado
+        // DESPUES de cerrar la fila, para que un fallo de la reafirmacion no pueda
+        // revertir una asignacion que YA ocurrio.
+        await this.reassertStatusAfterAssign(row, ticket.organizationId, code, traceId);
+        return 'synced';
+      }
+
+      // ⚠️ EL 422: SKIP CON WARN, NUNCA DLQ (R3.3).
+      //
+      // Aplica a TODO 422 de este endpoint, no solo a los que digan la frase exacta
+      // del cerco, y es deliberado. La alternativa —matchear "no es de tu equipo" /
+      // "otro producto" y mandar el resto a la DLQ, como hace STATUS_CHANGED con el
+      // "ya esta en ese estado"— apuesta a la redaccion literal de un mensaje en
+      // español de OSD: el dia que le cambien una palabra o un acento, el 422
+      // esperable se convierte en la fila envenenada que R3.3 vino a evitar, y nadie
+      // se entera hasta que suena la alerta de la DLQ. Ahí el default tiene el signo
+      // opuesto (terminal por defecto, la frase es el ESCAPE), acá el default seguro
+      // es skipear: ningun 422 de `/asignar` se arregla reintentando, y el peor caso
+      // es que OSD conserve el responsable anterior.
+      //
+      // El mensaje CRUDO de OSD viaja en el warn, asi que un 422 inesperado (un
+      // `assigned_to` que ya no existe, un ticket cerrado del lado de OSD) sigue
+      // siendo 100% diagnosticable — solo que desde los logs y no desde la DLQ.
+      this.logger.warn(
+        `onnix-sync ASSIGNEE_CHANGED rechazado por OSD con 422 → skip (NO va a la DLQ). ` +
+          `Causa tipica: el cerco del rol de integracion (el responsable no es de su equipo ` +
+          `o el ticket es de otro producto). El ticket queda en OSD con el responsable ` +
+          `anterior. ticketId=${row.aggregate_id} code=${code} assigned_to=${assignedTo} ` +
+          `mensajeOSD="${(outcome.message ?? '').slice(0, 500)}" traceId=${traceId}`,
+      );
+      await this.outbox.markSynced(row.id);
+      this.log(row, traceId, 'skipped', `422 del cerco de OSD (assigned_to=${assignedTo})`);
+      return 'skipped';
+    } catch (err) {
+      return this.handleUpstreamFailure(row, err);
+    }
+  }
+
+  /**
+   * Arma el `reason` que OSD guarda en su auditoria de asignacion (#52 R3.3).
+   *
+   * El actor sale del SNAPSHOT del payload (`assignedByUserId`), no de una
+   * relectura: es el unico dato del evento que el drenado no puede reconstruir —el
+   * ticket no guarda "quien fue el ultimo que reasigno"— y ademas no cambia nunca
+   * para esta fila. Mismo molde que el prefijo de autor de la nota interna (#50 R3.3).
+   *
+   * Truncado a ASSIGN_REASON_MAX_LEN: un nombre largo no puede convertir una
+   * asignacion valida en un 422 de validacion por `maxLength`.
+   */
+  private async buildAssignReason(assignedByUserId?: string): Promise<string> {
+    const actor = assignedByUserId
+      ? await this.prisma.user.findUnique({
+          where: { id: assignedByUserId },
+          select: { name: true },
+        })
+      : null;
+    const name = actor?.name || UNKNOWN_AUTHOR;
+    return `Sincronizado desde Zentik — asignado por ${name}`.slice(
+      0,
+      ASSIGN_REASON_MAX_LEN,
+    );
+  }
+
+  /**
+   * Reafirma el estado del ticket despues de una asignacion exitosa (#52 R3.4).
+   *
+   * POR QUE EXISTE: OSD mueve el ticket al estado "asignado" como efecto colateral
+   * del `/asignar`. Si Zentik dice "en proceso", OSD queda mostrando "asignado" y el
+   * cliente ve el ticket RETROCEDIDO — sin que ningun evento de Zentik lo explique,
+   * porque del lado nuestro el estado no cambio. Es el modo de fallo mas confuso de
+   * toda la integracion: la UI de OSD contradice a la de Zentik y los logs de sync
+   * dicen "synced".
+   *
+   * Se ENCOLA una fila `STATUS_CHANGED` en vez de llamar `setEstado` inline, y eso es
+   * a proposito: la fila hereda gratis todo lo que ya existe —reintentos con su
+   * propio backoff, el 422 "ya esta en ese estado" tratado como exito idempotente
+   * (por eso reafirmar es barato), el cap de intentos y la DLQ—. Inline, un blip de
+   * OSD en la reafirmacion obligaria a elegir entre perderla o fallar una fila cuya
+   * asignacion YA se aplico.
+   *
+   * Se reafirma SIEMPRE, sin comparar contra el estado de OSD: saberlo costaria un
+   * GET extra por asignacion, y el 422 idempotente ya hace que la reafirmacion
+   * redundante sea inofensiva.
+   *
+   * NUNCA lanza: la fila de asignacion ya esta `synced` y su POST ya se aplico en
+   * OSD. Un fallo acá es un ERROR loggeado, nunca un rollback de algo irreversible.
+   */
+  private async reassertStatusAfterAssign(
+    row: OutboxRow,
+    organizationId: string,
+    code: string,
+    traceId: string,
+  ): Promise<void> {
+    try {
+      // `this.prisma` como cliente: `enqueueTx` es un unico `create`, asi que fuera
+      // de una tx es igual de atomico. Se reusa —en vez de escribir un insert
+      // propio— para no duplicar el gate de flag/whitelist de orgs que vive adentro.
+      const wrote = await this.outbox.enqueueTx(this.prisma, {
+        eventType: 'STATUS_CHANGED',
+        aggregateId: row.aggregate_id,
+        organizationId,
+        payload: { ticketId: row.aggregate_id },
+      });
+      if (!wrote) return;
+      // La fila nace DESPUES del claim de este drenado, asi que este ciclo no la ve.
+      // El aviso la hace salir en segundos en vez de esperar al cron (el timer se
+      // re-arma solo si hay un drenado en vuelo, ver `scheduleDrain`).
+      this.outbox.notifyEnqueued();
+      this.log(row, traceId, 'synced', `reafirmacion de estado encolada (code=${code})`);
+    } catch (err) {
+      this.logger.error(
+        `onnix-sync asignacion APLICADA pero la reafirmacion de estado no se pudo encolar: ` +
+          `OSD puede quedar en "asignado" mientras Zentik dice otra cosa. ` +
+          `ticketId=${row.aggregate_id} code=${code} traceId=${traceId} ` +
+          `error=${(err as Error)?.message ?? 'desconocido'}`,
+      );
     }
   }
 

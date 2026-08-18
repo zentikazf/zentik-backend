@@ -76,6 +76,17 @@ describe('SyncDispatcherService', () => {
     // nada, asi que se postea normal.
     onnix.listComments.mockResolvedValue([]);
     outbox.getCommentClaimState.mockResolvedValue({ claimedIds: [], unanchored: 0 });
+    // #52: default EXPLICITO "nadie mapeado". Sin esto mockDeep devuelve una
+    // funcion (truthy, ni number ni null) y CADA test de TICKET_CREATED que ya
+    // existia empezaria a mandar un `assigned_to` basura en el body — pasando o
+    // fallando por una razon que no tiene nada que ver con lo que prueba. `null` es
+    // ademas el estado real de una org sin `seed-users` corrido: el body sale
+    // exactamente igual que antes de #52 (R2.2).
+    mapping.resolveUserId.mockResolvedValue(null);
+    // El `reason` de la asignacion resuelve el nombre del actor con un findUnique
+    // sobre User; default explicito por el mismo motivo (processComment ya lo
+    // stubbea por test, pero ASSIGNEE_CHANGED lo llama SIEMPRE).
+    prisma.user.findUnique.mockResolvedValue(null as never);
   });
 
   /**
@@ -2365,6 +2376,359 @@ describe('SyncDispatcherService', () => {
       expect(drainSpy).toHaveBeenCalledTimes(1); // salio a los 3s, no a los 60s
     });
   });
+
+  // ── #52 T5 — ASSIGNEE_CHANGED ──────────────────────────────────────────────
+
+  describe('ASSIGNEE_CHANGED — #52 T5 (R3.2/R3.3/R3.4)', () => {
+    it('R3.3: gate de orden — sin code de creacion aun -> release SIN consumir intento', async () => {
+      outbox.claim.mockResolvedValueOnce([makeAssignRow('row_a1')]);
+      outbox.getCreatedExternalId.mockResolvedValueOnce(null);
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 0, failed: 0 });
+      expect(outbox.release).toHaveBeenCalledWith('row_a1');
+      expect(outbox.markFailed).not.toHaveBeenCalled();
+      expect(onnix.assignTicket).not.toHaveBeenCalled();
+      // El gate corre ANTES de leer nada: no se toca el ticket.
+      expect(prisma.ticket.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('R3.2/R3.3: RELEE el asignado actual y lo manda con el reason del actor', async () => {
+      outbox.claim.mockResolvedValueOnce([makeAssignRow('row_a2', 'user_actor')]);
+      outbox.getCreatedExternalId.mockResolvedValueOnce('TK-2026-000123');
+      prisma.ticket.findUnique.mockResolvedValueOnce(makeAssignTicket('user_ada'));
+      mapping.resolveUserId.mockResolvedValueOnce(10);
+      prisma.user.findUnique.mockResolvedValueOnce({ name: 'Josue Farias' } as never);
+      onnix.assignTicket.mockResolvedValueOnce({ ok: true, status: 200 });
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 1, failed: 0 });
+      // El asignado sale de la RELECTURA del ticket (R3.2), no del payload.
+      expect(mapping.resolveUserId).toHaveBeenCalledWith('org-test', 'user_ada');
+      expect(onnix.assignTicket).toHaveBeenCalledWith(
+        'TK-2026-000123',
+        {
+          assigned_to: 10,
+          reason: 'Sincronizado desde Zentik — asignado por Josue Farias',
+        },
+        expect.any(String),
+      );
+      expect(outbox.markSynced).toHaveBeenCalledWith('row_a2');
+    });
+
+    it('R3.3: actor sin nombre cargado -> el reason cae al fallback, NUNCA rompe la asignacion', async () => {
+      outbox.claim.mockResolvedValueOnce([makeAssignRow('row_a3', 'user_fantasma')]);
+      outbox.getCreatedExternalId.mockResolvedValueOnce('TK-2026-000123');
+      prisma.ticket.findUnique.mockResolvedValueOnce(makeAssignTicket('user_ada'));
+      mapping.resolveUserId.mockResolvedValueOnce(10);
+      prisma.user.findUnique.mockResolvedValueOnce(null as never); // actor borrado
+      onnix.assignTicket.mockResolvedValueOnce({ ok: true, status: 200 });
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 1, failed: 0 });
+      expect(onnix.assignTicket).toHaveBeenCalledWith(
+        'TK-2026-000123',
+        expect.objectContaining({ reason: 'Sincronizado desde Zentik — asignado por Usuario' }),
+        expect.any(String),
+      );
+    });
+
+    it('R3.3: reason TRUNCADO a 500 — un nombre absurdo no puede convertir la asignacion en un 422', async () => {
+      outbox.claim.mockResolvedValueOnce([makeAssignRow('row_a4', 'user_actor')]);
+      outbox.getCreatedExternalId.mockResolvedValueOnce('TK-2026-000123');
+      prisma.ticket.findUnique.mockResolvedValueOnce(makeAssignTicket('user_ada'));
+      mapping.resolveUserId.mockResolvedValueOnce(10);
+      prisma.user.findUnique.mockResolvedValueOnce({ name: 'N'.repeat(900) } as never);
+      onnix.assignTicket.mockResolvedValueOnce({ ok: true, status: 200 });
+
+      await service.processPending();
+
+      const body = onnix.assignTicket.mock.calls[0][1];
+      expect(body.reason?.length).toBe(500);
+    });
+
+    it('R3.3: ticket SIN responsable (desasignado en Zentik) -> skip con log, OSD conserva el ultimo', async () => {
+      // OSD no tiene desasignacion (`assigned_to` es obligatorio en /asignar):
+      // no hay nada que mandar y ningun reintento lo arregla. Limitacion conocida.
+      outbox.claim.mockResolvedValueOnce([makeAssignRow('row_a5')]);
+      outbox.getCreatedExternalId.mockResolvedValueOnce('TK-2026-000123');
+      prisma.ticket.findUnique.mockResolvedValueOnce(makeAssignTicket(null));
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 0, failed: 0 }); // skipped no incrementa contadores
+      expect(onnix.assignTicket).not.toHaveBeenCalled();
+      // markSynced (la fila esta TERMINADA), NUNCA markFailed: no es un defecto y no
+      // puede quedar en la DLQ.
+      expect(outbox.markSynced).toHaveBeenCalledWith('row_a5');
+      expect(outbox.markFailed).not.toHaveBeenCalled();
+    });
+
+    it('R3.3: responsable SIN mapping -> skip con warn, NO va a la DLQ', async () => {
+      const warn = spyLog('warn');
+      outbox.claim.mockResolvedValueOnce([makeAssignRow('row_a6')]);
+      outbox.getCreatedExternalId.mockResolvedValueOnce('TK-2026-000123');
+      prisma.ticket.findUnique.mockResolvedValueOnce(makeAssignTicket('user_sin_par'));
+      mapping.resolveUserId.mockResolvedValueOnce(null);
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 0, failed: 0 });
+      expect(onnix.assignTicket).not.toHaveBeenCalled();
+      expect(outbox.markSynced).toHaveBeenCalledWith('row_a6');
+      expect(outbox.markFailed).not.toHaveBeenCalled();
+      // El warn tiene que decir QUE hacer (correr el seed), no solo que fallo.
+      const msg = String(warn.mock.calls[0][0]);
+      expect(msg).toContain('user_sin_par');
+      expect(msg).toContain('seed-users');
+    });
+
+    it('⚠️ R3.3 EL TEST QUE IMPORTA: 422 del cerco -> skip con warn, la fila NUNCA llega a la DLQ', async () => {
+      // Es LA excepcion deliberada al manejo 4xx del dispatcher, y solo para este
+      // eventType. En cualquier otro, un 422 es terminal y la fila queda `failed`
+      // (= DLQ). Acá el 422 significa "el rol de integracion no puede asignarle a
+      // esta persona": un limite de permisos CONOCIDO que ningun requeue arregla.
+      // Si esta fila cayera en `failed`, cada asignacion a alguien fuera del equipo
+      // envenenaria la cola y haria sonar checkDlqAge por algo sano.
+      const warn = spyLog('warn');
+      outbox.claim.mockResolvedValueOnce([makeAssignRow('row_a7')]);
+      outbox.getCreatedExternalId.mockResolvedValueOnce('TK-2026-000123');
+      prisma.ticket.findUnique.mockResolvedValueOnce(makeAssignTicket('user_ada'));
+      mapping.resolveUserId.mockResolvedValueOnce(10);
+      onnix.assignTicket.mockResolvedValueOnce({
+        ok: false,
+        status: 422,
+        message: 'El usuario no pertenece a tu equipo',
+      });
+
+      const res = await service.processPending();
+
+      // ⚠️ EL ASSERT, y va PRIMERO a proposito: NADA de esto puede terminar en
+      // `failed`. `markFailed` es el unico camino a la DLQ.
+      expect(outbox.markFailed).not.toHaveBeenCalled();
+      expect(res).toEqual({ synced: 0, failed: 0 });
+      expect(outbox.markSynced).toHaveBeenCalledWith('row_a7');
+      // El mensaje CRUDO de OSD viaja al warn: un 422 inesperado sigue siendo
+      // diagnosticable aunque el manejo sea el mismo.
+      const msg = String(warn.mock.calls[0][0]);
+      expect(msg).toContain('El usuario no pertenece a tu equipo');
+      expect(msg).toContain('NO va a la DLQ');
+    });
+
+    it('R3.3: un 422 con OTRA redaccion tampoco va a la DLQ (no se matchea la frase del cerco)', async () => {
+      // Contrapunto del anterior. La alternativa —matchear "no es de tu equipo" y
+      // mandar el resto a la DLQ, como hace STATUS_CHANGED con el "ya esta en ese
+      // estado"— apostaria a la redaccion literal de un mensaje en español de OSD.
+      // El dia que le cambien una palabra, el 422 esperable se vuelve la fila
+      // envenenada que R3.3 vino a evitar. Acá el default seguro es skipear.
+      outbox.claim.mockResolvedValueOnce([makeAssignRow('row_a8')]);
+      outbox.getCreatedExternalId.mockResolvedValueOnce('TK-2026-000123');
+      prisma.ticket.findUnique.mockResolvedValueOnce(makeAssignTicket('user_ada'));
+      mapping.resolveUserId.mockResolvedValueOnce(10);
+      onnix.assignTicket.mockResolvedValueOnce({
+        ok: false,
+        status: 422,
+        message: 'assigned_to invalido',
+      });
+
+      const res = await service.processPending();
+
+      expect(outbox.markFailed).not.toHaveBeenCalled();
+      expect(res).toEqual({ synced: 0, failed: 0 });
+      expect(outbox.markSynced).toHaveBeenCalledWith('row_a8');
+    });
+
+    it('GUARD: un 5xx SI sigue siendo reintentable (el skip del 422 no se comio el manejo transitorio)', async () => {
+      outbox.claim.mockResolvedValueOnce([makeAssignRow('row_a9', 'user_actor', { attempts: 0 })]);
+      outbox.getCreatedExternalId.mockResolvedValueOnce('TK-2026-000123');
+      prisma.ticket.findUnique.mockResolvedValueOnce(makeAssignTicket('user_ada'));
+      mapping.resolveUserId.mockResolvedValueOnce(10);
+      onnix.assignTicket.mockRejectedValue(new OnnixUpstreamError(503, 'assign-ticket'));
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 0, failed: 1 });
+      expect(outbox.markFailed).toHaveBeenCalledWith('row_a9', expect.stringContaining('503'), false);
+      expect(outbox.markSynced).not.toHaveBeenCalled();
+      await service.onModuleDestroy(); // limpia el timer de seguimiento
+    });
+
+    it('GUARD: un 403 (permiso faltante) SI tiene que ser ruidoso — no se skipea como el 422', async () => {
+      // R0.3: `tickets.assign` y `tickets.reassign` son permisos distintos. Si
+      // alguien revoca uno, el 403 tiene que doler (reintento -> cap -> DLQ), no
+      // desaparecer en un warn: es un problema de configuracion que hay que
+      // arreglar, no un limite esperable como el cerco.
+      outbox.claim.mockResolvedValueOnce([makeAssignRow('row_a10', 'user_actor', { attempts: 2 })]);
+      outbox.getCreatedExternalId.mockResolvedValueOnce('TK-2026-000123');
+      prisma.ticket.findUnique.mockResolvedValueOnce(makeAssignTicket('user_ada'));
+      mapping.resolveUserId.mockResolvedValueOnce(10);
+      onnix.assignTicket.mockRejectedValue(new OnnixUpstreamError(403, 'assign-ticket'));
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 0, failed: 1 });
+      expect(outbox.markFailed).toHaveBeenCalledWith('row_a10', expect.stringContaining('403'), true);
+    });
+
+    it('R3.4: tras asignar OK, REAFIRMA el estado encolando un STATUS_CHANGED y avisa al drenador', async () => {
+      // OSD mueve el ticket a "asignado" al asignar. Sin esta reafirmacion, un
+      // ticket que en Zentik esta "en proceso" aparece RETROCEDIDO del lado del
+      // cliente y ningun evento de Zentik lo explica.
+      outbox.claim.mockResolvedValueOnce([makeAssignRow('row_a11')]);
+      outbox.getCreatedExternalId.mockResolvedValueOnce('TK-2026-000123');
+      prisma.ticket.findUnique.mockResolvedValueOnce(makeAssignTicket('user_ada'));
+      mapping.resolveUserId.mockResolvedValueOnce(10);
+      onnix.assignTicket.mockResolvedValueOnce({ ok: true, status: 200 });
+      outbox.enqueueTx.mockResolvedValueOnce(true);
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 1, failed: 0 });
+      expect(outbox.enqueueTx).toHaveBeenCalledWith(
+        prisma,
+        expect.objectContaining({
+          eventType: 'STATUS_CHANGED',
+          aggregateId: 'ticket_1',
+          organizationId: 'org-test',
+          payload: { ticketId: 'ticket_1' },
+        }),
+      );
+      // La fila nace DESPUES del claim de este drenado: sin el aviso esperaria al cron.
+      expect(outbox.notifyEnqueued).toHaveBeenCalledTimes(1);
+      await service.onModuleDestroy();
+    });
+
+    it('R3.4: si el encolado de la reafirmacion falla, la asignacion NO se revierte (ERROR loggeado, fila synced)', async () => {
+      // La asignacion YA se aplico en OSD y es irreversible. Fallar la fila la
+      // devolveria a pending y volveria a asignar; peor, un markFailed tardio sobre
+      // una fila ya `synced` no escribe nada y el operador se queda sin señal.
+      const error = spyLog('error');
+      outbox.claim.mockResolvedValueOnce([makeAssignRow('row_a12')]);
+      outbox.getCreatedExternalId.mockResolvedValueOnce('TK-2026-000123');
+      prisma.ticket.findUnique.mockResolvedValueOnce(makeAssignTicket('user_ada'));
+      mapping.resolveUserId.mockResolvedValueOnce(10);
+      onnix.assignTicket.mockResolvedValueOnce({ ok: true, status: 200 });
+      outbox.enqueueTx.mockRejectedValueOnce(new Error('DB caida'));
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 1, failed: 0 });
+      expect(outbox.markSynced).toHaveBeenCalledWith('row_a12');
+      expect(outbox.markFailed).not.toHaveBeenCalled();
+      expect(String(error.mock.calls[0][0])).toContain('reafirmacion');
+    });
+
+    it('R3.4: NO se reafirma nada cuando la asignacion NO se envio (skip del 422)', async () => {
+      // Sin POST, OSD no movio el estado: encolar un STATUS_CHANGED seria una
+      // llamada a OSD por un efecto que nunca ocurrio.
+      outbox.claim.mockResolvedValueOnce([makeAssignRow('row_a13')]);
+      outbox.getCreatedExternalId.mockResolvedValueOnce('TK-2026-000123');
+      prisma.ticket.findUnique.mockResolvedValueOnce(makeAssignTicket('user_ada'));
+      mapping.resolveUserId.mockResolvedValueOnce(10);
+      onnix.assignTicket.mockResolvedValueOnce({ ok: false, status: 422, message: 'cerco' });
+
+      await service.processPending();
+
+      expect(outbox.enqueueTx).not.toHaveBeenCalled();
+      expect(outbox.notifyEnqueued).not.toHaveBeenCalled();
+    });
+
+    it('R5.3: dry-run resuelve todo pero NO llama a OSD ni reafirma el estado', async () => {
+      config.onnixSyncDryRun = true;
+      const warn = spyLog('warn');
+      outbox.claim.mockResolvedValueOnce([makeAssignRow('row_a14', 'user_actor')]);
+      outbox.getCreatedExternalId.mockResolvedValueOnce('TK-2026-000123');
+      prisma.ticket.findUnique.mockResolvedValueOnce(makeAssignTicket('user_ada'));
+      mapping.resolveUserId.mockResolvedValueOnce(10);
+      prisma.user.findUnique.mockResolvedValueOnce({ name: 'Josue Farias' } as never);
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 0, failed: 0, dryRun: 1 });
+      expect(onnix.assignTicket).not.toHaveBeenCalled();
+      expect(outbox.enqueueTx).not.toHaveBeenCalled();
+      expect(outbox.markFailed).toHaveBeenCalledWith('row_a14', expect.stringContaining('DRY_RUN'), true);
+      // El QA valida en el log que el responsable resuelto es el correcto.
+      const msg = String(warn.mock.calls[0][0]);
+      expect(msg).toContain('assigned_to=10');
+      expect(msg).toContain('DRY_RUN');
+    });
+
+    it('ticket borrado entre el encolado y el drenado -> failed terminal (payload sin sujeto)', async () => {
+      outbox.claim.mockResolvedValueOnce([makeAssignRow('row_a15')]);
+      outbox.getCreatedExternalId.mockResolvedValueOnce('TK-2026-000123');
+      prisma.ticket.findUnique.mockResolvedValueOnce(null as never);
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 0, failed: 1 });
+      expect(outbox.markFailed).toHaveBeenCalledWith('row_a15', expect.stringContaining('no existe'), true);
+    });
+  });
+
+  // ── #52 T3 — assigned_to en el create ──────────────────────────────────────
+
+  describe('TICKET_CREATED — #52 R2 assigned_to en el create', () => {
+    function arrangeCreate(): void {
+      outbox.claim.mockResolvedValueOnce([makeRow('row_c52', 'TICKET_CREATED', { external_id: null })]);
+      mapping.resolveClientId.mockResolvedValueOnce(555);
+      mapping.resolveProjectId.mockResolvedValueOnce(777);
+      mapping.resolveCatalogIds.mockResolvedValueOnce({
+        ticketTypeId: 10,
+        ticketCategoryId: 20,
+        ticketPriorityId: 30,
+      });
+      onnix.createTicket.mockResolvedValueOnce(okCreate('TK-2026-000123'));
+      prisma.ticket.update.mockResolvedValueOnce({} as never);
+    }
+
+    it('R2.1: ticket YA asignado y con mapping -> nace en OSD con ese responsable', async () => {
+      arrangeCreate();
+      prisma.ticket.findUnique.mockResolvedValueOnce(
+        makeTicket({ task: { assignments: [{ userId: 'user_ada' }] } }),
+      );
+      mapping.resolveUserId.mockResolvedValueOnce(10);
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 1, failed: 0 });
+      expect(onnix.createTicket).toHaveBeenCalledWith(
+        expect.objectContaining({ assigned_to: 10 }),
+        expect.any(String),
+      );
+    });
+
+    it('R2.2: asignado SIN mapping -> el body va SIN assigned_to (el create nunca falla por esto)', async () => {
+      arrangeCreate();
+      prisma.ticket.findUnique.mockResolvedValueOnce(
+        makeTicket({ task: { assignments: [{ userId: 'user_sin_par' }] } }),
+      );
+      mapping.resolveUserId.mockResolvedValueOnce(null);
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 1, failed: 0 });
+      // La CLAVE no puede existir: `assigned_to: undefined` sigue siendo una clave
+      // en el JSON del body y un backend estricto la rechazaria.
+      const body = onnix.createTicket.mock.calls[0][0];
+      expect(body).not.toHaveProperty('assigned_to');
+    });
+
+    it('R2.2: ticket SIN asignado -> body intacto, identico al de antes de #52', async () => {
+      arrangeCreate();
+      prisma.ticket.findUnique.mockResolvedValueOnce(makeTicket({ task: null }));
+
+      const res = await service.processPending();
+
+      expect(res).toEqual({ synced: 1, failed: 0 });
+      const body = onnix.createTicket.mock.calls[0][0];
+      expect(body).not.toHaveProperty('assigned_to');
+      expect(mapping.resolveUserId).toHaveBeenCalledWith('org-test', undefined);
+    });
+  });
 });
 
 // ── Helpers de emulacion (FIX 1 / FIX 4) ───────────────────────────────────
@@ -2473,6 +2837,35 @@ function makeNoteRow(
     payload: { ticketId: 'ticket_1', adminNoteSnapshot: snapshot, authorUserId },
     ...overrides,
   });
+}
+
+/**
+ * Fila ASSIGNEE_CHANGED (#52 R3.2): el payload NO lleva el asignado —el dispatcher
+ * lo RELEE al drenar, last-write-wins— sino solo el ACTOR, que es lo unico que el
+ * drenado no puede reconstruir (el ticket no guarda quien reasigno).
+ */
+function makeAssignRow(
+  id: string,
+  assignedByUserId = 'user_actor',
+  overrides: Partial<OutboxRow> = {},
+): OutboxRow {
+  return makeRow(id, 'ASSIGNEE_CHANGED', {
+    payload: { ticketId: 'ticket_1', assignedByUserId },
+    ...overrides,
+  });
+}
+
+/**
+ * Partial del Ticket tal como lo proyecta processAssign
+ * (`select: { organizationId, task: { assignments: { userId } } }`).
+ * `assigneeId = null` = ticket desasignado en Zentik (la task existe pero sin
+ * assignments), que es el caso que OSD no puede representar.
+ */
+function makeAssignTicket(assigneeId: string | null): never {
+  return {
+    organizationId: 'org-test',
+    task: { assignments: assigneeId ? [{ userId: assigneeId }] : [] },
+  } as never;
 }
 
 // Partial del Ticket de Prisma: solo los campos que lee processCreate. Cast a

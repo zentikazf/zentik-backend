@@ -346,8 +346,10 @@ export class OutboxService {
    *
    * Un 1 es el minimo cambio que no mezcla los dos roles: conserva la señal y gasta
    * un solo intento del presupuesto (que ademas subio a 8 en #51 FIX 11). Los otros
-   * eventTypes siguen en 0: `createTicket` y `setEstado` son idempotentes por
-   * diseño, no tienen dedup que gatear y no ganan nada perdiendo un intento.
+   * eventTypes siguen en 0: `createTicket`, `setEstado` y `assignTicket` (#52) son
+   * idempotentes por diseño —los tres son last-write-wins sobre el mismo recurso, no
+   * agregan una linea nueva a la conversacion como el comentario—, no tienen dedup
+   * que gatear y no ganan nada perdiendo un intento.
    *
    * Dos updateMany a proposito (no uno con CASE): Prisma no expresa un SET
    * condicional sin `$executeRaw`, y partir por eventType deja el invariante
