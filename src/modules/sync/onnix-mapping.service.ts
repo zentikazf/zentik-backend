@@ -1,13 +1,25 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { TicketStatus } from '@prisma/client';
+import { randomUUID } from 'crypto';
 import { PrismaService } from '../../database/prisma.service';
 import { AppConfigService } from '../../config/app.config';
 import { OnnixClientService } from './onnix-client.service';
-import { OnnixCatalogos } from './types/onnix.types';
+import { OnnixCatalogos, OnnixEquipoUsuario } from './types/onnix.types';
 import {
   ONNIX_ENTITY_TYPE_TICKET_TYPE,
   ONNIX_TICKET_TYPE_SLUG_MAP,
 } from './onnix-ticket-type-map';
+import { ONNIX_ENTITY_TYPE_USER, ONNIX_SUPPORT_TEAM_ID } from './onnix-user-map';
+
+/**
+ * Clave de match del seed de usuarios (#52 R1.2): trim + lowercase. El email de
+ * Zentik es `@unique` pero eso NO garantiza la misma capitalizacion que OSD, y una
+ * mayuscula de diferencia dejaria a un usuario sin mapear en silencio.
+ * Devuelve '' para nulos/vacios, que nunca matchea (el `if (key)` del indice).
+ */
+function normalizeEmail(email: string | null | undefined): string {
+  return (email ?? '').trim().toLowerCase();
+}
 
 /**
  * Resultado del seed de mappings de tipo por organización (#50 D3).
@@ -24,6 +36,27 @@ export interface SeedTicketTypeMappingsOrgResult {
   zentikSlugsWithoutPair: string[];
   /** Slugs de la tabla de R1.4 sin ningún TicketType en esta org (solo log). */
   tableSlugsWithoutTicketType: string[];
+}
+
+/**
+ * Resultado del seed de mappings de usuario por organización (#52 R1.3).
+ *
+ * Las tres listas van con NOMBRE Y EMAIL, no con contadores, y ese es el punto:
+ * son la única señal que va a delatar al próximo usuario que se sume a Zentik y que
+ * nadie dé de alta en el equipo de OSD. Sin nombrarlos, su primera asignación se
+ * pierde en un warn del dispatcher que nadie está mirando.
+ */
+export interface SeedUserMappingsOrgResult {
+  organizationId: string;
+  created: number;
+  updated: number;
+  alreadyMapped: number;
+  /** Usuarios internos de Zentik sin par en el equipo de OSD (sus asignaciones NO viajan). */
+  zentikUsersWithoutPair: string[];
+  /** Miembros del equipo de OSD sin usuario interno en esta org. */
+  onnixMembersWithoutPair: string[];
+  /** Miembros con `is_active: false` en OSD: excluidos del mapeo a propósito. */
+  inactiveSkipped: string[];
 }
 
 /**
@@ -84,6 +117,22 @@ export class OnnixMappingService {
   ): Promise<number | null> {
     if (!zentikProjectId) return null;
     return this.lookup(organizationId, 'project', zentikProjectId);
+  }
+
+  /**
+   * `assigned_to` de OSD para un usuario de Zentik (#52 R1.1); null si no hay
+   * mapeo. Best-effort A PROPOSITO, en los DOS callers:
+   * - en el create (R2.2) el ticket viaja SIN `assigned_to` — nunca se falla un
+   *   ticket por no saber a quien asignarlo;
+   * - en `ASSIGNEE_CHANGED` (R3.3) la fila se skipea con warn — nunca a la DLQ.
+   * El seed de `seedUserMappings()` es lo que llena esta tabla.
+   */
+  async resolveUserId(
+    organizationId: string,
+    zentikUserId: string | null | undefined,
+  ): Promise<number | null> {
+    if (!zentikUserId) return null;
+    return this.lookup(organizationId, ONNIX_ENTITY_TYPE_USER, zentikUserId);
   }
 
   private async lookup(
@@ -303,6 +352,178 @@ export class OnnixMappingService {
       zentikSlugsWithoutPair,
       tableSlugsWithoutTicketType,
     };
+  }
+
+  /**
+   * Siembra los mappings de usuario por EMAIL contra `GET /equipos/{id}/usuarios`
+   * (#52 R1.2). Idempotente: dos corridas dejan el mismo estado.
+   *
+   * POR QUE EMAIL Y NO NOMBRE (decision cerrada 2): la verificacion del dueño
+   * (R0.2) encontro que los nombres NO coinciden entre los dos sistemas ("Ada Luisa
+   * Mereles Patiño" vs "Ada Mereles"), mientras que los 5 emails matchean exacto.
+   * Matchear por nombre habria fallado en produccion. `User.email` es `@unique` en
+   * Zentik, asi que el email es una clave real, no una heuristica.
+   *
+   * - Scope = `ONNIX_SYNC_ORG_IDS` y equipo = `ONNIX_SUPPORT_TEAM_ID`: el endpoint
+   *   no recibe input → nada que validar ni por donde inyectar (molde de
+   *   `seedTicketTypeMappings`).
+   * - Solo usuarios INTERNOS (`clientId: null`) y miembros de la org: un usuario
+   *   cliente jamas es responsable de un ticket en OSD, y mapearlo solo agregaria
+   *   una forma de asignar mal.
+   * - `is_active: false` en OSD NO se mapea: asignarle un ticket a alguien dado de
+   *   baja es exactamente el 422 que este seed viene a evitar.
+   * - Las desalineaciones se LOGGEAN CON NOMBRE Y EMAIL y se devuelven, nunca tiran
+   *   error (R1.3). Eso es lo que va a delatar al proximo usuario que se sume a
+   *   Zentik y que nadie de de alta en el equipo de OSD: sin esa lista, su primera
+   *   asignacion se pierde en un warn del dispatcher que nadie esta mirando.
+   */
+  async seedUserMappings(): Promise<SeedUserMappingsOrgResult[]> {
+    const traceId = randomUUID();
+    // UNA sola llamada a OSD para todas las orgs: el equipo de soporte es el mismo
+    // (ONNIX_SUPPORT_TEAM_ID es constante) y hoy la whitelist tiene una sola org.
+    const members = await this.onnix.getTeamMembers(ONNIX_SUPPORT_TEAM_ID, traceId);
+    const results: SeedUserMappingsOrgResult[] = [];
+    for (const organizationId of this.config.onnixSyncOrgIds) {
+      results.push(await this.seedUserMappingsForOrg(organizationId, members));
+    }
+    return results;
+  }
+
+  private async seedUserMappingsForOrg(
+    organizationId: string,
+    members: OnnixEquipoUsuario[],
+  ): Promise<SeedUserMappingsOrgResult> {
+    // `is_active === false` EXPLICITO (no `!m.is_active`): el campo es opcional en el
+    // contrato, y un OSD que deje de mandarlo no puede dejar al equipo entero sin
+    // mapear en silencio. Ausente = activo.
+    const inactive = members.filter((m) => m.is_active === false);
+    const inactiveSkipped = inactive
+      .map((m) => this.describeMember(m))
+      .sort();
+
+    // Indice email normalizado → miembro activo. Si OSD repitiera un email (no
+    // deberia), gana el PRIMERO y el resto queda como "sin par": es mas honesto que
+    // pisar el mapeo en silencio con el ultimo que aparecio en la lista.
+    const byEmail = new Map<string, OnnixEquipoUsuario>();
+    for (const m of members) {
+      if (m.is_active === false) continue;
+      const key = normalizeEmail(m.email);
+      if (key && !byEmail.has(key)) byEmail.set(key, m);
+    }
+
+    // Usuarios INTERNOS de la org: `clientId: null` es el mismo criterio que usa el
+    // dispatcher para el prefijo de autor de #50 (`user.clientId` = usuario cliente).
+    const users = await this.prisma.user.findMany({
+      where: {
+        clientId: null,
+        organizationMembers: { some: { organizationId } },
+      },
+      select: { id: true, email: true, name: true },
+    });
+
+    const pairs: { user: (typeof users)[number]; onnixId: number }[] = [];
+    const zentikUsersWithoutPair: string[] = [];
+    const matchedOnnixIds = new Set<number>();
+    for (const user of users) {
+      const match = byEmail.get(normalizeEmail(user.email));
+      if (!match) {
+        zentikUsersWithoutPair.push(`${user.name} <${user.email}>`);
+        continue;
+      }
+      pairs.push({ user, onnixId: match.id });
+      matchedOnnixIds.add(match.id);
+    }
+    zentikUsersWithoutPair.sort();
+    const onnixMembersWithoutPair = members
+      .filter((m) => m.is_active !== false && !matchedOnnixIds.has(m.id))
+      .map((m) => this.describeMember(m))
+      .sort();
+
+    // Estado previo en UNA query (molde de seedTicketTypeMappings): permite contar
+    // created/updated/alreadyMapped —el `upsert` de Prisma no dice que rama tomo— y
+    // evitar escrituras inutiles cuando el mapping ya esta igual.
+    const existing = pairs.length
+      ? await this.prisma.onnixEntityMapping.findMany({
+          where: {
+            organizationId,
+            entityType: ONNIX_ENTITY_TYPE_USER,
+            zentikId: { in: pairs.map((p) => p.user.id) },
+          },
+          select: { zentikId: true, onnixId: true },
+        })
+      : [];
+    const previous = new Map(existing.map((e) => [e.zentikId, e.onnixId]));
+
+    let created = 0;
+    let updated = 0;
+    let alreadyMapped = 0;
+
+    for (const { user, onnixId } of pairs) {
+      const prev = previous.get(user.id);
+      if (prev === onnixId) {
+        alreadyMapped++;
+        continue; // 2ª corrida: no toca la fila (idempotencia real).
+      }
+      if (prev === undefined) created++;
+      else updated++;
+      await this.prisma.onnixEntityMapping.upsert({
+        where: {
+          organizationId_entityType_zentikId: {
+            organizationId,
+            entityType: ONNIX_ENTITY_TYPE_USER,
+            zentikId: user.id,
+          },
+        },
+        create: {
+          organizationId,
+          entityType: ONNIX_ENTITY_TYPE_USER,
+          zentikId: user.id,
+          onnixId,
+        },
+        update: { onnixId },
+      });
+    }
+
+    // R1.3: los dos lados sin par van con NOMBRE Y EMAIL, no con un contador. Un
+    // "3 usuarios sin par" no se puede accionar; "Fulano <f@onnix.com.py>" si.
+    if (zentikUsersWithoutPair.length > 0) {
+      this.logger.warn(
+        `Seed user org=${organizationId}: ${zentikUsersWithoutPair.length} usuario(s) interno(s) de Zentik ` +
+          `SIN par en el equipo ${ONNIX_SUPPORT_TEAM_ID} de OSD (sus asignaciones NO se van a reflejar): ` +
+          zentikUsersWithoutPair.join(', '),
+      );
+    }
+    if (onnixMembersWithoutPair.length > 0) {
+      this.logger.warn(
+        `Seed user org=${organizationId}: ${onnixMembersWithoutPair.length} miembro(s) del equipo ` +
+          `${ONNIX_SUPPORT_TEAM_ID} de OSD sin usuario interno en esta org: ` +
+          onnixMembersWithoutPair.join(', '),
+      );
+    }
+    if (inactiveSkipped.length > 0) {
+      this.logger.log(
+        `Seed user org=${organizationId}: ${inactiveSkipped.length} miembro(s) inactivo(s) en OSD, no mapeados: ` +
+          inactiveSkipped.join(', '),
+      );
+    }
+    this.logger.log(
+      `Seed user org=${organizationId} created=${created} updated=${updated} alreadyMapped=${alreadyMapped}`,
+    );
+
+    return {
+      organizationId,
+      created,
+      updated,
+      alreadyMapped,
+      zentikUsersWithoutPair,
+      onnixMembersWithoutPair,
+      inactiveSkipped,
+    };
+  }
+
+  /** Etiqueta legible de un miembro de OSD para el reporte de R1.3. */
+  private describeMember(m: OnnixEquipoUsuario): string {
+    return `${m.name ?? 'sin nombre'} <${m.email ?? 'sin email'}> (osdId=${m.id})`;
   }
 
   private async resolveCatalogId(

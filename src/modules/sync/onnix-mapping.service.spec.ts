@@ -10,6 +10,7 @@ import {
   ONNIX_ENTITY_TYPE_TICKET_TYPE,
   ONNIX_TICKET_TYPE_SLUG_MAP,
 } from './onnix-ticket-type-map';
+import { ONNIX_SUPPORT_TEAM_ID } from './onnix-user-map';
 
 // Cast puntual documentado: los getters de AppConfigService son read-only; el
 // mock los hace asignables en runtime pero TS sigue viendo el tipo real.
@@ -507,6 +508,214 @@ describe('OnnixMappingService', () => {
 
       config.onnixSyncOrgIds = [];
       expect(await service.seedTicketTypeMappings()).toEqual([]);
+    });
+  });
+
+  // ── #52 T2 — seed de usuarios por email ────────────────────────────────────
+
+  describe('seedUserMappings — #52 T2 (R1.2/R1.3)', () => {
+    /**
+     * Misma tabla en memoria que el seed de tipos, pero para `entityType: 'user'`.
+     * Permite verificar la idempotencia real (2ª corrida = todo alreadyMapped, cero
+     * escrituras) en vez de solo contar llamadas.
+     */
+    function fakeUserStore(): Map<string, number> {
+      const store = new Map<string, number>();
+      prisma.onnixEntityMapping.findMany.mockImplementation(((args: {
+        where: { organizationId: string; entityType: string; zentikId: { in: string[] } };
+      }) => {
+        const { organizationId, entityType, zentikId } = args.where;
+        const rows = zentikId.in
+          .map((id) => ({ zentikId: id, onnixId: store.get(`${organizationId}|${entityType}|${id}`) }))
+          .filter((r): r is { zentikId: string; onnixId: number } => r.onnixId !== undefined);
+        return Promise.resolve(rows);
+      }) as never);
+      prisma.onnixEntityMapping.upsert.mockImplementation(((args: {
+        where: { organizationId_entityType_zentikId: MappingKey };
+        update: { onnixId: number };
+      }) => {
+        const key = args.where.organizationId_entityType_zentikId;
+        store.set(`${key.organizationId}|${key.entityType}|${key.zentikId}`, args.update.onnixId);
+        return Promise.resolve({});
+      }) as never);
+      return store;
+    }
+
+    function stubUsers(users: { id: string; email: string; name: string }[]): void {
+      prisma.user.findMany.mockResolvedValue(users as never);
+    }
+
+    it('R1.2: matchea por EMAIL y crea el mapping user -> onnixId', async () => {
+      // La verificacion del dueño (R0.2) encontro que los NOMBRES no coinciden entre
+      // los dos sistemas ("Ada Luisa Mereles Patiño" vs "Ada Mereles"). Matchear por
+      // nombre habria fallado en produccion: por eso el par es el email.
+      const store = fakeUserStore();
+      onnix.getTeamMembers.mockResolvedValue([
+        { id: 10, name: 'Ada Luisa Mereles Patiño', email: 'amereles@onnix.com.py', is_active: true },
+      ]);
+      stubUsers([{ id: 'u_ada', email: 'amereles@onnix.com.py', name: 'Ada Mereles' }]);
+
+      const [res] = await service.seedUserMappings();
+
+      expect(res.created).toBe(1);
+      expect(store.get(`${ORG}|user|u_ada`)).toBe(10);
+      expect(res.zentikUsersWithoutPair).toEqual([]);
+      expect(res.onnixMembersWithoutPair).toEqual([]);
+    });
+
+    it('R1.2: el match es case-insensitive y con trim (una mayuscula no puede dejar a alguien sin mapear)', async () => {
+      const store = fakeUserStore();
+      onnix.getTeamMembers.mockResolvedValue([
+        { id: 14, name: 'Josue Farias', email: '  CFarias@Onnix.Com.Py ', is_active: true },
+      ]);
+      stubUsers([{ id: 'u_josue', email: 'cfarias@onnix.com.py', name: 'Josue' }]);
+
+      const [res] = await service.seedUserMappings();
+
+      expect(res.created).toBe(1);
+      expect(store.get(`${ORG}|user|u_josue`)).toBe(14);
+    });
+
+    it('R1.2: `is_active: false` en OSD NO se mapea — asignarle un ticket seria el 422 que esto viene a evitar', async () => {
+      const store = fakeUserStore();
+      onnix.getTeamMembers.mockResolvedValue([
+        { id: 99, name: 'Ex Empleado', email: 'ex@onnix.com.py', is_active: false },
+      ]);
+      stubUsers([{ id: 'u_ex', email: 'ex@onnix.com.py', name: 'Ex Empleado' }]);
+
+      const [res] = await service.seedUserMappings();
+
+      expect(res.created).toBe(0);
+      expect(store.size).toBe(0);
+      expect(res.inactiveSkipped).toEqual(['Ex Empleado <ex@onnix.com.py> (osdId=99)']);
+      // El usuario de Zentik queda reportado como sin par: su asignacion NO va a viajar.
+      expect(res.zentikUsersWithoutPair).toEqual(['Ex Empleado <ex@onnix.com.py>']);
+    });
+
+    it('GUARD: `is_active` AUSENTE cuenta como activo (un campo opcional no puede dejar al equipo sin mapear)', async () => {
+      const store = fakeUserStore();
+      onnix.getTeamMembers.mockResolvedValue([
+        { id: 11, name: 'Milena Ojeda', email: 'amojeda@onnix.com.py' },
+      ]);
+      stubUsers([{ id: 'u_mile', email: 'amojeda@onnix.com.py', name: 'Milena' }]);
+
+      const [res] = await service.seedUserMappings();
+
+      expect(res.created).toBe(1);
+      expect(store.get(`${ORG}|user|u_mile`)).toBe(11);
+    });
+
+    it('⚠️ R1.3: los sin par de LOS DOS LADOS se reportan CON NOMBRE Y EMAIL, no como un contador', async () => {
+      // Es la unica señal que va a delatar al proximo usuario que se sume a Zentik y
+      // que nadie de de alta en el equipo de OSD. Un "2 sin par" no se puede
+      // accionar; "Fulano <f@onnix.com.py>" si.
+      fakeUserStore();
+      onnix.getTeamMembers.mockResolvedValue([
+        { id: 10, name: 'Ada', email: 'amereles@onnix.com.py', is_active: true },
+        { id: 77, name: 'Alguien de OSD', email: 'otro@onnix.com.py', is_active: true },
+      ]);
+      stubUsers([
+        { id: 'u_ada', email: 'amereles@onnix.com.py', name: 'Ada Mereles' },
+        { id: 'u_nuevo', email: 'nuevo@onnix.com.py', name: 'Dev Nuevo' },
+      ]);
+
+      const [res] = await service.seedUserMappings();
+
+      expect(res.created).toBe(1);
+      expect(res.zentikUsersWithoutPair).toEqual(['Dev Nuevo <nuevo@onnix.com.py>']);
+      expect(res.onnixMembersWithoutPair).toEqual([
+        'Alguien de OSD <otro@onnix.com.py> (osdId=77)',
+      ]);
+      // Y ademas sale por warn, para el que mira los logs y no el body del endpoint.
+      const warns = warnSpy.mock.calls.map((c) => String(c[0])).join(' | ');
+      expect(warns).toContain('nuevo@onnix.com.py');
+      expect(warns).toContain('otro@onnix.com.py');
+    });
+
+    it('R1.2: IDEMPOTENCIA — la 2ª corrida no escribe NADA (todo alreadyMapped)', async () => {
+      const store = fakeUserStore();
+      onnix.getTeamMembers.mockResolvedValue([
+        { id: 10, name: 'Ada', email: 'amereles@onnix.com.py', is_active: true },
+      ]);
+      stubUsers([{ id: 'u_ada', email: 'amereles@onnix.com.py', name: 'Ada Mereles' }]);
+
+      const [first] = await service.seedUserMappings();
+      expect(first.created).toBe(1);
+
+      prisma.onnixEntityMapping.upsert.mockClear();
+      const [second] = await service.seedUserMappings();
+
+      expect(second).toMatchObject({ created: 0, updated: 0, alreadyMapped: 1 });
+      // Idempotencia REAL: no toca la fila, no "escribe lo mismo".
+      expect(prisma.onnixEntityMapping.upsert).not.toHaveBeenCalled();
+      expect(store.get(`${ORG}|user|u_ada`)).toBe(10);
+    });
+
+    it('R1.2: si el id de OSD CAMBIA, la 2ª corrida actualiza (updated, no created)', async () => {
+      const store = fakeUserStore();
+      onnix.getTeamMembers.mockResolvedValueOnce([
+        { id: 10, name: 'Ada', email: 'amereles@onnix.com.py', is_active: true },
+      ]);
+      stubUsers([{ id: 'u_ada', email: 'amereles@onnix.com.py', name: 'Ada Mereles' }]);
+      await service.seedUserMappings();
+
+      onnix.getTeamMembers.mockResolvedValueOnce([
+        { id: 42, name: 'Ada', email: 'amereles@onnix.com.py', is_active: true },
+      ]);
+      const [second] = await service.seedUserMappings();
+
+      expect(second).toMatchObject({ created: 0, updated: 1, alreadyMapped: 0 });
+      expect(store.get(`${ORG}|user|u_ada`)).toBe(42);
+    });
+
+    it('solo usuarios INTERNOS de la org: el `where` exige clientId null + membresia', async () => {
+      // Un usuario cliente jamas es responsable de un ticket en OSD; mapearlo solo
+      // agregaria una forma de asignar mal.
+      fakeUserStore();
+      onnix.getTeamMembers.mockResolvedValue([]);
+      stubUsers([]);
+
+      await service.seedUserMappings();
+
+      expect(prisma.user.findMany.mock.calls[0][0]).toMatchObject({
+        where: {
+          clientId: null,
+          organizationMembers: { some: { organizationId: ORG } },
+        },
+      });
+    });
+
+    it('usa el equipo ONNIX_SUPPORT_TEAM_ID y pide los miembros UNA sola vez para todas las orgs', async () => {
+      fakeUserStore();
+      onnix.getTeamMembers.mockResolvedValue([]);
+      stubUsers([]);
+      config.onnixSyncOrgIds = ['org-a', 'org-b'];
+
+      const many = await service.seedUserMappings();
+
+      expect(many.map((r) => r.organizationId)).toEqual(['org-a', 'org-b']);
+      expect(onnix.getTeamMembers).toHaveBeenCalledTimes(1);
+      expect(onnix.getTeamMembers).toHaveBeenCalledWith(ONNIX_SUPPORT_TEAM_ID, expect.any(String));
+    });
+
+    it('miembro de OSD SIN email -> no matchea a nadie y queda reportado, sin romper el seed', async () => {
+      fakeUserStore();
+      onnix.getTeamMembers.mockResolvedValue([
+        { id: 88, name: 'Sin Email', is_active: true },
+        { id: 10, name: 'Ada', email: 'amereles@onnix.com.py', is_active: true },
+      ]);
+      stubUsers([{ id: 'u_ada', email: 'amereles@onnix.com.py', name: 'Ada Mereles' }]);
+
+      const [res] = await service.seedUserMappings();
+
+      expect(res.created).toBe(1);
+      expect(res.onnixMembersWithoutPair).toEqual(['Sin Email <sin email> (osdId=88)']);
+    });
+
+    it('R0.1: el equipo de soporte es una CONSTANTE en codigo, no una env var', () => {
+      // Criterio de #46: no cambia por entorno -> una variable solo agregaria una
+      // forma de que prod y local difieran sin que nadie se entere.
+      expect(ONNIX_SUPPORT_TEAM_ID).toBe(2);
     });
   });
 });

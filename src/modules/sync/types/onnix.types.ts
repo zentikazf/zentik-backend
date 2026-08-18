@@ -55,6 +55,14 @@ export interface OnnixCreateTicketBody {
   subject: string;
   description: string;
   origin?: 'web' | 'email' | 'phone' | 'whatsapp' | 'api' | 'internal';
+  /**
+   * Responsable con el que NACE el ticket en OSD (#52 R2.1). OPCIONAL y al final a
+   * proposito: sin asignado en Zentik o sin mapping del usuario, el body va sin este
+   * campo — exactamente el body de hoy (R2.2). Un ticket NUNCA falla por no saber a
+   * quien asignarlo; lo peor que pasa es que quede a nombre del usuario de servicio,
+   * que es el comportamiento previo a #52.
+   */
+  assigned_to?: number;
 }
 
 /** Respuesta de `POST /tickets` (TicketDetalle). El `code` es el externalId. */
@@ -114,6 +122,48 @@ export interface OnnixTicketComentario {
 export type OnnixAddComentarioResponse =
   | Partial<OnnixTicketComentario>
   | { data?: Partial<OnnixTicketComentario> };
+
+/**
+ * Item de `GET /equipos/{id}/usuarios` (#52 R4.1). Es la fuente del mapeo de
+ * usuarios: `email` es la clave de match contra `User.email` de Zentik (unico), e
+ * `id` es el `assigned_to` que espera OSD.
+ *
+ * TODO opcional salvo `id`: es lo que llega del cable, no una promesa. Un miembro
+ * sin `email` no puede matchearse y el seed lo reporta como "sin par" en vez de
+ * romper. `is_active: false` NO se mapea (R1.2): asignarle un ticket a alguien dado
+ * de baja en OSD es exactamente el 422 que este seed viene a evitar.
+ */
+export interface OnnixEquipoUsuario {
+  id: number;
+  name?: string;
+  email?: string;
+  is_active?: boolean;
+}
+
+/**
+ * Respuesta de `GET /equipos/{id}/usuarios` (#52 R4.1).
+ *
+ * Se aceptan LAS DOS formas por la leccion de #51 FIX 8: dentro del MISMO OpenAPI de
+ * OSD conviven colecciones peladas (`/catalogos/*`) y colecciones envueltas en
+ * `{ data: [...] }` (`/tickets/{code}/comentarios`), porque las anotaciones estan
+ * escritas a mano sobre `JsonResource` de Laravel. Si adivinamos mal, el seed mapea
+ * CERO usuarios: no explota, simplemente no encuentra a nadie y todo el mundo cae en
+ * el skip+warn de R3.3 — el modo de fallo mas caro de diagnosticar que hay.
+ */
+export type OnnixListEquipoUsuariosResponse =
+  | OnnixEquipoUsuario[]
+  | { data?: OnnixEquipoUsuario[] };
+
+/**
+ * Body de `POST /tickets/{code}/asignar` (#52 R4.2).
+ * `assigned_to` es el id de OSD del responsable y es OBLIGATORIO — OSD no tiene
+ * desasignacion, por eso R3.3 skipea el caso "asignado null" en vez de mandar algo.
+ * `reason` queda en la auditoria de OSD (maxLength 500; el dispatcher trunca antes).
+ */
+export interface OnnixAsignarBody {
+  assigned_to: number;
+  reason?: string;
+}
 
 /**
  * Metadatos de paginacion de un `LengthAwarePaginator` de Laravel (#51 FIX 10).

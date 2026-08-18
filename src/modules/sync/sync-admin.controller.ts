@@ -8,6 +8,7 @@ import { SyncReconciliationService } from './sync-reconciliation.service';
 import {
   OnnixMappingService,
   SeedTicketTypeMappingsOrgResult,
+  SeedUserMappingsOrgResult,
 } from './onnix-mapping.service';
 import { OutboxService } from './outbox.service';
 import { RequeueFailedDto } from './dto/requeue.dto';
@@ -144,5 +145,36 @@ export class SyncAdminController {
   @ApiResponse({ status: 403, description: 'Rol no autorizado' })
   seedTicketTypes(): Promise<SeedTicketTypeMappingsOrgResult[]> {
     return this.mapping.seedTicketTypeMappings();
+  }
+
+  /**
+   * Siembra los mappings de usuario Zentik → OSD por EMAIL (#52 R1.2/R1.3).
+   * Idempotente, sin input (el scope son las orgs de `ONNIX_SYNC_ORG_IDS` y el
+   * equipo `ONNIX_SUPPORT_TEAM_ID`) — mismo molde que `seed-ticket-types`.
+   *
+   * Es el PRERREQUISITO de toda la feature: sin mappings de usuario, el create va
+   * sin `assigned_to` (R2.2) y cada `ASSIGNEE_CHANGED` se skipea con warn (R3.3).
+   * Por eso el paso 1 del QA manual es correr esto y LEER el reporte: las tres
+   * listas de "sin par" son las que dicen a quién no va a poder asignar la
+   * integración.
+   */
+  @Post('onnix/seed-users')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Sembrar los mappings de usuario Zentik → Onnix (por email)',
+    description:
+      'Matchea por email (case-insensitive) los usuarios internos de cada org ' +
+      'contra los miembros del equipo de soporte de OSD. Los inactivos en OSD no ' +
+      'se mapean. Devuelve nombre y email de los que quedaron sin par de cada lado.',
+  })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Resultado por organización (created/updated/alreadyMapped + los sin par de cada lado)',
+  })
+  @ApiResponse({ status: 401, description: 'No autenticado' })
+  @ApiResponse({ status: 403, description: 'Rol no autorizado' })
+  seedUsers(): Promise<SeedUserMappingsOrgResult[]> {
+    return this.mapping.seedUserMappings();
   }
 }

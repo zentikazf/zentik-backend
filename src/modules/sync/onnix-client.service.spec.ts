@@ -286,4 +286,108 @@ describe('OnnixClientService — contrato de comentarios (#51)', () => {
       );
     });
   });
+
+  // ── #52 T1 — getTeamMembers + assignTicket ─────────────────────────────────
+
+  describe('getTeamMembers — #52 R4.1', () => {
+    const MIEMBROS = [
+      { id: 10, name: 'Ada', email: 'amereles@onnix.com.py', is_active: true },
+      { id: 14, name: 'Josue', email: 'cfarias@onnix.com.py', is_active: true },
+    ];
+
+    it('pega a GET /equipos/{id}/usuarios y devuelve el array pelado', async () => {
+      respond(200, MIEMBROS);
+
+      const res = await service.getTeamMembers(2, TRACE);
+
+      expect(res).toEqual(MIEMBROS);
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe('https://osd.test/api/equipos/2/usuarios');
+      expect(init.method).toBe('GET');
+    });
+
+    it('⚠️ FIX 8 aplicado: tambien acepta el `{ data: [...] }` de Laravel', async () => {
+      // Dentro del MISMO OpenAPI de OSD conviven colecciones peladas (`/catalogos/*`)
+      // y envueltas (`/tickets/{code}/comentarios`), porque las anotaciones estan
+      // escritas a mano sobre `JsonResource`. Adivinar mal aca no explota: el seed
+      // mapea CERO usuarios y todo el equipo cae en el skip+warn del dispatcher —
+      // el modo de fallo mas caro de diagnosticar que hay.
+      respond(200, { data: MIEMBROS });
+
+      expect(await service.getTeamMembers(2, TRACE)).toEqual(MIEMBROS);
+    });
+
+    it('body inesperado -> array vacio, nunca una excepcion de forma', async () => {
+      respond(200, { algo: 'raro' });
+
+      expect(await service.getTeamMembers(2, TRACE)).toEqual([]);
+    });
+
+    it('status != 2xx -> OnnixUpstreamError (mejor un error visible que un reporte con ceros)', async () => {
+      respond(403, { message: 'sin permiso' });
+
+      await expect(service.getTeamMembers(2, TRACE)).rejects.toBeInstanceOf(
+        OnnixUpstreamError,
+      );
+    });
+  });
+
+  describe('assignTicket — #52 R4.2', () => {
+    const BODY = { assigned_to: 10, reason: 'Sincronizado desde Zentik' };
+
+    it('200 -> outcome ok, con el body en POST /tickets/{code}/asignar', async () => {
+      respond(200, { id: 1, code: CODE });
+
+      const res = await service.assignTicket(CODE, BODY, TRACE);
+
+      expect(res.ok).toBe(true);
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(`https://osd.test/api/tickets/${CODE}/asignar`);
+      expect(init.method).toBe('POST');
+      expect(JSON.parse(init.body)).toEqual(BODY);
+    });
+
+    it('⚠️ 422 NO lanza: vuelve como outcome para que el dispatcher lo skipee sin DLQ', async () => {
+      // La clasificacion del cerco vive en `processAssign`, no aca. Si el cliente
+      // lanzara, el 422 entraria por `handleUpstreamFailure` y terminaria en la DLQ
+      // tras quemar el cap de intentos — justo lo que R3.3 prohibe.
+      respond(422, { message: 'El usuario no pertenece a tu equipo' });
+
+      const res = await service.assignTicket(CODE, BODY, TRACE);
+
+      expect(res).toEqual({
+        ok: false,
+        status: 422,
+        message: 'El usuario no pertenece a tu equipo',
+      });
+    });
+
+    it('403 (permiso faltante) SI lanza: es configuracion rota, tiene que doler', async () => {
+      // R0.3: `tickets.assign` y `tickets.reassign` son permisos distintos. Un 403
+      // no puede degradar en silencio como el 422 del cerco.
+      respond(403, { message: 'sin permiso' });
+
+      await expect(service.assignTicket(CODE, BODY, TRACE)).rejects.toBeInstanceOf(
+        OnnixUpstreamError,
+      );
+    });
+
+    it('5xx -> OnnixUpstreamError (reintentable, mismo molde que setEstado)', async () => {
+      respond(503, { message: 'boom' });
+
+      await expect(service.assignTicket(CODE, BODY, TRACE)).rejects.toBeInstanceOf(
+        OnnixUpstreamError,
+      );
+    });
+
+    it('el code va URL-encodeado (molde de setEstado/addComment)', async () => {
+      respond(200, { id: 1, code: 'TK/2026' });
+
+      await service.assignTicket('TK/2026', BODY, TRACE);
+
+      expect(fetchMock.mock.calls[0][0]).toBe(
+        'https://osd.test/api/tickets/TK%2F2026/asignar',
+      );
+    });
+  });
 });
