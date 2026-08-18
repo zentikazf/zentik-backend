@@ -20,6 +20,62 @@ const MOVEMENT_BUCKETS: Record<string, string[]> = {
   DESCUENTO: ['USAGE', 'LOAN'],
 };
 
+// #56: el techo del ledger y el umbral de aviso viven JUNTOS y el umbral se DERIVA del techo (80%),
+// nunca como un segundo literal. El error clasico es dejar el techo en un lado y el umbral en otro:
+// alguien sube el techo, se olvida del umbral, y el aviso queda MUERTO justo cuando mas se necesita.
+// Si las dos no se mueven juntas, el aviso no sirve.
+export const HOURS_SUMMARY_MAX_LIMIT = 500;
+export const HOURS_SUMMARY_WARN_THRESHOLD = Math.floor(HOURS_SUMMARY_MAX_LIMIT * 0.8);
+// #53: el cap sube de 100 a 500 porque la vista de cards por mes del staff necesita el
+// ledger COMPLETO del cliente en una sola respuesta. Agrupar por mes sobre una pagina
+// parcial produce totales que MIENTEN: el total de la card seria el de la porcion del mes
+// que cayo en esa pagina, no el del mes entero. El cliente mas cargado hoy ronda los 100
+// movimientos, asi que 500 da varios anios de margen. Si algun cliente se acerca al techo
+// hay que pasar a paginacion por MES (agrupada en SQL), NO subir el numero.
+
+// #57: techo de `page`. El `limit` ya tenia techo (HOURS_SUMMARY_MAX_LIMIT) pero `page` no tenia
+// NINGUNO, y `skip = (page - 1) * limit` con un page gigante desborda el entero de 64 bits de
+// Postgres: Prisma corta con "Unable to fit value 2e+22 into a 64-bit signed integer for field
+// `skip`" ⇒ 500. NO es un problema de parseo del query param —`?page=99999999999999999999` en
+// digitos planos ya reventaba antes de que el controller saneara nada—, por eso el techo va ACA:
+// cubre a CUALQUIER llamador, venga del borde HTTP, de otro service o de un test.
+//
+// Por que 100_000: el peor skip posible pasa a ser (100_000 - 1) * HOURS_SUMMARY_MAX_LIMIT ≈ 5e7,
+// once ordenes de magnitud por debajo del techo de int64 (~9.2e18) y todavia holgado contra int32.
+// El valor se deriva del techo del limit a proposito: si manana alguien sube HOURS_SUMMARY_MAX_LIMIT
+// el margen sigue siendo absurdo. En terminos de producto tampoco recorta nada real: el ledger mas
+// cargado ronda los 100 movimientos, asi que cualquier pagina mas alla del techo devuelve vacio
+// igual — capear solo cambia CUAL pagina vacia se devuelve, no que se pierda informacion.
+export const HOURS_SUMMARY_MAX_PAGE = 100_000;
+
+// #57 (cierre): techos del LISTADO DE CLIENTES (`findAll`).
+//
+// El commit de #57 dijo que el techo de pagina iba en el SERVICE porque "cubre a cualquier
+// llamador", pero solo lo puso en `getHoursSummary`. `findAll`, en este MISMO archivo, seguia
+// haciendo `page ?? 1` / `limit ?? 50` sin NINGUN techo, con dos 500 reproducibles:
+//   - `?page=99999999999999999999` ⇒ skip ≈ 5e21 ⇒ Prisma "Unable to fit value into a 64-bit
+//     signed integer for field `skip`" ⇒ HTTP 500.
+//   - `?limit=1e21` ⇒ `take` gigante ⇒ el mismo 500. Y `?limit=1000000`, que NO revienta, es
+//     peor: devuelve la tabla `client` ENTERA con `_count.projects` + `user` + `users` en una
+//     sola respuesta. El saneo del controller no alcanza — `1e21` y los digitos planos son
+//     numeros VALIDOS para `parsePaginationParam`, que solo descarta basura sintactica.
+//
+// Constantes PROPIAS y no las de `getHoursSummary`: aquellas acotan el ledger de horas de UN
+// cliente (filas baratas, la pantalla de facturacion necesita el mes completo); estas acotan el
+// padron de clientes de la organizacion (filas con includes). Son dos cosas distintas y tienen
+// que poder moverse por separado — atarlas hacia que subir el ledger agrandara este payload.
+//
+// Por que 500 de limit: el front pide `?limit=200` en cinco pantallas (clientes, tickets,
+// dashboard, proyectos, miembros), asi que el techo deja margen de sobra y hoy no recorta
+// ninguna vista real. Si una organizacion llega a rozarlo, la salida NO es subir el numero: es
+// paginar de verdad esas pantallas.
+export const CLIENT_LIST_MAX_LIMIT = 500;
+// Por que 100_000 de page: el peor skip posible pasa a ser (100_000 - 1) * CLIENT_LIST_MAX_LIMIT
+// ≈ 5e7, once ordenes de magnitud por debajo del techo de int64 (~9.2e18). Se deriva del techo del
+// limit a proposito, igual que su hermano de horas. No recorta nada real: ninguna organizacion
+// tiene 100_000 paginas de clientes, asi que capear solo cambia CUAL pagina vacia se devuelve.
+export const CLIENT_LIST_MAX_PAGE = 100_000;
+
 @Injectable()
 export class ClientService {
   private readonly logger = new Logger(ClientService.name);
@@ -62,8 +118,14 @@ export class ClientService {
     orgId: string,
     params: { search?: string; page?: number; limit?: number; status?: string; withUsers?: boolean },
   ): Promise<PaginatedResult<any>> {
-    const page = params.page ?? 1;
-    const limit = params.limit ?? 50;
+    // Techos del listado: ver CLIENT_LIST_MAX_PAGE / CLIENT_LIST_MAX_LIMIT arriba (el porque de
+    // cada numero). Sin el techo de `page` el `skip` desborda int64 y Prisma tira 500; sin el de
+    // `limit` un `take` gigante hace lo mismo, y uno grande pero valido devuelve el padron entero.
+    // Van ACA y no solo en el controller: cubren a cualquier llamador (otro service, un test, un
+    // job), y el saneo del borde HTTP deja pasar numeros validos aunque sean absurdos.
+    // `Math.max(1, ...)` mantiene el piso: 0 y negativos caen en la pagina 1 / 1 fila.
+    const page = Math.min(Math.max(1, params.page ?? 1), CLIENT_LIST_MAX_PAGE);
+    const limit = Math.min(Math.max(1, params.limit ?? 50), CLIENT_LIST_MAX_LIMIT);
     const skip = (page - 1) * limit;
 
     const where: Prisma.ClientWhereInput = { organizationId: orgId };
@@ -663,8 +725,11 @@ export class ClientService {
     const client = await this.findById(orgId, clientId);
     const available = Math.max(client.contractedHours - client.usedHours - client.loanedHours, 0);
 
-    const safePage = Math.max(1, page);
-    const safeLimit = Math.min(Math.max(1, limit), 100);
+    // Techo de pagina: ver HOURS_SUMMARY_MAX_PAGE arriba (comentario de #57 con el porque).
+    // Sin este `Math.min` el `skip` de abajo desborda int64 y Prisma tira un 500.
+    const safePage = Math.min(Math.max(1, page), HOURS_SUMMARY_MAX_PAGE);
+    // Techo del ledger: ver HOURS_SUMMARY_MAX_LIMIT arriba (comentario de #53 con el porque).
+    const safeLimit = Math.min(Math.max(1, limit), HOURS_SUMMARY_MAX_LIMIT);
     const skip = (safePage - 1) * safeLimit;
 
     const where: Prisma.HoursTransactionWhereInput = { clientId, deletedAt: null };
@@ -695,6 +760,30 @@ export class ClientService {
         _sum: { priceAmount: true },
       }),
     ]);
+
+    // #56: aviso de que el ledger de este cliente se esta acercando al techo. Se emite SOLO al
+    // cruzar el umbral: por debajo, silencio absoluto — un warn que aparece siempre deja de leerse.
+    // Es REACTIVO a proposito (solo salta cuando alguien pide las horas de ese cliente): un cron
+    // que barra todos los clientes seria sobre-ingenieria para el volumen real, y la cobertura
+    // practica alcanza porque esta pantalla se abre para facturar y el ledger solo crece cuando
+    // alguien carga horas.
+    //
+    // `total` es el conteo DE ESTA VISTA, no el del cliente: cuando viene `movement` el count lleva
+    // el mismo `where.type` que filtra las filas, asi que cuenta solo el bucket elegido. Por eso el
+    // texto habla de la vista — decir "el cliente tiene N" hacia que el numero (y el aviso mismo)
+    // se moviera al apretar una pildora de filtro, y quien lo leyera concluia que el aviso era un
+    // error. NO se agrega un count sin filtro a proposito: seria una query mas en el camino caliente
+    // de la pantalla de facturacion, y sin filtro —el estado por defecto— la vista ES el ledger
+    // completo, que es el caso en el que este aviso importa.
+    if (total > HOURS_SUMMARY_WARN_THRESHOLD) {
+      this.logger.warn(
+        `Ledger de horas cerca del techo: la vista del cliente ${clientId} ya trae ${total} ` +
+          `movimientos (umbral ${HOURS_SUMMARY_WARN_THRESHOLD}, techo ${HOURS_SUMMARY_MAX_LIMIT}). ` +
+          `Al llegar al techo la respuesta deja de traer el ledger completo y los totales por mes ` +
+          `de la vista del staff vuelven a MENTIR (agrupan en el navegador). ` +
+          `La salida correcta NO es subir el techo: hay que paginar por MES agrupando en SQL.`,
+      );
+    }
 
     const totalAmount = billableAggregate._sum.priceAmount
       ? parseFloat(billableAggregate._sum.priceAmount.toString())
@@ -767,6 +856,59 @@ export class ClientService {
         409,
         { transactionId, billedCycleId: tx.billedCycleId },
       );
+    }
+
+    // #54: la fila ESPEJO de una nota de crédito (rebilledFromTransactionId != null) SÍ se puede
+    // borrar, pero su delete es ASIMÉTRICO respecto de todos los demás tipos: NO revierte cupo.
+    //
+    // Por qué se permite: no existe flujo para "corregir el origen". No hay endpoint de anulación
+    // ni de borrado de NC, el modelo CreditNote no tiene status/cancelledAt, reabrir el ciclo con
+    // NCs tira CYCLE_HAS_CREDIT_NOTES y reemitir choca LINE_ALREADY_CREDITED por el @unique de
+    // creditedTransactionId. Como `returnHoursToBillable` es el DEFAULT, una espejo emitida por
+    // error quedaría inmutable, indeleteable y sin salida. Borrarla no desincroniza nada: el
+    // CreditNoteLine congelado sigue intacto; esto es literalmente "deshacer la devolución de
+    // horas al pool facturable", una acción legítima del admin.
+    //
+    // Por qué SIN reversa de contadores: la espejo nació "NO toca cupo"
+    // (client-billing.service.ts) — nunca incrementó usedHours/loanedHours. Correr el decrement
+    // de más abajo le regalaría ese cupo al cliente, que es exactamente el bug que #54 vino a
+    // matar. El EDIT sí sigue prohibido (ver editHoursTransaction): ahí el problema es distinto
+    // (dato derivado que se desincroniza del original), y borrar la fila es la salida.
+    if (tx.rebilledFromTransactionId) {
+      await this.prisma.hoursTransaction.update({
+        where: { id: transactionId },
+        data: { deletedAt: new Date(), deletedById, deleteReason: reason },
+      });
+
+      const deletedByMirror = await this.prisma.user.findUnique({
+        where: { id: deletedById },
+        select: { name: true, email: true },
+      });
+
+      this.logger.log(
+        `Hours transaction ${transactionId} (fila espejo de NC) deleted by ${deletedByMirror?.email} — ` +
+          `reason: ${reason} — cupo NO revertido (la espejo nunca lo movió)`,
+      );
+      await this.auditService.create({
+        organizationId: orgId,
+        action: 'client.hours.deleted',
+        resource: 'client',
+        resourceId: clientId,
+        oldData: {
+          transactionId,
+          type: tx.type,
+          hours: tx.hours,
+          note: tx.note,
+          rebilledFromTransactionId: tx.rebilledFromTransactionId,
+        },
+        newData: {
+          deletedBy: deletedByMirror?.name,
+          reason,
+          mirrorRow: true,
+          quotaReverted: false,
+        },
+      });
+      return;
     }
 
     await this.prisma.$transaction(async (prisma) => {
@@ -845,6 +987,22 @@ export class ClientService {
         'TRANSACTION_BILLED',
         409,
         { transactionId, billedCycleId: tx.billedCycleId },
+      );
+    }
+
+    // #54: la fila ESPEJO de una nota de crédito (rebilledFromTransactionId != null) es
+    // inmutable. Va ANTES del guard de `type` a propósito: la espejo copia el type del original
+    // (USAGE/LOAN), así que ese guard la dejaría pasar. Es una COPIA derivada congelada al emitir
+    // la NC y nació SIN mover el cupo; editarla aplicaría el `increment` del delta sobre un
+    // contador que nunca tocó (sube "Consumidas" con horas que nadie trabajó) y la desincroniza
+    // del original. La salida es ELIMINAR la fila (deleteHoursTransaction la borra sin tocar cupo):
+    // no existe flujo de anulación ni de reemisión de NC, así que el mensaje no puede prometerlo.
+    if (tx.rebilledFromTransactionId) {
+      throw new AppException(
+        'La fila espejo de una nota de crédito no se edita: es una copia derivada del movimiento original. Si la devolución de horas fue un error, eliminá la fila.',
+        'MIRROR_ROW_READONLY',
+        409,
+        { transactionId, rebilledFromTransactionId: tx.rebilledFromTransactionId },
       );
     }
 

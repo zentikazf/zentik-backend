@@ -200,6 +200,54 @@ describe('H7 — HoursListener.onTimeEntryReverted (refund keyed)', () => {
       expect(errorSpy).not.toHaveBeenCalled();
     });
 
+    it('#54 — el findFirst EXCLUYE la fila espejo de una NC (rebilledFromTransactionId null)', async () => {
+      prisma.hoursTransaction.findFirst.mockResolvedValue(null as never);
+      await listener.onTimeEntryReverted({ timeEntryId: 'm1', taskId: 't1', duration: 3600 });
+      const whereArg = (prisma.hoursTransaction.findFirst.mock.calls[0][0] as any).where;
+      expect(whereArg.rebilledFromTransactionId).toBeNull();
+    });
+  });
+
+  describe('#54 — el revert NO puede llevarse la fila espejo de una nota de crédito', () => {
+    it('evento SIN entryVersion + espejo más nueva que la original → revierte la ORIGINAL, la espejo queda intacta', async () => {
+      // Escenario real: `revertConfirmation` (sin entryVersion) corre en cada aprobación/rechazo.
+      // La espejo copia taskId y type del original y nace DESPUÉS, así que ganaba el
+      // `orderBy createdAt desc` y se llevaba el revert: REFUND + tombstone de la espejo (que
+      // salía del pool facturable que la NC prometía re-facturar) + decrement de horas que la
+      // espejo NUNCA incrementó = cupo regalado. El where ahora la filtra en la DB, así que el
+      // mock devuelve lo que devolvería Postgres: la ORIGINAL.
+      const original = { id: 'usage-original', clientId: 'c1', type: 'USAGE', hours: 4 };
+      const espejo = { id: 'espejo-nc', clientId: 'c1', type: 'USAGE', hours: 4, rebilledFromTransactionId: 'usage-original' };
+      const vivas = [espejo, original]; // ambas vivas, la espejo primera en createdAt desc
+      prisma.hoursTransaction.findFirst.mockImplementation((args: any) =>
+        vivas.find((t) =>
+          args.where.rebilledFromTransactionId === null
+            ? (t as { rebilledFromTransactionId?: string }).rebilledFromTransactionId == null
+            : true,
+        ) as never,
+      );
+
+      await listener.onTimeEntryReverted({ timeEntryId: 'carrier-1', taskId: 't1', duration: 14400 });
+
+      // (a) el REFUND linkea la ORIGINAL, no la espejo
+      expect(prisma.hoursTransaction.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ type: 'REFUND', hours: 4, reversesTransactionId: 'usage-original' }),
+        }),
+      );
+      // (b) la espejo queda INTACTA: el único tombstone es el de la original
+      expect(prisma.hoursTransaction.update).toHaveBeenCalledTimes(1);
+      expect(prisma.hoursTransaction.update).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'usage-original' } }),
+      );
+      // (c) el client.update lleva las horas de la ORIGINAL
+      expect(prisma.client.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { usedHours: { decrement: 4 } } }),
+      );
+    });
+  });
+
+  describe('H9a — errores del revert (continuación)', () => {
     it('H9a — P2002 de OTRO índice NO se traga como idempotente (cae al catch de error)', async () => {
       prisma.hoursTransaction.findFirst.mockResolvedValue({
         id: 'usage-1', clientId: 'c1', type: 'USAGE', hours: 3,

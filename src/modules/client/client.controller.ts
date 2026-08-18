@@ -23,6 +23,42 @@ import { CreateClientUserDto } from './dto/create-client-user.dto';
 import { EditHoursTransactionDto } from './dto/edit-hours-transaction.dto';
 import { AppException } from '../../common/filters/app-exception';
 
+/**
+ * #57 — Convierte un query param de paginacion a entero positivo, o `undefined` si es basura.
+ *
+ * El problema que arregla: `parseInt('abc', 10)` devuelve NaN, y NaN es venenoso porque
+ * SOBREVIVE al clamp defensivo del service (`Math.min(Math.max(1, NaN), 500)` sigue siendo NaN).
+ * Prisma terminaba recibiendo `take: NaN` y la pantalla reventaba con un 500.
+ *
+ * Devolver `undefined` en vez de NaN hace que entre el valor por defecto de la firma del
+ * service (page = 1, limit = 20 en getHoursSummary; page = 1, limit = 50 en findAll), que es el
+ * comportamiento correcto para un input invalido. Los clamps del service NO se tocan: siguen ahi
+ * como defensa en profundidad para cualquier otro llamador que no pase por este borde.
+ *
+ * ORDEN IMPORTANTE: se TRUNCA primero y se compara despues. Al reves, `0.5 > 0` daba true y
+ * `Math.trunc(0.5)` devolvia 0 — justo el valor que este helper promete descartar. El sintoma
+ * visible era que `?limit=0` caia al default (20 filas) pero `?limit=0.5` devolvia 1 fila: dos
+ * basuras equivalentes con resultados distintos.
+ *
+ * Se descartan 0, negativos, NaN e Infinity: ninguno es una pagina o un tamanio de pagina valido.
+ *
+ * NO hay paridad con el `parseInt(raw, 10)` que habia antes, y no se busca: `Number` lee el string
+ * COMPLETO en vez de cortar en el primer caracter no numerico. Comportamiento REAL de hoy:
+ *   - `'1e3'`   → 1000   (parseInt cortaba en la 'e' y daba 1)
+ *   - `'0x10'`  → 16     (parseInt con base 10 daba 0 ⇒ default)
+ *   - `'10abc'` → undefined ⇒ default (parseInt daba 10)
+ *   - `'1.9'`   → 1      (truncado; parseInt tambien daba 1)
+ *   - `'  20 '` → 20     (Number ignora el espacio en blanco de los bordes)
+ *   - `['10','20']` (Express entrega un ARRAY cuando el param viene repetido, `?limit=10&limit=20`)
+ *     → `Number([...])` es NaN ⇒ undefined ⇒ default. La firma dice `string`, pero en runtime
+ *     Express puede mandar un array: rechazarlo es la lectura segura de un input ambiguo.
+ * Rechazar de mas es aceptable aca: el peor caso de un input dudoso es caer al default, no un 500.
+ */
+function parsePaginationParam(raw?: string): number | undefined {
+  const n = Math.trunc(Number(raw));
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
 @ApiTags('Clients')
 @ApiBearerAuth()
 @UseGuards(AuthGuard, PermissionsGuard)
@@ -52,8 +88,12 @@ export class ClientController {
   ) {
     return this.clientService.findAll(orgId, {
       search,
-      page: page ? Number(page) : undefined,
-      limit: limit ? Number(limit) : undefined,
+      // #57: mismo saneo que getHoursSummary. Antes era `Number(page)` crudo, y `Number('abc')`
+      // es NaN: aca es PEOR que en getHoursSummary porque el service de findAll no tiene ningun
+      // clamp — `params.limit ?? 50` no atrapa NaN (`??` solo cubre null/undefined), asi que
+      // `take: NaN` llegaba a Prisma ("Argument `take` is missing" ⇒ 500) sin segunda defensa.
+      page: parsePaginationParam(page),
+      limit: parsePaginationParam(limit),
       status,
       withUsers: withUsers === 'true',
     });
@@ -179,8 +219,8 @@ export class ClientController {
     return this.clientService.getHoursSummary(
       orgId,
       clientId,
-      page ? parseInt(page, 10) : undefined,
-      limit ? parseInt(limit, 10) : undefined,
+      parsePaginationParam(page),
+      parsePaginationParam(limit),
       movement,
     );
   }
