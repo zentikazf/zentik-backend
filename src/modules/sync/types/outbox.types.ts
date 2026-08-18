@@ -13,7 +13,26 @@
  * (`POST /tickets/{code}/comentarios`); lo unico que cambia es `is_internal` y
  * de donde sale el texto (ver OutboxPayload).
  */
-export type OutboxEventType = 'TICKET_CREATED' | 'STATUS_CHANGED' | 'COMMENT_ADDED';
+/**
+ * Lista RUNTIME de los eventTypes, y unica fuente de verdad de `OutboxEventType`.
+ *
+ * Es un `as const` y no solo un type union (#52) porque el union no existe en
+ * runtime y habia UN consumidor que necesitaba la lista de verdad: el `@IsIn` del
+ * DTO de requeue, que la tenia COPIADA a mano. Esa copia ya se habia desincronizado
+ * al agregar `ASSIGNEE_CHANGED`: una fila de asignacion en la DLQ —el caso normal
+ * del rollout, donde el simulacro de `ONNIX_SYNC_DRY_RUN` manda TODO a `failed`— no
+ * se podia re-encolar por tipo, el endpoint respondia 400 y el operador se quedaba
+ * sin el camino de recuperacion documentado. Derivando el type de la lista, agregar
+ * un eventType nuevo actualiza la validacion sola.
+ */
+export const OUTBOX_EVENT_TYPES = [
+  'TICKET_CREATED',
+  'STATUS_CHANGED',
+  'COMMENT_ADDED',
+  'ASSIGNEE_CHANGED',
+] as const;
+
+export type OutboxEventType = (typeof OUTBOX_EVENT_TYPES)[number];
 
 /** Ciclo de vida de una outbox-row. */
 export type OutboxStatus = 'pending' | 'in_flight' | 'synced' | 'failed';
@@ -45,6 +64,18 @@ export interface OutboxPayload {
   adminNoteSnapshot?: string;
   /** Nota interna: autor que guardo, para el prefijo del comentario (R3.3). */
   authorUserId?: string;
+
+  // ── ASSIGNEE_CHANGED (#52) ─────────────────────────────────────────────────
+  /**
+   * Actor que hizo el cambio de responsable (#52 R3.3), para el `reason` que queda
+   * en la auditoria de OSD ("asignado por <nombre>"). Es el UNICO dato snapshoteado
+   * de este evento y es correcto que lo sea: el actor de ESTA fila no cambia nunca,
+   * mientras que el asignado se RELEE al drenar (R3.2, last-write-wins).
+   *
+   * Molde exacto de `authorUserId` de la nota interna; campo aparte a proposito para
+   * que un payload nunca signifique dos cosas segun el eventType.
+   */
+  assignedByUserId?: string;
 }
 
 /**

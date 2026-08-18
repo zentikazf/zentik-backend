@@ -7,7 +7,7 @@ import {
   IsString,
 } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { OutboxEventType } from '../types/outbox.types';
+import { OUTBOX_EVENT_TYPES, OutboxEventType } from '../types/outbox.types';
 
 /**
  * Body de `POST /admin/sync/onnix/requeue` (#51 R3.2, D4).
@@ -35,12 +35,16 @@ export class RequeueFailedDto {
   @IsString({ each: true })
   ids?: string[];
 
+  // La lista sale de `OUTBOX_EVENT_TYPES` y NO se escribe a mano (#52): la copia
+  // literal que habia acá ya se habia quedado sin `ASSIGNEE_CHANGED`, y el sintoma
+  // era un 400 justo en el camino de recuperacion del rollout (con
+  // ONNIX_SYNC_DRY_RUN=true todas las filas caen a `failed` y se recuperan por acá).
   @ApiPropertyOptional({
     description: 'Re-encola todas las `failed` de este tipo de evento.',
-    enum: ['TICKET_CREATED', 'STATUS_CHANGED', 'COMMENT_ADDED'],
+    enum: [...OUTBOX_EVENT_TYPES],
   })
   @IsOptional()
-  @IsIn(['TICKET_CREATED', 'STATUS_CHANGED', 'COMMENT_ADDED'])
+  @IsIn([...OUTBOX_EVENT_TYPES])
   eventType?: OutboxEventType;
 
   @ApiPropertyOptional({

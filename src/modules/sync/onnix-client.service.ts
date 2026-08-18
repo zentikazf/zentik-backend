@@ -5,13 +5,16 @@ import { OnnixConfigError, OnnixUpstreamError } from './errors';
 import {
   OnnixAddComentarioBody,
   OnnixAddComentarioResponse,
+  OnnixAsignarBody,
   OnnixCallOutcome,
   OnnixCatalogItem,
   OnnixCatalogos,
   OnnixCreateTicketBody,
+  OnnixEquipoUsuario,
   OnnixEstado,
   OnnixLoginResponse,
   OnnixListComentariosResponse,
+  OnnixListEquipoUsuariosResponse,
   OnnixSetEstadoBody,
   OnnixTicketComentario,
   OnnixTicketDetalle,
@@ -358,6 +361,76 @@ export class OnnixClientService {
         `(recibidos=${received} total=${total ?? '?'} lastPage=${lastPage ?? '?'}). ` +
         `Un re-post duplicado en este ticket es esperable. code=${code} traceId=${traceId}`,
     );
+  }
+
+  /**
+   * Miembros de un equipo de OSD (`GET /equipos/{id}/usuarios`) — #52 R4.1.
+   * Insumo del seed de mappings de usuario, que matchea por `email` contra
+   * `User.email` de Zentik (unico). NO filtra `is_active` aca: el filtro es del
+   * seed (R1.2), y el cliente devuelve lo que OSD dijo, tal cual.
+   *
+   * Acepta el array pelado Y el `{ data: [...] }` de Laravel (#51 FIX 8): dentro del
+   * mismo OpenAPI de OSD conviven las dos formas, y adivinar mal aca no rompe nada
+   * ruidosamente — simplemente mapea CERO usuarios y manda a todo el equipo al
+   * skip+warn de R3.3. Un modo de fallo silencioso no se puede aceptar en el camino
+   * que decide si el responsable viaja o no.
+   *
+   * Cualquier status != 2xx lanza `OnnixUpstreamError` (molde de `getCatalog`): el
+   * seed es un endpoint admin manual, y un error visible es mejor que un reporte
+   * con ceros que el dueño interprete como "no hay nadie en el equipo".
+   */
+  async getTeamMembers(
+    teamId: number,
+    traceId: string,
+  ): Promise<OnnixEquipoUsuario[]> {
+    const res = await this.authedFetch(
+      `/equipos/${encodeURIComponent(String(teamId))}/usuarios`,
+      'GET',
+      undefined,
+      traceId,
+    );
+    if (!res.ok) throw new OnnixUpstreamError(res.status, 'team-members');
+    const body = (await this.parseJson(
+      res,
+    )) as OnnixListEquipoUsuariosResponse | null;
+    if (Array.isArray(body)) return body;
+    return Array.isArray(body?.data) ? body.data : [];
+  }
+
+  /**
+   * Asigna el responsable de un ticket via `POST /tickets/{code}/asignar` — #52 R4.2.
+   * Molde exacto de `setEstado`: authedFetch (re-login ante 401), 200/201 → ok,
+   * 422 → outcome con message, resto → OnnixUpstreamError (reintentable).
+   *
+   * ⚠️ EL 422 DE ESTE ENDPOINT NO ES TERMINAL PARA EL DISPATCHER (#52 R3.3), a
+   * diferencia de todos los demas. OSD devuelve 422 cuando el cerco del rol
+   * `integracion` rechaza al destinatario ("no es de tu equipo" / "otro producto"):
+   * es un limite CONOCIDO de permisos, no un defecto nuestro, y mandarlo a la DLQ
+   * llenaria la cola de filas que ningun requeue va a poder arreglar. La
+   * clasificacion vive en `processAssign`, no aca: el cliente solo reporta.
+   *
+   * El `reason` viaja tal cual (ya truncado a ASSIGN_REASON_MAX_LEN por el
+   * dispatcher, que es quien sabe armarlo con el nombre del actor).
+   */
+  async assignTicket(
+    code: string,
+    body: OnnixAsignarBody,
+    traceId: string,
+  ): Promise<OnnixCallOutcome<OnnixTicketDetalle>> {
+    const res = await this.authedFetch(
+      `/tickets/${encodeURIComponent(code)}/asignar`,
+      'POST',
+      body,
+      traceId,
+    );
+    if (res.status === 200 || res.status === 201) {
+      const data = (await this.parseJson(res)) as OnnixTicketDetalle;
+      return { ok: true, status: res.status, data };
+    }
+    if (res.status === 422) {
+      return { ok: false, status: 422, message: await this.extractMessage(res) };
+    }
+    throw new OnnixUpstreamError(res.status, 'assign-ticket');
   }
 
   /** Trae los 4 catalogos para el mapeo (R19). El mapping los cachea (R20). */

@@ -724,7 +724,14 @@ export class TicketService {
             id: true,
             status: true,
             projectId: true,
-            assignments: { select: { userId: true } },
+            // #52: `orderBy` explícito. El ticket es single-assignee y todo el
+            // módulo lee `assignments[0]`, pero la task de un ticket ES una task
+            // normal del kanban y ESA acepta varios asignados (PATCH /tasks con
+            // `assigneeIds`). Sin orden, Postgres devuelve el heap como quiera y
+            // "el responsable" del ticket podía cambiar entre dos lecturas de la
+            // misma fila — con eso, la decisión de encolar de más abajo se volvía
+            // no determinística.
+            assignments: { select: { userId: true }, orderBy: { userId: 'asc' } },
           },
         },
       },
@@ -774,6 +781,31 @@ export class TicketService {
     if (wantsAssignee) {
       effectiveAssigneeId = dto.assigneeId ?? null;
     }
+
+    // #52 (R3.1): ¿cambió de verdad el responsable? `dto.assigneeId` llega como
+    // `null` O como `''` y los DOS significan desasignar (así lo trata el bloque de
+    // asignación de la tx, más abajo). Comparar el valor crudo contra
+    // `previousAssigneeId` daría "cambió" para un `''` sobre un ticket que ya estaba
+    // sin responsable, y encolaría una fila que el dispatcher solo puede skipear.
+    // `effectiveAssigneeId` NO sirve para esto: conserva el `''` a propósito, porque
+    // su único consumidor es el `!!effectiveAssigneeId` del mapeo de kanban.
+    const nextAssigneeId = wantsAssignee
+      ? dto.assigneeId === '' || dto.assigneeId === undefined
+        ? null
+        : dto.assigneeId
+      : previousAssigneeId;
+    // ⚠️ El `> 1` NO es defensivo, es un caso real. La task de un ticket es una
+    // task normal del kanban y esa acepta VARIOS asignados (PATCH /tasks con
+    // `assigneeIds`), mientras que el ticket es single-assignee: el bloque de
+    // asignación de la tx hace `deleteMany` de TODOS y crea UNO. Con la task en
+    // [U1, U2] y un PATCH que fija U2, comparar sólo `assignments[0]` podía dar
+    // "no cambió" —si U2 salía primero— y no encolar, cuando en realidad U1 acaba
+    // de perder el ticket y OSD se queda con él para siempre. Colapsar N
+    // responsables a uno SIEMPRE es un cambio que OSD tiene que ver.
+    const previousAssigneeCount = ticket.task?.assignments.length ?? 0;
+    const assigneeChanged =
+      wantsAssignee &&
+      (previousAssigneeCount > 1 || nextAssigneeId !== previousAssigneeId);
 
     // #50 (D8/R4.3): bandera de scope EXTERNO a la tx. `enqueueTx` devuelve true
     // solo si realmente escribió fila (los gates de flag/whitelist de orgs viven
@@ -938,6 +970,29 @@ export class TicketService {
           source: 'TICKET',
           userId,
         });
+
+        // Outbox sync Onnix (#52 R3.1): el cambio de responsable viaja a OSD en la
+        // MISMA tx (R10), reusando el punto de encolado que ya existe acá — el mismo
+        // `wantsAssignee`/`previousAssigneeId` que gobierna la escritura de la
+        // asignación — y el patrón `outboxEnqueued` + notify post-commit de #50.
+        // Mismo gate por categoría que el resto del módulo: el scope de la
+        // integración son los tickets de soporte, y un ASSIGNEE_CHANGED de un ticket
+        // que no es SUPPORT_REQUEST nunca se encola, en línea con su TICKET_CREATED
+        // que tampoco se encoló.
+        if (assigneeChanged && ticket.category === 'SUPPORT_REQUEST') {
+          const wrote = await this.outbox.enqueueTx(tx, {
+            eventType: 'ASSIGNEE_CHANGED',
+            aggregateId: ticketId,
+            organizationId: ticket.organizationId,
+            // ⚠️ R3.2: el asignado NO se snapshotea — el dispatcher lo RELEE al
+            // drenar (last-write-wins, igual que STATUS_CHANGED; a diferencia de la
+            // nota interna, acá solo importa el estado final). Lo único que viaja es
+            // el ACTOR, que es lo único que el drenado no puede reconstruir y que
+            // OSD guarda en su auditoría vía `reason`.
+            payload: { ticketId, assignedByUserId: userId },
+          });
+          if (wrote) outboxEnqueued = true;
+        }
       }
 
       // 3) Audit log de status change
