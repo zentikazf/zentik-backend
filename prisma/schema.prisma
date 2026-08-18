@@ -299,6 +299,8 @@ model User {
   notificationPreferences  UserNotificationPreference[]
   deletedFiles             File[]                       @relation("FileDeletedBy")
   fileDownloadEvents       FileDownloadEvent[]
+  createdContractPackages  ContractPackage[]            @relation("ContractPackageCreator")
+  appliedContractPackages  ContractPackageApplication[] @relation("ContractPackageApplier")
 
   @@index([clientId])
   @@map("users")
@@ -376,6 +378,7 @@ model Organization {
   slaPolicies           SlaPolicy[]
   ticketTypes           TicketType[]
   criticalityConfigs    TicketCriticalityConfig[]
+  contractPackages      ContractPackage[]
 
   @@index([slug])
   @@map("organizations")
@@ -541,6 +544,8 @@ model Project {
   tickets      Ticket[]
   meetings     Meeting[]
   documents    File[]                 @relation("ProjectDocuments")
+
+  contractPackageApplications ContractPackageApplication[]
 
   @@unique([organizationId, slug])
   @@index([organizationId])
@@ -1256,20 +1261,20 @@ model Ticket {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  organization   Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  project        Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  client         Client                @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  slaPolicy      SlaPolicy?            @relation("TicketSlaPolicy", fields: [slaPolicyId], references: [id], onDelete: SetNull)
-  ticketType     TicketType?           @relation("TicketTicketType", fields: [ticketTypeId], references: [id], onDelete: SetNull)
-  reportedTicketType TicketType?       @relation("TicketReportedType", fields: [reportedTicketTypeId], references: [id], onDelete: SetNull)
-  task           Task?                 @relation(fields: [taskId], references: [id], onDelete: SetNull)
-  channel        Channel?              @relation(fields: [channelId], references: [id], onDelete: SetNull)
-  categoryConfig TicketCategoryConfig? @relation(fields: [categoryConfigId], references: [id], onDelete: SetNull)
-  createdByUser  User?                 @relation("TicketCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
-  closedByUser   User?                 @relation("TicketCloser", fields: [closedByUserId], references: [id], onDelete: SetNull)
-  relatedTicket  Ticket?               @relation("TicketFollowUp", fields: [relatedTicketId], references: [id], onDelete: SetNull)
-  followUps      Ticket[]              @relation("TicketFollowUp")
-  events         TicketEvent[]
+  organization       Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  project            Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  client             Client                @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  slaPolicy          SlaPolicy?            @relation("TicketSlaPolicy", fields: [slaPolicyId], references: [id], onDelete: SetNull)
+  ticketType         TicketType?           @relation("TicketTicketType", fields: [ticketTypeId], references: [id], onDelete: SetNull)
+  reportedTicketType TicketType?           @relation("TicketReportedType", fields: [reportedTicketTypeId], references: [id], onDelete: SetNull)
+  task               Task?                 @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  channel            Channel?              @relation(fields: [channelId], references: [id], onDelete: SetNull)
+  categoryConfig     TicketCategoryConfig? @relation(fields: [categoryConfigId], references: [id], onDelete: SetNull)
+  createdByUser      User?                 @relation("TicketCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  closedByUser       User?                 @relation("TicketCloser", fields: [closedByUserId], references: [id], onDelete: SetNull)
+  relatedTicket      Ticket?               @relation("TicketFollowUp", fields: [relatedTicketId], references: [id], onDelete: SetNull)
+  followUps          Ticket[]              @relation("TicketFollowUp")
+  events             TicketEvent[]
 
   @@unique([organizationId, ticketNumber])
   @@index([organizationId])
@@ -1408,6 +1413,7 @@ model SlaPolicy {
   projects     Project[]              @relation("ProjectSlaPolicy")
   clients      Client[]               @relation("ClientDefaultSlaPolicy")
   tickets      Ticket[]               @relation("TicketSlaPolicy")
+  packageItems ContractPackageItem[]
 
   @@unique([organizationId, name])
   @@index([organizationId, criticality])
@@ -1447,11 +1453,11 @@ model TicketCriticalityConfig {
 /// Tipo de solicitud (Incidencia, Consulta, Mejora...). Fase 1: lista plana.
 /// Fase 3: arbol (parentId / path / level).
 model TicketType {
-  id             String   @id @default(cuid())
-  organizationId String   @map("organization_id")
+  id             String  @id @default(cuid())
+  organizationId String  @map("organization_id")
   name           String
   slug           String
-  isActive       Boolean  @default(true) @map("is_active")
+  isActive       Boolean @default(true) @map("is_active")
 
   // ── #42 Fase 3: ARBOL de tipos (paridad con OSD) ────────────────────────────
   // `parentId` null = raiz. `path` y `level` son DERIVADOS: los calcula el service
@@ -1490,6 +1496,7 @@ model TicketType {
   contracts       ProjectTicketTypeSla[]
   tickets         Ticket[]               @relation("TicketTicketType")
   reportedTickets Ticket[]               @relation("TicketReportedType")
+  packageItems    ContractPackageItem[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -1519,6 +1526,100 @@ model ProjectTicketTypeSla {
   @@unique([projectId, ticketTypeId])
   @@index([projectId, isActive])
   @@map("project_ticket_type_slas")
+}
+
+// ============================================================================
+// PAQUETES DE CONTRATOS DEFAULT (feature #58)
+// ============================================================================
+// Migracion 100% ADITIVA: 3 CREATE TABLE, cero ALTER sobre lo existente. El motor
+// de SLA no se toca — el resolver nunca ve un paquete, sigue leyendo contratos
+// exactos (`ProjectTicketTypeSla`).
+
+/// Grupo con nombre de pares tipo -> politica, reutilizable: se arma una vez y se
+/// aplica a muchos proyectos (decision 1 del dueño).
+///
+/// ⛔ Aplicar es COPIA, NO vinculo (decision 2): crea las filas de contrato del
+/// proyecto y ahi se corta la relacion. Editar el paquete NO cambia los proyectos
+/// que ya lo recibieron; para eso esta el boton "re-aplicar", siempre explicito.
+model ContractPackage {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  name           String
+  notes          String?
+  isActive       Boolean  @default(true) @map("is_active")
+  createdById    String   @map("created_by_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization Organization                 @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy    User                         @relation("ContractPackageCreator", fields: [createdById], references: [id])
+  items        ContractPackageItem[]
+  applications ContractPackageApplication[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId, isActive])
+  @@index([createdById])
+  @@map("contract_packages")
+}
+
+/// Un par tipo -> politica dentro del paquete.
+///
+/// ⚠️ NO lleva `isActive` a proposito: en un paquete "no esta" es una fila
+/// AUSENTE, y destildar BORRA el item (#58 R1.2). Un contrato de proyecto si lo
+/// lleva porque descontratar tiene que recordar con que se atendia; un paquete no
+/// tiene historia que conservar.
+/// Tampoco lleva `contractNotes`: queda fuera de alcance y es aditivo despues.
+///
+/// FKs calcadas de `ProjectTicketTypeSla`: el tipo va en Cascade (un item que
+/// apunta a un tipo inexistente es basura) y la politica en Restrict (borrar una
+/// politica referenciada tiene que fallar ruidoso).
+model ContractPackageItem {
+  id           String   @id @default(cuid())
+  packageId    String   @map("package_id")
+  ticketTypeId String   @map("ticket_type_id")
+  slaPolicyId  String   @map("sla_policy_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  package    ContractPackage @relation(fields: [packageId], references: [id], onDelete: Cascade)
+  ticketType TicketType      @relation(fields: [ticketTypeId], references: [id], onDelete: Cascade)
+  slaPolicy  SlaPolicy       @relation(fields: [slaPolicyId], references: [id], onDelete: Restrict)
+
+  @@unique([packageId, ticketTypeId])
+  @@index([slaPolicyId])
+  @@map("contract_package_items")
+}
+
+/// Log APPEND-ONLY de aplicaciones: "el 12/08 Josue aplico el paquete X a este
+/// proyecto". Es verdad para siempre y nadie lo edita.
+///
+/// ⛔ El rastro va ACA y no en la fila del contrato ni en `Project` (#58 R1.4):
+///  · un `sourcePackageId` por fila se convierte en MENTIRA apenas alguien edite
+///    ese contrato a mano con el bulk de #48;
+///  · un campo en `Project` solo recuerda el ULTIMO paquete, asi que un proyecto
+///    que recibio A y despues B desapareceria del conteo de A.
+///
+/// Se escribe SIEMPRE, aunque el resultado sea 0 creados y 0 pisados (#58 R1.5):
+/// si no, ese proyecto nunca entra en el "usado en N proyectos" del listado.
+model ContractPackageApplication {
+  id                    String   @id @default(cuid())
+  packageId             String   @map("package_id")
+  projectId             String   @map("project_id")
+  appliedById           String   @map("applied_by_id")
+  appliedAt             DateTime @default(now()) @map("applied_at")
+  createdCount          Int      @default(0) @map("created_count")
+  overwrittenCount      Int      @default(0) @map("overwritten_count")
+  skippedSameCount      Int      @default(0) @map("skipped_same_count")
+  skippedDifferentCount Int      @default(0) @map("skipped_different_count")
+
+  package   ContractPackage @relation(fields: [packageId], references: [id], onDelete: Cascade)
+  project   Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  appliedBy User            @relation("ContractPackageApplier", fields: [appliedById], references: [id])
+
+  @@index([packageId, projectId])
+  @@index([projectId, appliedAt])
+  @@index([appliedById])
+  @@map("contract_package_applications")
 }
 
 // ============================================================================
