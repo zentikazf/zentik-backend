@@ -255,6 +255,17 @@ export class SlaConfigController {
     return this.packages.getById(orgId, packageId);
   }
 
+  @Get('sla-packages/:packageId/applications')
+  @ApiOperation({
+    summary: 'Proyectos que recibieron el paquete (uno por proyecto, con su última aplicación)',
+  })
+  listPackageApplications(
+    @Param('orgId') orgId: string,
+    @Param('packageId') packageId: string,
+  ) {
+    return this.packages.listApplications(orgId, packageId);
+  }
+
   @Patch('sla-packages/:packageId')
   @ApiOperation({ summary: 'Renombrar / anotar / archivar un paquete (no toca sus ítems)' })
   updatePackage(

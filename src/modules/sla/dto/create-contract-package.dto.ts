@@ -1,5 +1,15 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Transform } from 'class-transformer';
 import { IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+
+/**
+ * Trim ANTES de validar. Sin esto, `"  "` tiene length 2, pasa el `@MinLength(2)`
+ * y recién el service lo trimea: el paquete termina guardado con el nombre
+ * VACÍO, la lista muestra una fila sin título, y el segundo que haga lo mismo se
+ * come un 409 que dice `Ya existe un paquete llamado ""`.
+ */
+export const trimmed = () =>
+  Transform(({ value }) => (typeof value === 'string' ? value.trim() : value));
 
 /**
  * Alta de un paquete de contratos (#58 R3).
@@ -12,6 +22,7 @@ export class CreateContractPackageDto {
     example: 'Soporte estándar',
     description: 'Nombre único del paquete dentro de la organización',
   })
+  @trimmed()
   @IsString()
   @MinLength(2, { message: 'El nombre debe tener al menos 2 caracteres' })
   @MaxLength(100, { message: 'El nombre no puede exceder 100 caracteres' })

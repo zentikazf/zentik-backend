@@ -1,5 +1,6 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { IsBoolean, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { trimmed } from './create-contract-package.dto';
 
 /**
  * PATCH parcial del paquete: renombrar, cambiar la nota o archivarlo.
@@ -9,6 +10,7 @@ import { IsBoolean, IsOptional, IsString, MaxLength, MinLength } from 'class-val
  */
 export class UpdateContractPackageDto {
   @ApiPropertyOptional({ description: 'Nombre único del paquete dentro de la organización' })
+  @trimmed()
   @IsOptional()
   @IsString()
   @MinLength(2, { message: 'El nombre debe tener al menos 2 caracteres' })

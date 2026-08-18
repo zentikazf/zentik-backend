@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { Prisma } from '@prisma/client';
+import { Prisma, ProjectLifecycleStatus } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
 import { AppException } from '../../common/filters/app-exception';
 import { domainEvent } from '../../common/events/domain-event.helper';
@@ -47,7 +47,8 @@ export interface PackagePreviewRow {
 
 /** Las 3 categorías que aprobó el dueño, más los ítems podridos. */
 export interface ApplyPackagePreview {
-  package: { id: string; name: string; itemCount: number };
+  /** `isActive: false` ⇒ archivado: se puede mirar, NO se puede aplicar. */
+  package: { id: string; name: string; itemCount: number; isActive: boolean };
   project: { id: string; name: string };
   /** ✚ se van a crear (incluye reactivar un contrato apagado). */
   toCreate: PackagePreviewRow[];
@@ -88,7 +89,7 @@ interface PlanRow extends PackagePreviewRow {
 }
 
 interface ApplyPlan {
-  pkg: { id: string; name: string; itemCount: number };
+  pkg: { id: string; name: string; itemCount: number; isActive: boolean };
   project: { id: string; name: string };
   toCreate: PlanRow[];
   alreadySame: PlanRow[];
@@ -241,8 +242,50 @@ export class ContractPackageService {
     };
   }
 
+  /**
+   * Los proyectos que recibieron este paquete, uno por proyecto y con su última
+   * aplicación. Es lo que alimenta el re-aplicar (#58 R6): el dueño pidió
+   * **elección explícita caso por caso**, no un batch con una sola confirmación,
+   * así que la pantalla necesita la lista con nombre para poder elegir.
+   */
+  async listApplications(orgId: string, packageId: string) {
+    await this.assertPackage(orgId, packageId);
+
+    const rows = await this.prisma.contractPackageApplication.findMany({
+      where: { packageId },
+      orderBy: { appliedAt: 'desc' },
+      include: {
+        project: { select: { id: true, name: true, lifecycleStatus: true } },
+        appliedBy: { select: { id: true, name: true } },
+      },
+    });
+
+    // Colapsa por proyecto quedándose con la PRIMERA de cada uno, que por el
+    // `orderBy desc` es la más reciente. El log es append-only: un proyecto que
+    // recibió el paquete tres veces tiene tres filas y una sola fila de lista.
+    const byProject = new Map<string, (typeof rows)[number] & { timesApplied: number }>();
+    for (const row of rows) {
+      const seen = byProject.get(row.projectId);
+      if (seen) {
+        seen.timesApplied += 1;
+        continue;
+      }
+      byProject.set(row.projectId, { ...row, timesApplied: 1 });
+    }
+
+    return [...byProject.values()].map((row) => ({
+      projectId: row.projectId,
+      projectName: row.project.name,
+      /** Un proyecto archivado no recibe tickets nuevos: la UI lo marca. */
+      projectIsActive: row.project.lifecycleStatus === ProjectLifecycleStatus.ACTIVE,
+      lastAppliedAt: row.appliedAt,
+      lastAppliedByName: row.appliedBy.name,
+      timesApplied: row.timesApplied,
+    }));
+  }
+
   async create(orgId: string, dto: CreateContractPackageDto, userId: string) {
-    const name = dto.name.trim();
+    const name = this.requireName(dto.name);
     await this.assertNameAvailable(orgId, name);
 
     const pkg = await this.runUnique(name, () =>
@@ -269,8 +312,8 @@ export class ContractPackageService {
   async update(orgId: string, packageId: string, dto: UpdateContractPackageDto, userId: string) {
     const existing = await this.assertPackage(orgId, packageId);
 
-    const name = dto.name?.trim();
-    if (name && name !== existing.name) {
+    const name = dto.name === undefined ? undefined : this.requireName(dto.name);
+    if (name !== undefined && name !== existing.name) {
       await this.assertNameAvailable(orgId, name);
     }
 
@@ -450,6 +493,25 @@ export class ContractPackageService {
   ): Promise<ApplyPackageResult> {
     const plan = await this.buildPlan(orgId, projectId, dto.packageId);
 
+    // Un paquete ARCHIVADO no se aplica. El chequeo va acá y no en `buildPlan`
+    // porque el preview SÍ tiene que poder mirarlo (para decir por qué no se
+    // puede) — pero aplicar es la única acción donde el archivado significa algo.
+    //
+    // ⛔ No es cosmético: el guard `SLA_POLICY_IN_USE` solo cuenta ítems de
+    // paquetes ACTIVOS, así que archivar un paquete DESBLOQUEA dar de baja las
+    // políticas que usa. Si además se pudiera aplicar, la cadena
+    // "archivar → dar de baja la política → aplicar igual" terminaría en un
+    // paquete que se salta sus propios ítems en silencio.
+    if (!plan.pkg.isActive) {
+      throw new AppException(
+        `El paquete "${plan.pkg.name}" está archivado: no se puede aplicar. ` +
+          'Reactivalo desde Paquetes si querés volver a usarlo.',
+        'SLA_PACKAGE_INACTIVE',
+        422,
+        { packageId: plan.pkg.id },
+      );
+    }
+
     // Un paquete vacío no se aplica en silencio (#58 R3.3): sin ítems no hay
     // nada que copiar y registrar la aplicación solo ensuciaría el "usado en N
     // proyectos" con un paquete que no hizo nada.
@@ -575,7 +637,12 @@ export class ContractPackageService {
     const contractByTypeId = new Map(contracts.map((row) => [row.ticketTypeId, row]));
 
     const plan: ApplyPlan = {
-      pkg: { id: pkg.id, name: pkg.name, itemCount: pkg.items.length },
+      pkg: {
+        id: pkg.id,
+        name: pkg.name,
+        itemCount: pkg.items.length,
+        isActive: pkg.isActive,
+      },
       project: { id: project.id, name: project.name },
       toCreate: [],
       alreadySame: [],
@@ -643,6 +710,25 @@ export class ContractPackageService {
       throw new AppException('Paquete de contratos no encontrado', 'SLA_PACKAGE_NOT_FOUND', 404);
     }
     return pkg;
+  }
+
+  /**
+   * Defensa en profundidad: el DTO ya trimea ANTES de validar, así que un nombre
+   * de solo espacios muere en el `@MinLength(2)`. Si el service se llama desde
+   * otro path, mejor un 422 que nombra el problema que un paquete guardado con
+   * el nombre vacío — que además choca con la unique y devuelve el 409 sin
+   * sentido `Ya existe un paquete llamado ""`.
+   */
+  private requireName(raw: string): string {
+    const name = raw.trim();
+    if (!name) {
+      throw new AppException(
+        'El nombre del paquete no puede estar vacío',
+        'SLA_PACKAGE_NAME_REQUIRED',
+        422,
+      );
+    }
+    return name;
   }
 
   private async assertNameAvailable(orgId: string, name: string): Promise<void> {

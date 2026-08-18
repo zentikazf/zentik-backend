@@ -85,12 +85,13 @@ describe('ContractPackageService — preview y apply (#58 T4)', () => {
   function setup(
     items: Record<string, unknown>[],
     projectContracts: Record<string, unknown>[] = [],
+    packageIsActive = true,
   ) {
     prisma.contractPackage.findFirst.mockResolvedValue({
       id: PACKAGE,
       organizationId: ORG,
       name: 'Soporte estándar',
-      isActive: true,
+      isActive: packageIsActive,
       items,
     } as never);
     prisma.project.findFirst.mockResolvedValue({ id: PROJECT, name: 'Proyecto Demo' } as never);
@@ -451,6 +452,34 @@ describe('ContractPackageService — preview y apply (#58 T4)', () => {
     });
   });
 
+  /**
+   * Archivar es la ÚNICA forma de retirar un paquete (no hay DELETE), y el guard
+   * `SLA_POLICY_IN_USE` solo cuenta ítems de paquetes ACTIVOS: archivar
+   * DESBLOQUEA dar de baja las políticas que ese paquete usa. Si encima se
+   * pudiera aplicar, la cadena "archivar → dar de baja la política → aplicar
+   * igual" terminaría en un paquete que se salta sus propios ítems en silencio.
+   */
+  describe('paquete archivado', () => {
+    it('no se puede aplicar: 422 y no escribe nada', async () => {
+      setup([packageItem(TYPE_ERROR, POLICY_STANDARD)], [], false);
+
+      await expect(service.apply(ORG, PROJECT, { packageId: PACKAGE }, USER)).rejects.toMatchObject(
+        { code: 'SLA_PACKAGE_INACTIVE', statusCode: 422 },
+      );
+      expect(contracts.upsertForProject).not.toHaveBeenCalled();
+      expect(prisma.contractPackageApplication.create).not.toHaveBeenCalled();
+    });
+
+    it('el preview SÍ lo deja mirar, y dice que está archivado', async () => {
+      setup([packageItem(TYPE_ERROR, POLICY_STANDARD)], [], false);
+
+      const preview = await service.preview(ORG, PROJECT, PACKAGE);
+
+      expect(preview.package.isActive).toBe(false);
+      expect(preview.toCreate).toHaveLength(1);
+    });
+  });
+
   describe('scoping multi-tenant', () => {
     it('un paquete de otra organización es 404, no 403', async () => {
       prisma.contractPackage.findFirst.mockResolvedValue(null as never);
@@ -621,6 +650,30 @@ describe('ContractPackageService — CRUD y lecturas (#58 T3)', () => {
     expect(prisma.contractPackage.create).not.toHaveBeenCalled();
   });
 
+  /**
+   * El DTO trimea antes de validar, así que "  " muere en el @MinLength(2). Esto
+   * es la red de abajo: un nombre vacío que llegue por otro path no puede
+   * guardarse — quedaria una fila sin titulo en la lista y el SEGUNDO que haga
+   * lo mismo se comeria un 409 que dice `Ya existe un paquete llamado ""`.
+   */
+  it('un nombre de solo espacios es 422, no un paquete sin titulo', async () => {
+    await expect(service.create(ORG, { name: '   ' }, USER)).rejects.toMatchObject({
+      code: 'SLA_PACKAGE_NAME_REQUIRED',
+      statusCode: 422,
+    });
+    expect(prisma.contractPackage.create).not.toHaveBeenCalled();
+  });
+
+  it('renombrar a solo espacios tampoco pasa (y no saltea el chequeo de duplicado)', async () => {
+    prisma.contractPackage.findFirst.mockResolvedValue({ id: PACKAGE, name: 'Viejo' } as never);
+
+    await expect(service.update(ORG, PACKAGE, { name: '  ' }, USER)).rejects.toMatchObject({
+      code: 'SLA_PACKAGE_NAME_REQUIRED',
+      statusCode: 422,
+    });
+    expect(prisma.contractPackage.update).not.toHaveBeenCalled();
+  });
+
   /** El pre-chequeo no es atómico: la unique de la DB es la autoridad. */
   it('traduce el P2002 de la carrera al MISMO 409, no a un 500', async () => {
     prisma.contractPackage.findFirst.mockResolvedValue(null as never);
@@ -686,6 +739,46 @@ describe('ContractPackageService — CRUD y lecturas (#58 T3)', () => {
       isActive: false,
     });
     expect(result.package.usedInProjects).toBe(2);
+  });
+
+  /**
+   * El log es append-only: un proyecto que recibió el paquete tres veces tiene
+   * tres filas. La lista del re-aplicar tiene que mostrar UNA por proyecto, con
+   * la más reciente arriba.
+   */
+  it('la lista de aplicaciones colapsa por proyecto y se queda con la última', async () => {
+    prisma.contractPackage.findFirst.mockResolvedValue({ id: PACKAGE, name: 'P' } as never);
+    prisma.contractPackageApplication.findMany.mockResolvedValue([
+      {
+        projectId: 'p1',
+        appliedAt: new Date('2026-08-18'),
+        project: { id: 'p1', name: 'Demo', lifecycleStatus: 'ACTIVE' },
+        appliedBy: { id: USER, name: 'Josué' },
+      },
+      {
+        projectId: 'p1',
+        appliedAt: new Date('2026-08-01'),
+        project: { id: 'p1', name: 'Demo', lifecycleStatus: 'ACTIVE' },
+        appliedBy: { id: USER, name: 'Josué' },
+      },
+      {
+        projectId: 'p2',
+        appliedAt: new Date('2026-08-10'),
+        project: { id: 'p2', name: 'Archivado', lifecycleStatus: 'ARCHIVED' },
+        appliedBy: { id: USER, name: 'Josué' },
+      },
+    ] as never);
+
+    const rows = await service.listApplications(ORG, PACKAGE);
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({
+      projectId: 'p1',
+      lastAppliedAt: new Date('2026-08-18'),
+      timesApplied: 2,
+      projectIsActive: true,
+    });
+    expect(rows[1]).toMatchObject({ projectId: 'p2', projectIsActive: false, timesApplied: 1 });
   });
 
   it('"usado en N proyectos" cuenta proyectos DISTINTOS, no aplicaciones', async () => {
