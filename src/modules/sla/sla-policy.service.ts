@@ -125,25 +125,39 @@ export class SlaPolicyService {
 
   /**
    * Baja lógica. Se bloquea si la política está referenciada por un contrato
-   * ACTIVO, por un proyecto o por un cliente: desactivarla dejaría esos lazos
-   * apuntando a una política que la cascada ya no considera (tickets sin SLA).
+   * ACTIVO, por un proyecto, por un cliente o por un **paquete de contratos
+   * activo**: desactivarla dejaría esos lazos apuntando a una política que la
+   * cascada ya no considera (tickets sin SLA).
+   *
+   * ── Por qué también cuenta los paquetes (#58, decisión 8 del dueño) ──────────
+   * Un paquete es la única referencia que NO produce un síntoma inmediato: sus
+   * ítems no resuelven ningún ticket, así que dar de baja una política los pudre
+   * EN SILENCIO y el dueño se entera recién el día que aplica el paquete y ve
+   * "2 ítems omitidos". Contarlos acá convierte ese descubrimiento tardío en un
+   * 409 en el momento exacto en que se rompe.
+   *
+   * Solo los paquetes ACTIVOS: uno archivado no se puede aplicar, así que no
+   * tiene sentido que bloquee la limpieza del catálogo de políticas.
    */
   async deactivate(orgId: string, policyId: string, userId: string): Promise<SlaPolicy> {
     await this.getById(orgId, policyId);
 
-    const [contracts, projects, clients] = await Promise.all([
+    const [contracts, projects, clients, packageItems] = await Promise.all([
       this.prisma.projectTicketTypeSla.count({ where: { slaPolicyId: policyId, isActive: true } }),
       this.prisma.project.count({ where: { slaPolicyId: policyId, organizationId: orgId } }),
       this.prisma.client.count({ where: { defaultSlaPolicyId: policyId, organizationId: orgId } }),
+      this.prisma.contractPackageItem.count({
+        where: { slaPolicyId: policyId, package: { organizationId: orgId, isActive: true } },
+      }),
     ]);
 
-    if (contracts > 0 || projects > 0 || clients > 0) {
+    if (contracts > 0 || projects > 0 || clients > 0 || packageItems > 0) {
       throw new AppException(
-        `La política está en uso (${contracts} contrato(s), ${projects} proyecto(s), ${clients} cliente(s)). ` +
-          'Reasigná esas referencias antes de desactivarla.',
+        `La política está en uso (${contracts} contrato(s), ${projects} proyecto(s), ${clients} cliente(s), ` +
+          `${packageItems} ítem(s) de paquete). Reasigná esas referencias antes de desactivarla.`,
         'SLA_POLICY_IN_USE',
         409,
-        { contracts, projects, clients },
+        { contracts, projects, clients, packageItems },
       );
     }
 

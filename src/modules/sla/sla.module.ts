@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { PrismaModule } from '../../database/prisma.module';
 import { AuthGuard } from '../auth/guards/auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
+import { ContractPackageService } from './contract-package.service';
 import { CriticalityConfigService } from './criticality-config.service';
 import { SlaConfigController } from './sla-config.controller';
 import { SlaContractService } from './sla-contract.service';
@@ -51,6 +52,9 @@ import { TicketTypeService } from './ticket-type.service';
     SlaSeedService,
     CriticalityConfigService,
     TicketTypeAvailabilityService,
+    // #58: los paquetes se apoyan en `SlaContractService` para escribir. Es una
+    // dependencia INTRA-módulo, así que no agrega ningún import al grafo.
+    ContractPackageService,
   ],
   // Fase 2: `portal` consume la config de criticidad y la disponibilidad de tipos
   // para validar server-side lo que manda el cliente. Sigue siendo unidireccional.

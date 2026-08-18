@@ -17,6 +17,7 @@ import { CurrentUser } from '../../common/decorators';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { AuthGuard, RolesGuard } from '../auth/guards';
+import { ContractPackageService } from './contract-package.service';
 import {
   CriticalityConfigService,
   parseCriticality,
@@ -28,13 +29,18 @@ import { SlaSeedService } from './sla-seed.service';
 import { TicketTypeAvailabilityService } from './ticket-type-availability.service';
 import { TicketTypeService } from './ticket-type.service';
 import {
+  ApplyContractPackageDto,
   AssignSlaDto,
   AvailableTicketTypesQueryDto,
+  CreateContractPackageDto,
   CreateSlaPolicyDto,
   CreateTicketTypeDto,
+  PreviewContractPackageDto,
+  UpdateContractPackageDto,
   UpdateCriticalityConfigDto,
   UpdateSlaPolicyDto,
   UpdateTicketTypeDto,
+  UpsertContractPackageItemsDto,
   UpsertProjectContractDto,
 } from './dto';
 
@@ -61,6 +67,7 @@ export class SlaConfigController {
     private readonly seed: SlaSeedService,
     private readonly criticalities: CriticalityConfigService,
     private readonly availability: TicketTypeAvailabilityService,
+    private readonly packages: ContractPackageService,
   ) {}
 
   // ── Políticas SLA ────────────────────────────────────────────────────────
@@ -217,6 +224,101 @@ export class SlaConfigController {
       criticality: parseCriticality(query.criticality),
       audience: 'STAFF',
     });
+  }
+
+  // ── Paquetes de contratos default (#58) ──────────────────────────────────
+
+  @Get('sla-packages')
+  @ApiOperation({
+    summary: 'Listar paquetes de contratos (con el count de "usado en N proyectos")',
+  })
+  @ApiQuery({ name: 'includeInactive', required: false, type: Boolean })
+  listPackages(@Param('orgId') orgId: string, @Query('includeInactive') includeInactive?: string) {
+    return this.packages.list(orgId, includeInactive === 'true');
+  }
+
+  @Post('sla-packages')
+  @ApiOperation({ summary: 'Crear un paquete de contratos (nace vacío)' })
+  createPackage(
+    @Param('orgId') orgId: string,
+    @Body() dto: CreateContractPackageDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.packages.create(orgId, dto, user.id);
+  }
+
+  @Get('sla-packages/:packageId')
+  @ApiOperation({
+    summary: 'Paquete + catálogo COMPLETO de tipos con su asignación (mismo shape que la matriz)',
+  })
+  getPackage(@Param('orgId') orgId: string, @Param('packageId') packageId: string) {
+    return this.packages.getById(orgId, packageId);
+  }
+
+  @Get('sla-packages/:packageId/applications')
+  @ApiOperation({
+    summary: 'Proyectos que recibieron el paquete (uno por proyecto, con su última aplicación)',
+  })
+  listPackageApplications(
+    @Param('orgId') orgId: string,
+    @Param('packageId') packageId: string,
+  ) {
+    return this.packages.listApplications(orgId, packageId);
+  }
+
+  @Patch('sla-packages/:packageId')
+  @ApiOperation({ summary: 'Renombrar / anotar / archivar un paquete (no toca sus ítems)' })
+  updatePackage(
+    @Param('orgId') orgId: string,
+    @Param('packageId') packageId: string,
+    @Body() dto: UpdateContractPackageDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.packages.update(orgId, packageId, dto, user.id);
+  }
+
+  @Put('sla-packages/:packageId/items')
+  @ApiOperation({
+    summary: 'Upsert de los ítems del paquete (isActive:false BORRA la fila; lo omitido no se toca)',
+  })
+  upsertPackageItems(
+    @Param('orgId') orgId: string,
+    @Param('packageId') packageId: string,
+    @Body() dto: UpsertContractPackageItemsDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.packages.upsertItems(orgId, packageId, dto, user.id);
+  }
+
+  @Post('projects/:projectId/sla-contracts/apply-package/preview')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Preview (dry-run) de aplicar un paquete: nuevos / ya iguales / distintos / omitidos',
+  })
+  previewContractPackage(
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Body() dto: PreviewContractPackageDto,
+  ) {
+    return this.packages.preview(orgId, projectId, dto.packageId);
+  }
+
+  /**
+   * Un solo endpoint para "escribir contratos + registrar la aplicación": el
+   * front no arma la operación con un PUT y un POST por separado (#58 R4.1).
+   */
+  @Post('projects/:projectId/sla-contracts/apply-package')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Aplicar un paquete al proyecto (solo pisa lo tildado; nunca apaga lo no mencionado)',
+  })
+  applyContractPackage(
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Body() dto: ApplyContractPackageDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.packages.apply(orgId, projectId, dto, user.id);
   }
 
   @Patch('projects/:projectId/sla-policy')
