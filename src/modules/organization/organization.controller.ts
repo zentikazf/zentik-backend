@@ -12,6 +12,7 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { AuthGuard, PermissionsGuard } from '../auth/guards';
 import { CurrentUser } from '../../common/decorators';
 import { Permissions } from '../../common/decorators/permissions.decorator';
@@ -129,6 +130,22 @@ export class OrganizationController {
     @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.membershipService.createMember(orgId, dto, user.id);
+  }
+
+  /**
+   * #59 — OJO con el param: es el **userId**, no el membershipId. El @Delete y el @Patch
+   * de arriba usan membershipId; copiar esa firma manda el id equivocado al service.
+   */
+  @Post(':orgId/members/:userId/resend-activation')
+  @Throttle({ short: { ttl: 60_000, limit: 10 } })
+  @HttpCode(HttpStatus.OK)
+  @Permissions('manage:members')
+  @ApiOperation({ summary: 'Reenviar email de activación a un miembro sin verificar' })
+  resendMemberActivation(
+    @Param('orgId') orgId: string,
+    @Param('userId') userId: string,
+  ) {
+    return this.membershipService.resendActivation(orgId, userId);
   }
 
   // ============================================

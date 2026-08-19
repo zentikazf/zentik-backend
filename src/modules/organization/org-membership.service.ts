@@ -12,6 +12,7 @@ import { domainEvent } from '../../common/events/domain-event.helper';
 import { OrganizationService } from './organization.service';
 import { EmailInvitationService } from '../../infrastructure/email/email-invitation.service';
 import { OnboardingService } from '../auth/onboarding/onboarding.service';
+import { AuditService } from '../audit/audit.service';
 
 @Injectable()
 export class OrgMembershipService {
@@ -23,6 +24,7 @@ export class OrgMembershipService {
     private readonly organizationService: OrganizationService,
     private readonly emailInvitationService: EmailInvitationService,
     private readonly onboardingService: OnboardingService,
+    private readonly auditService: AuditService,
   ) {}
 
   async listMembers(orgId: string, excludeRole?: string) {
@@ -341,5 +343,79 @@ export class OrgMembershipService {
       activationMode,
       isNewUser,
     };
+  }
+
+  /**
+   * #59 — Reenvia el email de activacion a un miembro del equipo de la organizacion.
+   *
+   * Espejo exacto de `ClientService.resendActivation` (el de sub-usuarios de cliente).
+   * Existe porque el boton de /settings/members llamaba a `POST /auth/resend-verification`,
+   * que IGNORA el body y usa `@CurrentUser()`: el mail le llegaba al admin que apretaba el
+   * boton, no al miembro — y como respondia 200, la UI mostraba exito y encima nombraba la
+   * casilla del miembro. Mentia sobre el resultado Y sobre el destinatario.
+   */
+  async resendActivation(orgId: string, userId: string) {
+    // Este `where` ES el guard de verdad: el AuthGuard solo garantiza que hay sesion, no
+    // que ESE usuario pueda tocar a ESE miembro (y el IDOR de :orgId sigue abierto).
+    // 404 y no 403 a proposito: un 403 revelaria que el id existe en otra organizacion.
+    const membership = await this.prisma.organizationMember.findFirst({
+      where: { organizationId: orgId, userId },
+      select: {
+        user: { select: { id: true, name: true, email: true, emailVerified: true } },
+      },
+    });
+    if (!membership) {
+      throw new AppException('Miembro no encontrado', 'MEMBER_NOT_FOUND', 404);
+    }
+
+    const user = membership.user;
+
+    if (user.emailVerified) {
+      throw new AppException(
+        'Este usuario ya verificó su correo — no hace falta reenviar la activación',
+        'USER_ALREADY_VERIFIED',
+        409,
+      );
+    }
+
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { name: true },
+    });
+
+    // Invalidar links de activacion previos sin usar: al reenviar, solo el ultimo email
+    // debe funcionar (evita la confusion de "cual link uso" y reduce superficie).
+    await this.prisma.userActivationToken.deleteMany({
+      where: { userId, usedAt: null },
+    });
+
+    const result = await this.onboardingService.createActivation({
+      userId: user.id,
+      userName: user.name,
+      userEmail: user.email,
+      organizationName: org?.name ?? null,
+    });
+
+    // createActivation cae a 'temp-password' si el email service esta caido o el envio
+    // fallo. Para un reenvio explicito de admin eso es un fallo real: no devolver 200
+    // mintiendo.
+    if (result.mode !== 'email-sent') {
+      throw new AppException(
+        'No se pudo enviar el email de activación. El servicio de correo no está disponible en este momento.',
+        'EMAIL_SERVICE_UNAVAILABLE',
+        503,
+      );
+    }
+
+    this.logger.log(`Activation email resent: ${user.email} (org: ${orgId})`);
+    await this.auditService.create({
+      organizationId: orgId,
+      action: 'organization.member.activation_resent',
+      resource: 'organization',
+      resourceId: orgId,
+      newData: { userId: user.id, email: user.email },
+    });
+
+    return { message: 'Email de activación reenviado' };
   }
 }
