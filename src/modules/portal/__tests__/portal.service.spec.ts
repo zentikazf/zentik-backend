@@ -7,6 +7,7 @@ import { FileService } from '../../file/file.service';
 import { StorageService } from '../../../infrastructure/storage/storage.service';
 import { OutboxService } from '../../sync/outbox.service';
 import { ClientBillingPdfService } from '../../client-billing/client-billing-pdf.service';
+import { PORTAL_VISIBLE_INVOICE_WHERE } from '../invoice-visibility.util';
 
 /**
  * H8f — getMyInvoices: scoping del portal. Prisma MOCKEADO (jest-mock-extended), NUNCA toca
@@ -35,7 +36,7 @@ describe('PortalService.getMyInvoices (H8f)', () => {
     prisma.creditNote.findMany.mockResolvedValue([] as never);
   });
 
-  it('scopea por el cliente del usuario y filtra status a SENT/PAID/CANCELLED (sin DRAFT)', async () => {
+  it('scopea por el cliente del usuario y usa la regla de visibilidad compartida (#61)', async () => {
     prisma.clientBillingCycle.findMany.mockResolvedValue([] as never);
 
     await service.getMyInvoices('user-1');
@@ -43,11 +44,33 @@ describe('PortalService.getMyInvoices (H8f)', () => {
     expect(prisma.clientBillingCycle.findMany).toHaveBeenCalledTimes(1);
     const arg = prisma.clientBillingCycle.findMany.mock.calls[0][0] as any;
     expect(arg.where.clientId).toBe(CLIENT);
-    expect(arg.where.status.in).toEqual(['SENT', 'PAID', 'CANCELLED']);
-    expect(arg.where.status.in).not.toContain('DRAFT');
+    // ⚠️ El where sale del helper, NO se escribe inline. Se compara contra la constante misma: si
+    // alguien la cambia, este test acompaña; si alguien vuelve a escribir el filtro a mano en el
+    // call site, este test lo caza.
+    expect(arg.where.OR).toEqual(PORTAL_VISIBLE_INVOICE_WHERE.OR);
+    // y las dos garantías que importan, explícitas para que se lean acá:
+    expect(JSON.stringify(arg.where)).not.toContain('DRAFT'); // nunca un borrador
+    const cancelled = arg.where.OR.find((c: any) => c.status === 'CANCELLED');
+    expect(cancelled.sentAt).toEqual({ not: null }); // un anulado SOLO si se envió
     expect(arg.orderBy).toEqual({ periodStart: 'desc' });
     // el select no expone notas internas del staff
     expect(arg.select.notes).toBeUndefined();
+  });
+
+  it('#61 — el CANCELLED del where nunca es incondicional (era el bug)', async () => {
+    // El filtro viejo era status: { in: [SENT, PAID, CANCELLED] }. Con ese CANCELLED suelto,
+    // descartar un BORRADOR le mostraba al cliente una factura "Anulada" que nunca existió para
+    // él: no la recibió, no la vio, y ni siquiera le movió un número del portal.
+    prisma.clientBillingCycle.findMany.mockResolvedValue([] as never);
+
+    await service.getMyInvoices('user-1');
+
+    const arg = prisma.clientBillingCycle.findMany.mock.calls[0][0] as any;
+    expect(arg.where.status).toBeUndefined(); // ya no hay un status suelto de nivel superior
+    const incondicional = arg.where.OR.find(
+      (c: any) => c.status?.in?.includes('CANCELLED') || (c.status === 'CANCELLED' && !c.sentAt),
+    );
+    expect(incondicional).toBeUndefined();
   });
 
   it('H9b — devuelve { invoices, creditNotes }: FAC con docType INVOICE y NC con docType CREDIT_NOTE (monto negativo)', async () => {

@@ -8,7 +8,7 @@ import { AppException } from '../../common/filters/app-exception';
 import { CreateSuggestionDto } from './dto/create-suggestion.dto';
 import { UpdateSuggestionDto } from './dto/update-suggestion.dto';
 // #61 — única fuente de verdad de «qué factura puede ver el cliente» (no se reescribe inline).
-import { isPortalVisibleInvoice } from './invoice-visibility.util';
+import { isPortalVisibleInvoice, PORTAL_VISIBLE_INVOICE_WHERE } from './invoice-visibility.util';
 import { domainEvent } from '../../common/events/domain-event.helper';
 import { CreateTicketDto } from '../ticket/dto/create-ticket.dto';
 import { AuditService } from '../audit/audit.service';
@@ -1083,6 +1083,8 @@ export class PortalService {
 
   // GATE-1 (dueño, 2026-07-27): el cliente ve SENT + PAID + CANCELLED marcadas "Anulada";
   // NUNCA DRAFT (borradores internos del staff). Ordenadas por período desc.
+  // #61: y ese CANCELLED es CONDICIONAL — sólo si `sentAt != null`. Un borrador descartado no
+  // llegó nunca al cliente, así que no aparece. Ver `invoice-visibility.util`.
   // H9b: además de las FAC, trae las NC del cliente (de facturas que el cliente ve) y devuelve un
   // shape MERGE { invoices, creditNotes }. Las NC llevan monto NEGATIVO (efecto neto) + docType.
   async getMyInvoices(userId: string) {
@@ -1092,7 +1094,16 @@ export class PortalService {
       this.prisma.clientBillingCycle.findMany({
         where: {
           clientId: client.id,
-          status: { in: ['SENT', 'PAID', 'CANCELLED'] },
+          // #61 — La regla NO se escribe inline: sale de `invoice-visibility.util`, que es su única
+          // fuente de verdad (la comparte con el detalle de las cards de #62).
+          //
+          // Antes era `status: { in: [SENT, PAID, CANCELLED] }` a secas, y ese CANCELLED
+          // incondicional era el bug: existe UNA sola anulación (`reopenCycle`) que sirve para
+          // borradores y para facturas enviadas, y deja `CANCELLED` en los dos casos. Resultado:
+          // descartar un BORRADOR —que el cliente nunca recibió, nunca vio, y que ni siquiera le
+          // movió un número— le hacía aparecer en el portal una factura "Anulada" que jamás
+          // existió para él. Una enviada-y-anulada sí tiene que verla: esa la recibió.
+          ...PORTAL_VISIBLE_INVOICE_WHERE,
         },
         orderBy: { periodStart: 'desc' },
         select: {

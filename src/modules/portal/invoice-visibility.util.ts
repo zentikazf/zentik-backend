@@ -20,8 +20,9 @@
 // PDF son más estrictos todavía —`SENT`/`PAID` solamente, ver `getMyInvoiceDetail` y
 // `downloadMyInvoice`—: una anulada se lista marcada "Anulada" pero no se abre ni se baja.
 //
-// Si mañana hace falta la versión `where` para una query de Prisma, va acá al lado; no
-// se escribe inline en el call site.
+// La regla existe en DOS formas —un `where` de Prisma y un predicado en memoria— porque hay
+// call sites de los dos tipos. Tienen que decir lo MISMO: cualquier cambio va en las dos, y el
+// test las corre contra la misma tabla de casos para que no puedan divergir en silencio.
 
 /** Lo mínimo que necesita la regla. Lo cumple cualquier fila/DTO de ciclo de facturación. */
 export interface InvoiceVisibilityLike {
@@ -40,3 +41,18 @@ export function isPortalVisibleInvoice(cycle: InvoiceVisibilityLike): boolean {
   if (cycle.status === 'SENT' || cycle.status === 'PAID') return true;
   return cycle.status === 'CANCELLED' && cycle.sentAt !== null;
 }
+
+/**
+ * La misma regla como `where` de Prisma, para las queries que listan facturas del cliente.
+ *
+ * Se compone con el resto del `where` (`{ clientId, ...PORTAL_VISIBLE_INVOICE_WHERE }`). Va como
+ * `OR` y no como `status: { in: [...] }` justamente porque `CANCELLED` no es incondicional: sin la
+ * condición de `sentAt`, un borrador descartado —que el cliente nunca recibió— le aparece en el
+ * portal como una factura anulada.
+ */
+export const PORTAL_VISIBLE_INVOICE_WHERE = {
+  OR: [
+    { status: { in: ['SENT', 'PAID'] } },
+    { status: 'CANCELLED', sentAt: { not: null } },
+  ],
+};
