@@ -7,6 +7,8 @@ import { AppConfigService } from '../../config/app.config';
 import { AppException } from '../../common/filters/app-exception';
 import { CreateSuggestionDto } from './dto/create-suggestion.dto';
 import { UpdateSuggestionDto } from './dto/update-suggestion.dto';
+// #61 — única fuente de verdad de «qué factura puede ver el cliente» (no se reescribe inline).
+import { isPortalVisibleInvoice } from './invoice-visibility.util';
 import { domainEvent } from '../../common/events/domain-event.helper';
 import { CreateTicketDto } from '../ticket/dto/create-ticket.dto';
 import { AuditService } from '../audit/audit.service';
@@ -799,83 +801,235 @@ export class PortalService {
     });
   }
 
+  // ─── #62 — Los tres estados de facturación del portal ───────────────────────────────
+  //
+  // El KPI único "Total facturable" filtraba `billedCycleId === null`, y el estampado ocurre
+  // al EMITIR (`closeCycle`), donde el ciclo nace en `DRAFT`. Consecuencia: generar un
+  // BORRADOR —que el cliente ni siquiera ve— le hacía desaparecer las horas del pendiente.
+  // Veía bajar su total sin que existiera ninguna factura para él y sin que nadie hubiera
+  // cobrado nada.
+  //
+  // ⚠️ EL ESTAMPADO NO SE MUEVE. La tentación es sellar `billedCycleId` recién al enviar; es
+  // la solución equivocada. Estampar al emitir es lo que CONGELA EL CONJUNTO, que es la
+  // garantía que el propio diálogo de cierre le promete al usuario ("este período queda
+  // congelado: los movimientos incluidos pasan a ser de solo lectura"). Si se estampara al
+  // enviar, entre generar y enviar el conjunto podría cambiar solo y la factura enviada
+  // dejaría de ser la que se revisó.
+  //
+  // El arreglo es de LECTURA: el portal deja de mirar sólo "¿tiene ciclo?" y pasa a mirar EN
+  // QUÉ ESTADO está el ciclo al que apunta:
+  //
+  //   null | DRAFT     → PENDIENTE  (trabajo que todavía no se facturó)   ← el fix
+  //   SENT             → FACTURADO  (ya está en una factura enviada)
+  //   PAID             → COBRADO    (facturas pagadas)
+  //   CANCELLED / otro → PENDIENTE  (fail-safe; ver `stateOf`)
   async getMyHours(userId: string) {
     const client = await this.getClientByUserId(userId);
     const available = Math.max(client.contractedHours - client.usedHours - client.loanedHours, 0);
 
     // Solo descuentos consumidos (USAGE/LOAN), nunca borrados, nunca PURCHASE/REFUND.
     // El cliente solo ve lo que se le descontó, no movimientos administrativos.
-    const recentTransactions = await this.prisma.hoursTransaction.findMany({
-      where: {
-        clientId: client.id,
-        type: { in: ['USAGE', 'LOAN'] },
-        deletedAt: null,
-      },
-      // ⚠️ `select` EXPLÍCITO, nunca `include` a secas — misma regla que `getTicketDetail`
-      // (ver el comentario de ese método arriba). Este endpoint responde al CLIENTE: cada campo
-      // que se agregue acá tiene que poder leerlo el cliente.
-      //
-      // #55 escondió la jerga interna de la PANTALLA pero no del PAYLOAD: con `include` sin
-      // `select` de nivel superior, /portal/hours mandaba al navegador del cliente TODOS los
-      // escalares del ledger — `timeEntryId`, `entryVersion`, `reversesTransactionId`,
-      // `deletedById`, `deleteReason`, `clientId` — visibles con DevTools > Network. Ninguno lo
-      // usa el portal y ninguno es información del cliente: son plomería interna del ledger.
-      //
-      // La lista de abajo es EXACTAMENTE lo que consume `app/(portal)/portal/hours/page.tsx`
-      // (interface `HoursTransaction` + JSX) más lo que este mismo método necesita para el
-      // `totalAmount` (`priceAmount`, `billedCycleId`). Enumerar es donde es fácil dropear un
-      // campo vivo, así que si mañana el portal necesita uno nuevo hay que AGREGARLO acá — el
-      // síntoma de olvidarse es una columna en '—', no un error.
-      select: {
-        id: true,
-        type: true,
-        hours: true,
-        note: true, // alimenta el concepto del cliente cuando no hay tarea (ver `safeConceptOf`)
-        createdAt: true,
-        workedOn: true, // agrupa el mes (workedOn con fallback a createdAt, `monthKeyOf`)
-        priceAmount: true,
-        priceRate: true,
-        priceCurrency: true,
-        billedCycleId: true, // badge Facturado/Pendiente + KPI "Pendiente de facturar"
-        rebilledFromTransactionId: true, // empareja original y copia re-facturable
-        task: {
-          select: {
-            id: true,
-            title: true,
-            type: true,
-            project: { select: { id: true, name: true } },
-          },
-        },
-        // #55 — FUENTE DE VERDAD de "a este movimiento se le emitió una nota de crédito".
-        //
-        // Es la línea de la NC (`CreditNoteLine.creditedTransactionId`, @unique en el schema), NO la
-        // existencia de la fila espejo re-facturable. La fila espejo sólo nace cuando el staff deja
-        // activado "devolver horas al pool" (es un switch del diálogo) y además se puede borrar, así
-        // que deducir el acreditado desde ella daba dos falsos negativos: el portal seguía mostrando
-        // el cargo firme al precio completo mientras /portal/invoices ya le mostraba al cliente la NC
-        // en negativo — las dos pantallas contradiciéndose sobre la misma plata.
-        //
-        // `description` es el concepto CONGELADO al emitir la NC (`task.title ?? note` de ese
-        // momento): sobrevive al borrado en duro de la tarea (onDelete SetNull) y es texto seguro
-        // para el cliente, a diferencia del `note` de la fila espejo, que es jerga interna
-        // ("Re-facturable por NC-…").
-        creditedByLine: {
-          select: {
-            description: true,
-            creditNote: { select: { number: true } },
-          },
-        },
-      },
-      orderBy: { createdAt: 'desc' },
-      take: 100,
-    });
+    // Un solo objeto para las dos consultas de movimientos: si el criterio de "qué es un
+    // descuento del cliente" cambia, la lista que se pinta y los totales no pueden divergir.
+    const consumedByClient = {
+      clientId: client.id,
+      type: { in: ['USAGE', 'LOAN'] },
+      deletedAt: null,
+    } satisfies Prisma.HoursTransactionWhereInput;
 
-    // H8f: el "Total facturable" del portal = lo que FALTA cobrar, no todo lo con precio.
-    // Suma solo transacciones con precio Y aún NO facturadas (billedCycleId null). Cuando una
-    // factura se emite, sus transacciones quedan estampadas (billedCycleId) y salen del total.
-    const totalAmount = recentTransactions
-      .filter((t) => t.priceAmount !== null && t.billedCycleId === null)
-      .reduce((sum, t) => sum + parseFloat(t.priceAmount!.toString()), 0);
+    const [recentTransactions, sumsByCycle, cycles] = await Promise.all([
+      // (1) La VENTANA QUE SE PINTA: los últimos 100 movimientos. No alcanza para los totales
+      //     —ver (2)—, pero es lo que la pantalla lista.
+      this.prisma.hoursTransaction.findMany({
+        where: consumedByClient,
+        // ⚠️ `select` EXPLÍCITO, nunca `include` a secas — misma regla que `getTicketDetail`
+        // (ver el comentario de ese método arriba). Este endpoint responde al CLIENTE: cada campo
+        // que se agregue acá tiene que poder leerlo el cliente.
+        //
+        // #55 escondió la jerga interna de la PANTALLA pero no del PAYLOAD: con `include` sin
+        // `select` de nivel superior, /portal/hours mandaba al navegador del cliente TODOS los
+        // escalares del ledger — `timeEntryId`, `entryVersion`, `reversesTransactionId`,
+        // `deletedById`, `deleteReason`, `clientId` — visibles con DevTools > Network. Ninguno lo
+        // usa el portal y ninguno es información del cliente: son plomería interna del ledger.
+        //
+        // La lista de abajo es EXACTAMENTE lo que consume `app/(portal)/portal/hours/page.tsx`
+        // (interface `HoursTransaction` + JSX) más lo que este mismo método necesita para los
+        // buckets (`priceAmount`, `billedCycleId`). Enumerar es donde es fácil dropear un campo
+        // vivo, así que si mañana el portal necesita uno nuevo hay que AGREGARLO acá — el
+        // síntoma de olvidarse es una columna en '—', no un error.
+        select: {
+          id: true,
+          type: true,
+          hours: true,
+          note: true, // alimenta el concepto del cliente cuando no hay tarea (ver `safeConceptOf`)
+          createdAt: true,
+          workedOn: true, // agrupa el mes (workedOn con fallback a createdAt, `monthKeyOf`)
+          priceAmount: true,
+          priceRate: true,
+          priceCurrency: true,
+          // #62: sigue viajando (no se rompe ningún consumidor) pero YA NO decide el badge de la
+          // fila: eso lo dice `billingState`, que sale de mirar el ESTADO del ciclo. Un movimiento
+          // estampado en un BORRADOR tiene `billedCycleId` y NO está facturado.
+          billedCycleId: true,
+          rebilledFromTransactionId: true, // empareja original y copia re-facturable
+          task: {
+            select: {
+              id: true,
+              title: true,
+              type: true,
+              project: { select: { id: true, name: true } },
+            },
+          },
+          // #55 — FUENTE DE VERDAD de "a este movimiento se le emitió una nota de crédito".
+          //
+          // Es la línea de la NC (`CreditNoteLine.creditedTransactionId`, @unique en el schema), NO la
+          // existencia de la fila espejo re-facturable. La fila espejo sólo nace cuando el staff deja
+          // activado "devolver horas al pool" (es un switch del diálogo) y además se puede borrar, así
+          // que deducir el acreditado desde ella daba dos falsos negativos: el portal seguía mostrando
+          // el cargo firme al precio completo mientras /portal/invoices ya le mostraba al cliente la NC
+          // en negativo — las dos pantallas contradiciéndose sobre la misma plata.
+          //
+          // `description` es el concepto CONGELADO al emitir la NC (`task.title ?? note` de ese
+          // momento): sobrevive al borrado en duro de la tarea (onDelete SetNull) y es texto seguro
+          // para el cliente, a diferencia del `note` de la fila espejo, que es jerga interna
+          // ("Re-facturable por NC-…").
+          creditedByLine: {
+            select: {
+              description: true,
+              creditNote: { select: { number: true } },
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 100,
+      }),
+
+      // (2) LOS TRES BUCKETS, sobre TODO el historial. No se calculan sobre `recentTransactions`
+      //     a propósito: esa lista tiene `take: 100`, y lo COBRADO es justamente lo VIEJO — lo
+      //     primero que se cae de una ventana de 100 filas ordenada por `createdAt desc`. Con el
+      //     KPI único el recorte casi no se notaba (lo pendiente suele ser lo reciente); con tres
+      //     buckets, "Cobrado" saldría arbitrariamente corto para cualquier cliente con historia.
+      //     Es un AGREGADO —una fila por ciclo, no una por movimiento—, así que no crece con el
+      //     volumen del ledger.
+      this.prisma.hoursTransaction.groupBy({
+        by: ['billedCycleId'],
+        where: { ...consumedByClient, priceAmount: { not: null } },
+        _sum: { priceAmount: true, hours: true },
+      }),
+
+      // (3) Los ciclos del cliente, para saber EN QUÉ ESTADO cayó cada estampado. Va en el mismo
+      //     `Promise.all` que las otras dos —no depende del resultado de ninguna—, así que las
+      //     tres salen en un solo viaje y no hay un round-trip por movimiento.
+      //
+      //     ⚠️ #55: `select` mínimo. De acá sale lo que se le muestra al cliente, así que NO se
+      //     piden `notes` (notas internas del staff), `cancelReason`, `cancelledById`,
+      //     `closedById`, `variablesBilling` ni `organizationId`. `status`/`sentAt` se usan sólo
+      //     para CLASIFICAR y para la regla de visibilidad; no viajan crudos en el payload.
+      this.prisma.clientBillingCycle.findMany({
+        where: { clientId: client.id },
+        select: {
+          id: true,
+          invoiceNumber: true,
+          kind: true,
+          periodStart: true,
+          periodEnd: true,
+          cutoffDate: true,
+          currency: true,
+          status: true,
+          sentAt: true,
+          paidAt: true,
+        },
+      }),
+    ]);
+
+    const cycleById = new Map(cycles.map((c) => [c.id, c]));
+    const cycleOf = (billedCycleId: string | null) =>
+      billedCycleId ? cycleById.get(billedCycleId) : undefined;
+
+    /**
+     * El estado de facturación de un movimiento = el ESTADO DEL CICLO al que apunta.
+     *
+     * Todo lo que no sea `SENT`/`PAID` cae en PENDIENTE, y eso es deliberado:
+     *  - `DRAFT` → el fix de #62: un borrador todavía no le movió nada al cliente.
+     *  - sin ciclo → nunca se facturó.
+     *  - `CANCELLED` → no debería llegar (`reopenCycle` libera el `billedCycleId` de todos los
+     *    movimientos al anular, así que vuelven solos a pendiente), pero si un día llega por
+     *    deriva de datos, "todavía no te lo facturamos" es la lectura correcta y la segura.
+     *  - un estado futuro que nadie enseñó a clasificar → pendiente antes que cobrado.
+     */
+    const stateOf = (cycle: { status: string } | undefined): 'PENDING' | 'INVOICED' | 'PAID' => {
+      if (cycle?.status === 'SENT') return 'INVOICED';
+      if (cycle?.status === 'PAID') return 'PAID';
+      return 'PENDING';
+    };
+
+    // Los montos se suman con Decimal y salen como string: nada de `parseFloat` acumulado ni
+    // aritmética de plata en el navegador (misma regla que el resto de facturación).
+    const totals = {
+      PENDING: new Prisma.Decimal(0),
+      INVOICED: new Prisma.Decimal(0),
+      PAID: new Prisma.Decimal(0),
+    };
+    const invoicesByState: Record<
+      'INVOICED' | 'PAID',
+      Array<{
+        id: string;
+        invoiceNumber: string;
+        kind: string;
+        periodStart: Date;
+        periodEnd: Date;
+        cutoffDate: Date | null;
+        currency: string;
+        date: Date | null;
+        hours: number;
+        amount: string;
+      }>
+    > = { INVOICED: [], PAID: [] };
+
+    // Las facturas que componen cada card sólo se listan si el cliente TIENE pantalla de
+    // facturación. Sin el flag, /portal/billing lo rebota a /portal: enlazarlo ahí sería mandarlo
+    // a una puerta cerrada, y de paso mostrarle números de factura que su organización decidió no
+    // mostrarle. Los MONTOS sí salen igual — son sus horas y su plata, y el KPI de hoy ya los
+    // muestra sin gate. Mismo criterio de defensa en profundidad que `getMyVariables`.
+    const canSeeInvoices = client.portalBillingEnabled === true;
+
+    for (const group of sumsByCycle) {
+      const cycle = cycleOf(group.billedCycleId);
+      const state = stateOf(cycle);
+      const amount = group._sum.priceAmount ?? new Prisma.Decimal(0);
+      totals[state] = totals[state].plus(amount);
+
+      // ⚠️ La regla de "qué factura puede ver el cliente" NO se reescribe acá: se importa de
+      // `invoice-visibility.util` (#61), que es su única fuente de verdad. Hoy es redundante
+      // —sólo se listan ciclos `SENT`/`PAID`, que siempre son visibles—, y esa redundancia es el
+      // punto: si mañana un bucket incluye otro estado, la regla ya está aplicada acá y nadie
+      // tiene que acordarse de venir a agregarla.
+      if (state === 'PENDING' || !cycle || !canSeeInvoices) continue;
+      if (!isPortalVisibleInvoice(cycle)) continue;
+
+      invoicesByState[state].push({
+        id: cycle.id,
+        invoiceNumber: cycle.invoiceNumber,
+        kind: cycle.kind,
+        periodStart: cycle.periodStart,
+        periodEnd: cycle.periodEnd,
+        cutoffDate: cycle.cutoffDate,
+        currency: cycle.currency,
+        // La fecha que le importa al cliente en cada card: cuándo la pagó / cuándo se la enviamos.
+        date: cycle.paidAt ?? cycle.sentAt,
+        // Horas e importe DE ESTA FACTURA que salen de estos movimientos, no el total del
+        // documento: es lo que hace que las filas SUMEN la card que las contiene. Difieren del
+        // total de la factura sólo cuando ésta además cobra Variables (#23), que no son horas y
+        // tienen su propia pantalla; el gran total se ve al abrir la factura.
+        hours: group._sum.hours ?? 0,
+        amount: amount.toString(),
+      });
+    }
+
+    // Más reciente primero, igual que /portal/invoices.
+    for (const list of Object.values(invoicesByState)) {
+      list.sort((a, b) => b.periodStart.getTime() - a.periodStart.getTime());
+    }
 
     // #55 — se APLANA la relación a dos campos y se descarta el objeto crudo: el portal no expone
     // entidades del dominio de facturación interna, sólo el número de la NC (que el cliente ya ve en
@@ -888,11 +1042,15 @@ export class PortalService {
     // JSON y se leía con DevTools > Network — que es justo lo que #55 vino a esconder. Es la
     // MISMA regla, aplicada en el único lugar donde no se puede esquivar. No se toca el `note` de
     // ninguna otra fila: ahí es el concepto que el cliente ve cuando el movimiento no tiene tarea.
+    //
+    // #62 — `billingState` es el estado REAL de la fila y reemplaza a `if (billedCycleId)` como
+    // criterio del badge: con el estampado al emitir, tener ciclo NO significa estar facturado.
     const transactions = recentTransactions.map(({ creditedByLine, ...t }) => ({
       ...t,
       note: t.rebilledFromTransactionId ? null : t.note,
       creditNoteNumber: creditedByLine?.creditNote.number ?? null,
       creditedDescription: creditedByLine?.description ?? null,
+      billingState: stateOf(cycleOf(t.billedCycleId)),
     }));
 
     return {
@@ -906,7 +1064,17 @@ export class PortalService {
       currency: client.currency,
       developmentHourlyRate: client.developmentHourlyRate,
       supportHourlyRate: client.supportHourlyRate,
-      totalAmount,
+      // ⚠️ SE CONSERVA, con el mismo nombre, el mismo tipo (number) y el mismo SIGNIFICADO que
+      // siempre tuvo: "lo que falta facturar". Lo único que cambia es que ahora está BIEN
+      // calculado — un borrador ya no lo baja y no se recorta a los últimos 100 movimientos.
+      // Ningún consumidor existente se rompe: los tres buckets se SUMAN al payload, no lo
+      // reemplazan.
+      totalAmount: totals.PENDING.toNumber(),
+      billing: {
+        pending: { amount: totals.PENDING.toString() },
+        invoiced: { amount: totals.INVOICED.toString(), invoices: invoicesByState.INVOICED },
+        paid: { amount: totals.PAID.toString(), invoices: invoicesByState.PAID },
+      },
       transactions,
     };
   }
