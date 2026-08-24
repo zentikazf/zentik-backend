@@ -828,6 +828,11 @@ describe('PortalService.getMyHours — los tres estados de facturación (#62)', 
     for (const interno of ['notes', 'cancelReason', 'cancelledById', 'cancelledAt', 'closedById', 'closedAt', 'variablesBilling', 'organizationId', 'totalAmount', 'totalHours']) {
       expect(arg.select[interno]).toBeUndefined();
     }
+    // #63 — El desglose del IVA tampoco se le pide a la base. La etiqueta del portal sale del MODO y
+    // nada más; `taxRate`/`netAmount`/`taxAmount` son montos del documento que esta pantalla no pinta.
+    for (const desglose of ['taxRate', 'netAmount', 'taxAmount']) {
+      expect(arg.select[desglose]).toBeUndefined();
+    }
     // y lo que sí se pide es lo mínimo para clasificar + pintar la factura
     expect(arg.select).toEqual({
       id: true,
@@ -840,6 +845,7 @@ describe('PortalService.getMyHours — los tres estados de facturación (#62)', 
       status: true,
       sentAt: true,
       paidAt: true,
+      taxMode: true, // #63: el estampado de ESTE ciclo, único origen válido de la etiqueta de una factura
     });
   });
 
@@ -852,5 +858,101 @@ describe('PortalService.getMyHours — los tres estados de facturación (#62)', 
 
     expect((res.transactions[0] as any).billedCycle).toBeUndefined();
     expect(JSON.stringify(res)).not.toContain('DRAFT');
+  });
+
+  // ── #63 — Etiquetas de IVA: DOS ORÍGENES DISTINTOS ──────────────────────────
+  //
+  // Es toda la sección R8 en una frase: el modo de Pendiente sale del CLIENTE (no hay documento
+  // todavía) y el de cada factura sale de SU PROPIO ESTAMPADO. Confundirlos es el error fácil, y el
+  // síntoma sería una factura vieja mostrando el modo que el cliente tiene HOY.
+  describe('etiquetas de IVA (#63)', () => {
+    /** Cliente con un modo de IVA configurado HOY (el que etiqueta sólo a Pendiente). */
+    function clienteConModo(taxMode: string | null) {
+      prisma.client.findFirst.mockResolvedValue({
+        id: CLIENT,
+        contractedHours: 10,
+        usedHours: 5,
+        loanedHours: 0,
+        currency: 'PYG',
+        developmentHourlyRate: null,
+        supportHourlyRate: null,
+        portalBillingEnabled: true,
+        taxMode,
+      } as never);
+    }
+
+    it('EL TEST DE LA SECCIÓN: dos facturas con modos distintos → CADA UNA muestra el suyo, y la que se emitió sin IVA no muestra ninguno', async () => {
+      // El cliente cambió a INCLUDED en algún momento; sus facturas viejas conservan lo suyo.
+      clienteConModo('INCLUDED');
+      prisma.hoursTransaction.groupBy.mockResolvedValue([
+        grupo('cyc-vieja', '1000000'),
+        grupo('cyc-nueva', '2000000'),
+        grupo('cyc-preiva', '3000000'),
+      ] as never);
+      prisma.clientBillingCycle.findMany.mockResolvedValue([
+        ciclo('cyc-vieja', 'PAID', { taxMode: 'EXCLUDED', paidAt: new Date('2026-06-10T12:00:00Z') }),
+        ciclo('cyc-nueva', 'PAID', { taxMode: 'INCLUDED', paidAt: new Date('2026-07-10T12:00:00Z') }),
+        ciclo('cyc-preiva', 'PAID', { taxMode: null, paidAt: new Date('2026-05-10T12:00:00Z') }),
+      ] as never);
+
+      const res = await service.getMyHours('user-1');
+
+      const porId = new Map(res.billing.paid.invoices.map((i) => [i.id, i.taxMode]));
+      expect(porId.get('cyc-vieja')).toBe('EXCLUDED'); // ← el SUYO, no el del cliente (INCLUDED)
+      expect(porId.get('cyc-nueva')).toBe('INCLUDED');
+      expect(porId.get('cyc-preiva')).toBeNull(); // anterior a #63 → SIN etiqueta, no hereda
+    });
+
+    it('Pendiente lleva el modo ACTUAL DEL CLIENTE (todavía no hay ningún documento emitido)', async () => {
+      clienteConModo('EXCLUDED');
+      prisma.hoursTransaction.groupBy.mockResolvedValue([grupo(null, '4000000')] as never);
+
+      const res = await service.getMyHours('user-1');
+
+      expect(res.billing.pending.taxMode).toBe('EXCLUDED');
+      expect(res.billing.pending.amount).toBe('4000000');
+    });
+
+    it('cliente sin IVA → Pendiente sin modo: la pantalla queda idéntica a como la dejó #62', async () => {
+      clienteConModo(null);
+      prisma.hoursTransaction.groupBy.mockResolvedValue([grupo(null, '4000000'), grupo('cyc-1', '1000000')] as never);
+      prisma.clientBillingCycle.findMany.mockResolvedValue([
+        ciclo('cyc-1', 'SENT', { taxMode: null, sentAt: new Date('2026-07-05T12:00:00Z') }),
+      ] as never);
+
+      const res = await service.getMyHours('user-1');
+
+      expect(res.billing.pending.taxMode).toBeNull();
+      expect(res.billing.invoiced.invoices[0].taxMode).toBeNull();
+    });
+
+    it('NINGÚN NÚMERO cambia: prender el IVA en el cliente no mueve los tres buckets (R8.1)', async () => {
+      const stubs = () => {
+        prisma.hoursTransaction.groupBy.mockResolvedValue([
+          grupo(null, '4000000'),
+          grupo('cyc-sent', '1000000'),
+          grupo('cyc-paid', '2000000'),
+        ] as never);
+        prisma.clientBillingCycle.findMany.mockResolvedValue([
+          ciclo('cyc-sent', 'SENT', { sentAt: new Date('2026-07-05T12:00:00Z') }),
+          ciclo('cyc-paid', 'PAID', { paidAt: new Date('2026-07-20T12:00:00Z') }),
+        ] as never);
+      };
+
+      clienteConModo(null);
+      stubs();
+      const sinIva = await service.getMyHours('user-1');
+
+      clienteConModo('EXCLUDED');
+      stubs();
+      const conIva = await service.getMyHours('user-1');
+
+      // Pendiente sigue siendo NETO (sale de `priceAmount`) y las otras dos de `totalAmount`.
+      // La etiqueta es lo ÚNICO que se agrega; el dinero no se toca en ninguna de las tres.
+      expect(conIva.billing.pending.amount).toBe(sinIva.billing.pending.amount);
+      expect(conIva.billing.invoiced.amount).toBe(sinIva.billing.invoiced.amount);
+      expect(conIva.billing.paid.amount).toBe(sinIva.billing.paid.amount);
+      expect(conIva.totalAmount).toBe(sinIva.totalAmount);
+    });
   });
 });

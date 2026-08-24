@@ -92,9 +92,42 @@ export interface InvoiceModel {
   groups: InvoiceGroup[];
   totalHoras: string;
   totalMonto: string;
+  // #63 — Desglose del IVA, YA PRE-FORMATEADO como string (respeta la separación "modelo puro / render
+  //   pdfkit" que este archivo declara arriba: el render no formatea plata, sólo dibuja). Los tres van
+  //   JUNTOS: o hay IVA y están los tres, o no hay y son los tres null — con null el bloque de totales
+  //   queda en UNA SOLA LÍNEA `TOTAL`, idéntica a la de antes de #63.
+  subtotalMonto: string | null;
+  ivaLabel: string | null; // 'IVA (10%)'
+  ivaMonto: string | null;
   currency: string;
   docTitle?: string; // default 'FACTURA'; NC pasa 'NOTA DE CRÉDITO'
   referenceLine?: string; // NC: 'Aplica a FAC-YYYY-NNNNN'
+}
+
+/**
+ * #63 — Las tres líneas del bloque de totales, o los tres null si la factura no lleva IVA.
+ *
+ * Un solo lugar para factura y NC: las dos usan el MISMO `InvoiceModel` y la única diferencia es el
+ * signo, que ya viene resuelto en los montos que se le pasan. `taxRate` manda: si es null no hay
+ * desglose, sin importar qué haya en net/tax.
+ */
+function buildTaxLines(
+  taxRate: string | null,
+  netAmount: string | null,
+  taxAmount: string | null,
+  currency: string,
+): Pick<InvoiceModel, 'subtotalMonto' | 'ivaLabel' | 'ivaMonto'> {
+  if (taxRate == null || netAmount == null || taxAmount == null) {
+    return { subtotalMonto: null, ivaLabel: null, ivaMonto: null };
+  }
+  return {
+    subtotalMonto: fmtMoney(netAmount, currency),
+    // `0.1000` → 'IVA (10%)'. `parseFloat` normaliza los ceros de relleno del Decimal; `toLocaleString`
+    // es-PY pone coma decimal para tasas no enteras (10,5%). Es una ETIQUETA, no un monto: acá no se
+    // hace aritmética de plata (el IVA ya viene calculado del backend).
+    ivaLabel: `IVA (${(parseFloat(taxRate) * 100).toLocaleString('es-PY', { maximumFractionDigits: 2 })}%)`,
+    ivaMonto: fmtMoney(taxAmount, currency),
+  };
 }
 
 /**
@@ -182,6 +215,10 @@ export function buildInvoiceModel(input: {
     groups,
     totalHoras: `${cycle.totalHours.toFixed(2)}h`,
     totalMonto: fmtMoney(cycle.totalAmount, currency),
+    // #63: sale del ESTAMPADO del ciclo, no de ningún recálculo. `totalMonto` sigue siendo
+    //   `cycle.totalAmount` — lo que el cliente paga — y con IVA se cumple `subtotal + IVA = TOTAL`
+    //   por construcción (ver `computeTax`), así que las tres líneas del PDF cierran solas.
+    ...buildTaxLines(cycle.taxRate, cycle.netAmount, cycle.taxAmount, currency),
     currency,
   };
 }
@@ -203,6 +240,11 @@ export interface CreditNoteModelInput {
     issuedAt: Date;
     createdAt: Date;
     appliesTo: { invoiceNumber: string };
+    // #63: IVA heredado de la factura acreditada. net/tax ya NEGATIVOS en la tabla, como `totalAmount`.
+    //   Opcionales para no romper a ningún llamador que arme el input con un select acotado.
+    taxRate?: Prisma.Decimal | null;
+    netAmount?: Prisma.Decimal | null;
+    taxAmount?: Prisma.Decimal | null;
   };
   lines: Array<{
     hours: number; // POSITIVO (snapshot fiel)
@@ -279,6 +321,14 @@ export function buildCreditNoteModel(input: CreditNoteModelInput): InvoiceModel 
     groups,
     totalHoras: `${creditNote.totalHours.toFixed(2)}h`, // ya NEGATIVO
     totalMonto: fmtMoney(creditNote.totalAmount.toString(), currency), // ya NEGATIVO
+    // #63: mismo bloque de tres líneas que la factura, con los montos ya negativos de la tabla. La NC
+    //   hereda el IVA de la factura acreditada, así que su PDF desglosa exactamente lo que se devuelve.
+    ...buildTaxLines(
+      creditNote.taxRate?.toString() ?? null,
+      creditNote.netAmount?.toString() ?? null,
+      creditNote.taxAmount?.toString() ?? null,
+      currency,
+    ),
     currency,
     docTitle: 'NOTA DE CRÉDITO',
     referenceLine: `Aplica a ${creditNote.appliesTo.invoiceNumber}`,
@@ -560,10 +610,32 @@ export class ClientBillingPdfService {
       }
     }
 
-    // ── Total ──
-    ensureSpace(34);
+    // ── Totales ──
+    // #63: sin IVA es UNA línea (idéntico a antes); con IVA son TRES (Subtotal / IVA (x%) / TOTAL).
+    //   El bloque dejó de tener altura fija, así que el espacio se reserva ENTERO de una: si se pidiera
+    //   sólo el de la primera línea, el salto podía caer entre "Subtotal" y "TOTAL" y partir el bloque
+    //   —o pisar el pie— justo en la parte del documento que el cliente mira primero (R6.5). Se suman
+    //   los 26pt del pie para que nunca quede colgado solo en la hoja siguiente.
+    const conIva = model.subtotalMonto != null && model.ivaMonto != null;
+    ensureSpace((conIva ? 34 + 2 * 16 : 34) + 26);
     doc.moveTo(LEFT, doc.y).lineTo(RIGHT, doc.y).lineWidth(1).strokeColor(INK).stroke();
     doc.y += 8;
+
+    if (conIva) {
+      // Subtotal e IVA en peso normal: el TOTAL —lo que el cliente paga— tiene que seguir siendo la
+      // línea que más pesa visualmente. Sin horas: las horas son del documento entero, no del neto.
+      doc.font('Helvetica').fontSize(10).fillColor(MUTED);
+      for (const [label, monto] of [
+        ['Subtotal', model.subtotalMonto!],
+        [model.ivaLabel ?? 'IVA', model.ivaMonto!],
+      ] as const) {
+        const y = doc.y;
+        doc.text(label, COL.concepto.x, y, { width: 200, lineBreak: false });
+        doc.text(monto, COL.monto.x, y, { width: COL.monto.w, align: 'right', lineBreak: false });
+        doc.y = y + 16;
+      }
+    }
+
     const ty = doc.y;
     doc.font('Helvetica-Bold').fontSize(11).fillColor(INK);
     doc.text('TOTAL', COL.concepto.x, ty, { width: 200, lineBreak: false });

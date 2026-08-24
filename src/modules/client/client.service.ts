@@ -100,6 +100,9 @@ export class ClientService {
         ...(dto.currency && { currency: dto.currency }),
         ...(dto.portalBillingEnabled !== undefined && { portalBillingEnabled: dto.portalBillingEnabled }),
         ...(dto.botmakerAccountId !== undefined && { botmakerAccountId: dto.botmakerAccountId || null }),
+        // #63: IVA del cliente. Sin el campo, el cliente nace SIN IVA (columna nullable, sin default).
+        ...(dto.taxRate !== undefined && { taxRate: dto.taxRate }),
+        ...(dto.taxMode !== undefined && { taxMode: dto.taxMode }),
       },
     });
 
@@ -218,6 +221,13 @@ export class ClientService {
           ...(dto.currency !== undefined && { currency: dto.currency }),
           ...(dto.portalBillingEnabled !== undefined && { portalBillingEnabled: dto.portalBillingEnabled }),
           ...(dto.botmakerAccountId !== undefined && { botmakerAccountId: dto.botmakerAccountId || null }),
+          // #63: IVA del cliente. `null` explícito es un valor VÁLIDO —apagar el IVA de un cliente que
+          //   lo tenía—, por eso el guard es `!== undefined` y no un truthy: con `dto.taxRate &&` no
+          //   habría forma de apagarlo. Cambiar esto NO toca ninguna factura ya emitida: el rate/modo
+          //   quedan estampados en cada ciclo (ver `closeCycle`), que es lo que hace que una NC vieja
+          //   siga devolviendo el IVA que esa factura cobró.
+          ...(dto.taxRate !== undefined && { taxRate: dto.taxRate }),
+          ...(dto.taxMode !== undefined && { taxMode: dto.taxMode }),
         },
         include: { user: { select: { id: true, name: true, email: true } } },
       });

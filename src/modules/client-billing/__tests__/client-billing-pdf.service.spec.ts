@@ -1,7 +1,9 @@
 import { mockDeep, DeepMockProxy } from 'jest-mock-extended';
+import { Prisma } from '@prisma/client';
 import {
   ClientBillingPdfService,
   buildInvoiceModel,
+  buildCreditNoteModel,
   fmtMoney,
 } from '../client-billing-pdf.service';
 import {
@@ -188,6 +190,159 @@ describe('ClientBillingPdfService (#39 H8e)', () => {
       const { buffer } = await service.generateInvoicePdf(ORG, CLIENT, CYCLE);
       expect(buffer.subarray(0, 5).toString('latin1')).toBe('%PDF-');
       expect(buffer.length).toBeGreaterThan(0);
+    });
+
+    // #63 — El bloque de totales pasó de una altura fija a una variable (tres líneas con IVA). Se
+    // renderiza con MUCHAS líneas para forzar el salto de página y comprobar que el documento
+    // sigue saliendo entero: el riesgo del cambio es que el bloque se parta o pise el pie (R6.5).
+    it('con IVA y suficientes líneas para saltar de página, el PDF sigue saliendo válido', async () => {
+      const muchas = Array.from({ length: 60 }, (_, i) => makeLine({ id: `ht-${i}` }));
+      billing.getCycleTransactions.mockResolvedValue({
+        cycle: makeCycle({
+          totalAmount: '1000000',
+          taxRate: '0.1000',
+          taxMode: 'INCLUDED',
+          netAmount: '909090.91',
+          taxAmount: '90909.09',
+        }),
+        transactions: muchas,
+        grupos: [{ workedMonth: '2026-07', label: 'Julio 2026', subtotal: '1000000', horas: 90 }],
+      });
+
+      const { buffer } = await service.generateInvoicePdf(ORG, CLIENT, CYCLE);
+      expect(buffer.subarray(0, 5).toString('latin1')).toBe('%PDF-');
+      expect(buffer.length).toBeGreaterThan(0);
+    });
+  });
+
+  // ── #63 — IVA en el PDF ────────────────────────────────────────────────────
+  //
+  // Los tests verifican el MODELO (puro), no el binario: es la separación que este archivo declara.
+  describe('IVA (#63)', () => {
+    const grupos = [{ workedMonth: '2026-07', label: 'Julio 2026', subtotal: '150000', horas: 3 }];
+    const comunes = {
+      clientName: 'Cliente X',
+      org: { name: 'Agencia Y', supportEmail: 'hola@agencia.py' },
+      transactions: [makeLine()],
+      grupos,
+    };
+
+    it('NO-REGRESIÓN: sin IVA el modelo es IDÉNTICO al de antes de #63 (los tres campos en null)', () => {
+      const model = buildInvoiceModel({ cycle: makeCycle(), ...comunes });
+
+      // Los tres nuevos en null → el render dibuja UNA sola línea TOTAL, como siempre.
+      expect(model.subtotalMonto).toBeNull();
+      expect(model.ivaLabel).toBeNull();
+      expect(model.ivaMonto).toBeNull();
+      // Y nada del resto se movió.
+      expect(model.totalMonto).toBe(fmtMoney('150000', 'PYG'));
+      expect(model.totalHoras).toBe('3.00h');
+    });
+
+    it('con IVA arma las tres líneas pre-formateadas y el TOTAL sigue siendo lo que el cliente paga', () => {
+      const model = buildInvoiceModel({
+        cycle: makeCycle({
+          totalAmount: '1000000',
+          taxRate: '0.1000',
+          taxMode: 'INCLUDED',
+          netAmount: '909090.91',
+          taxAmount: '90909.09',
+        }),
+        ...comunes,
+      });
+
+      expect(model.subtotalMonto).toBe(fmtMoney('909090.91', 'PYG')); // 909.091 (es-PY, 0 decimales)
+      expect(model.ivaLabel).toBe('IVA (10%)');
+      expect(model.ivaMonto).toBe(fmtMoney('90909.09', 'PYG')); // 90.909
+      expect(model.totalMonto).toBe(fmtMoney('1000000', 'PYG')); // 1.000.000
+    });
+
+    it('la etiqueta soporta tasas no enteras (5%, 10,5%)', () => {
+      const conTasa = (rate: string) =>
+        buildInvoiceModel({
+          cycle: makeCycle({ taxRate: rate, taxMode: 'EXCLUDED', netAmount: '100', taxAmount: '10' }),
+          ...comunes,
+        }).ivaLabel;
+
+      expect(conTasa('0.0500')).toBe('IVA (5%)');
+      expect(conTasa('0.1050')).toBe('IVA (10,5%)');
+    });
+
+    it('un ciclo con rate pero sin net/tax (dato incompleto) NO dibuja el desglose', () => {
+      // Fail-safe: antes de mostrar un "Subtotal —" al cliente, se cae a la línea única de siempre.
+      const model = buildInvoiceModel({
+        cycle: makeCycle({ taxRate: '0.1000', taxMode: 'EXCLUDED' }),
+        ...comunes,
+      });
+      expect(model.subtotalMonto).toBeNull();
+      expect(model.ivaMonto).toBeNull();
+    });
+
+    it('la NC hereda el desglose de su factura, en NEGATIVO', () => {
+      const model = buildCreditNoteModel({
+        creditNote: {
+          number: 'NC-2026-00001',
+          reason: 'Tarifa equivocada',
+          currency: 'PYG',
+          totalAmount: new Prisma.Decimal('-110000'),
+          totalHours: -2,
+          issuedAt: new Date('2026-08-01T12:00:00Z'),
+          createdAt: new Date('2026-08-01T12:00:00Z'),
+          appliesTo: { invoiceNumber: 'FAC-2026-00007' },
+          taxRate: new Prisma.Decimal('0.1000'),
+          netAmount: new Prisma.Decimal('-100000'),
+          taxAmount: new Prisma.Decimal('-10000'),
+        },
+        lines: [
+          {
+            hours: 2,
+            priceAmount: new Prisma.Decimal('100000'),
+            priceRate: new Prisma.Decimal('50000'),
+            priceCurrency: 'PYG',
+            workedOn: new Date(Date.UTC(2026, 6, 10)),
+            description: 'Ajuste',
+          },
+        ],
+        clientName: 'Cliente X',
+        org: { name: 'Agencia Y', supportEmail: null },
+      });
+
+      expect(model.docTitle).toBe('NOTA DE CRÉDITO');
+      expect(model.subtotalMonto).toBe(fmtMoney('-100000', 'PYG'));
+      expect(model.ivaLabel).toBe('IVA (10%)');
+      expect(model.ivaMonto).toBe(fmtMoney('-10000', 'PYG'));
+      expect(model.totalMonto).toBe(fmtMoney('-110000', 'PYG'));
+    });
+
+    it('una NC sobre una factura sin IVA no dibuja desglose (como todas las anteriores a #63)', () => {
+      const model = buildCreditNoteModel({
+        creditNote: {
+          number: 'NC-2026-00002',
+          reason: 'x',
+          currency: 'PYG',
+          totalAmount: new Prisma.Decimal('-100000'),
+          totalHours: -2,
+          issuedAt: new Date('2026-08-01T12:00:00Z'),
+          createdAt: new Date('2026-08-01T12:00:00Z'),
+          appliesTo: { invoiceNumber: 'FAC-2026-00007' },
+        },
+        lines: [
+          {
+            hours: 2,
+            priceAmount: new Prisma.Decimal('100000'),
+            priceRate: null,
+            priceCurrency: 'PYG',
+            workedOn: new Date(Date.UTC(2026, 6, 10)),
+            description: 'Ajuste',
+          },
+        ],
+        clientName: 'Cliente X',
+        org: null,
+      });
+
+      expect(model.subtotalMonto).toBeNull();
+      expect(model.ivaLabel).toBeNull();
+      expect(model.ivaMonto).toBeNull();
     });
   });
 });

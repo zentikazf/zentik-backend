@@ -938,6 +938,11 @@ export class PortalService {
           status: true,
           sentAt: true,
           paidAt: true,
+          // #63 — El modo de IVA ESTAMPADO EN ESTE CICLO, que es lo único que puede etiquetar una
+          // factura ya emitida. NO se piden `taxRate`/`netAmount`/`taxAmount`: la etiqueta sale del
+          // MODO y nada más; el portal no muestra ningún desglose de IVA y esos tres no los necesita
+          // (misma regla de `select` mínimo que el resto de este bloque).
+          taxMode: true,
         },
       }),
     ]);
@@ -983,6 +988,7 @@ export class PortalService {
         date: Date | null;
         hours: number;
         amount: string;
+        taxMode: string | null; // #63: el estampado de ESTA factura (null = se emitió sin IVA)
       }>
     > = { INVOICED: [], PAID: [] };
 
@@ -1023,6 +1029,9 @@ export class PortalService {
         // tienen su propia pantalla; el gran total se ve al abrir la factura.
         hours: group._sum.hours ?? 0,
         amount: amount.toString(),
+        // #63 — Sale del CICLO, no del cliente. Un cliente que cambió de modo tiene facturas viejas
+        // con otro (o sin ninguno), y leer el del cliente les pondría una etiqueta que nunca tuvieron.
+        taxMode: cycle.taxMode,
       });
     }
 
@@ -1071,7 +1080,21 @@ export class PortalService {
       // reemplazan.
       totalAmount: totals.PENDING.toNumber(),
       billing: {
-        pending: { amount: totals.PENDING.toString() },
+        // #63 — DOS ORÍGENES DISTINTOS DEL MODO, a propósito, y es el punto de toda la sección:
+        //
+        //   Pendiente  → `client.taxMode`  (no hay documento todavía: el IVA que va a llevar es el que
+        //                                   el cliente tiene configurado HOY)
+        //   cada factura → `cycle.taxMode` (el que quedó ESTAMPADO al emitirla)
+        //
+        // Si Pendiente saliera del ciclo no habría de dónde sacarlo, y si las facturas salieran del
+        // cliente, un cambio de configuración les reescribiría la etiqueta a todas las viejas.
+        //
+        // ⚠️ NINGÚN NÚMERO DE ESTE PAYLOAD CAMBIA con #63. Pendiente sigue siendo NETO (sale de
+        // `priceAmount`, que nunca lleva IVA) y las otras dos siguen saliendo de `totalAmount`. Lo que
+        // se agrega es una ETIQUETA que avisa que a Pendiente todavía le falta el IVA: mostrar un IVA
+        // estimado obligaría a recalcular en tres lugares un número que cambia solo si se toca la tasa
+        // antes de facturar. La etiqueta no miente, no estima y no toca nada.
+        pending: { amount: totals.PENDING.toString(), taxMode: client.taxMode },
         invoiced: { amount: totals.INVOICED.toString(), invoices: invoicesByState.INVOICED },
         paid: { amount: totals.PAID.toString(), invoices: invoicesByState.PAID },
       },
