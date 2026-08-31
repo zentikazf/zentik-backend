@@ -257,17 +257,18 @@ describe('ClientBillingPdfService (#39 H8e)', () => {
       expect(model.totalMonto).toBe(fmtMoney('1000000', 'PYG')); // 1.000.000
     });
 
-    it('la LEYENDA distingue los dos modos (las tres líneas se dibujan igual en ambos)', () => {
-      const leyendaDe = (taxMode: string) =>
+    it('el PDF NO lleva texto explicativo del modo: los dos modos dan el MISMO modelo', () => {
+      // Decisión del dueño: el PDF es el documento formal, sólo cifras. La frase que distingue
+      // "ya incluye IVA" de "se suma al total" vive en las PANTALLAS (portal y admin), no acá.
+      const modeloDe = (taxMode: string) =>
         buildInvoiceModel({
           cycle: makeCycle({ taxRate: '0.1000', taxMode, netAmount: '100', taxAmount: '10' }),
           ...comunes,
-        }).ivaLeyenda;
+        });
 
-      expect(leyendaDe('INCLUDED')).toBe('Los importes de las líneas ya incluyen IVA 10%.');
-      expect(leyendaDe('EXCLUDED')).toBe('Los importes de las líneas no incluyen IVA. Se suma 10% al total.');
-      // Sin IVA no hay leyenda: el PDF queda idéntico al de antes de #63.
-      expect(buildInvoiceModel({ cycle: makeCycle(), ...comunes }).ivaLeyenda).toBeNull();
+      expect(modeloDe('INCLUDED')).toEqual(modeloDe('EXCLUDED'));
+      // Y ningún campo del modelo arrastra la palabra "incluyen" (por si alguien la reintroduce).
+      expect(JSON.stringify(modeloDe('INCLUDED'))).not.toMatch(/incluyen|se suma/i);
     });
 
     it('la etiqueta soporta tasas no enteras (5%, 10,5%)', () => {

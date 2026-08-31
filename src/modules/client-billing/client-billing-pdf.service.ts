@@ -99,10 +99,10 @@ export interface InvoiceModel {
   subtotalMonto: string | null;
   ivaLabel: string | null; // 'IVA (10%)'
   ivaMonto: string | null;
-  // La FRASE que le dice al cliente si el IVA venía adentro de los precios o se sumó al final. El
-  // desglose de tres líneas es idéntico en los dos modos, así que sin esto el documento no
-  // responde la única pregunta que el cliente se hace al ver un IVA. null = factura sin IVA.
-  ivaLeyenda: string | null;
+  // ⚠️ NO va acá la frase explicativa del modo ("los importes ya incluyen IVA…"). Decisión del
+  // dueño: el PDF es el documento formal y no lleva textos didácticos — sólo las tres cifras. Esa
+  // explicación vive en las pantallas (`taxLegend` del front, portal y admin), donde el cliente
+  // está navegando y sí necesita el contexto.
   currency: string;
   docTitle?: string; // default 'FACTURA'; NC pasa 'NOTA DE CRÉDITO'
   referenceLine?: string; // NC: 'Aplica a FAC-YYYY-NNNNN'
@@ -120,10 +120,9 @@ function buildTaxLines(
   netAmount: string | null,
   taxAmount: string | null,
   currency: string,
-  taxMode: string | null,
-): Pick<InvoiceModel, 'subtotalMonto' | 'ivaLabel' | 'ivaMonto' | 'ivaLeyenda'> {
+): Pick<InvoiceModel, 'subtotalMonto' | 'ivaLabel' | 'ivaMonto'> {
   if (taxRate == null || netAmount == null || taxAmount == null) {
-    return { subtotalMonto: null, ivaLabel: null, ivaMonto: null, ivaLeyenda: null };
+    return { subtotalMonto: null, ivaLabel: null, ivaMonto: null };
   }
   // `0.1000` → '10'. `parseFloat` normaliza los ceros de relleno del Decimal; `toLocaleString` es-PY
   // pone coma decimal para tasas no enteras (10,5%). Es una ETIQUETA, no un monto: acá no se hace
@@ -133,10 +132,6 @@ function buildTaxLines(
     subtotalMonto: fmtMoney(netAmount, currency),
     ivaLabel: `IVA (${pct}%)`,
     ivaMonto: fmtMoney(taxAmount, currency),
-    ivaLeyenda:
-      taxMode === 'INCLUDED'
-        ? `Los importes de las líneas ya incluyen IVA ${pct}%.`
-        : `Los importes de las líneas no incluyen IVA. Se suma ${pct}% al total.`,
   };
 }
 
@@ -228,7 +223,7 @@ export function buildInvoiceModel(input: {
     // #63: sale del ESTAMPADO del ciclo, no de ningún recálculo. `totalMonto` sigue siendo
     //   `cycle.totalAmount` — lo que el cliente paga — y con IVA se cumple `subtotal + IVA = TOTAL`
     //   por construcción (ver `computeTax`), así que las tres líneas del PDF cierran solas.
-    ...buildTaxLines(cycle.taxRate, cycle.netAmount, cycle.taxAmount, currency, cycle.taxMode),
+    ...buildTaxLines(cycle.taxRate, cycle.netAmount, cycle.taxAmount, currency),
     currency,
   };
 }
@@ -339,7 +334,6 @@ export function buildCreditNoteModel(input: CreditNoteModelInput): InvoiceModel 
       creditNote.netAmount?.toString() ?? null,
       creditNote.taxAmount?.toString() ?? null,
       currency,
-      creditNote.taxMode ?? null,
     ),
     currency,
     docTitle: 'NOTA DE CRÉDITO',
@@ -629,8 +623,7 @@ export class ClientBillingPdfService {
     //   —o pisar el pie— justo en la parte del documento que el cliente mira primero (R6.5). Se suman
     //   los 26pt del pie para que nunca quede colgado solo en la hoja siguiente.
     const conIva = model.subtotalMonto != null && model.ivaMonto != null;
-    // +14 por la leyenda ("los importes ya incluyen IVA…"), que va debajo del TOTAL.
-    ensureSpace((conIva ? 34 + 2 * 16 + 14 : 34) + 26);
+    ensureSpace((conIva ? 34 + 2 * 16 : 34) + 26);
     doc.moveTo(LEFT, doc.y).lineTo(RIGHT, doc.y).lineWidth(1).strokeColor(INK).stroke();
     doc.y += 8;
 
@@ -655,18 +648,6 @@ export class ClientBillingPdfService {
     doc.text(model.totalHoras, COL.horas.x, ty, { width: COL.horas.w, align: 'right', lineBreak: false });
     doc.text(model.totalMonto, COL.monto.x, ty, { width: COL.monto.w, align: 'right', lineBreak: false });
     doc.y = ty + 22;
-
-    // #63: la frase que distingue los dos modos. Las tres líneas de arriba se dibujan IGUAL en
-    //   `EXCLUDED` y en `INCLUDED`, así que sin esto el documento no responde la única pregunta que
-    //   el cliente se hace al ver un IVA: ¿ya estaba en el precio o me lo sumaron?
-    if (model.ivaLeyenda) {
-      doc.font('Helvetica').fontSize(8).fillColor(MUTED).text(model.ivaLeyenda, LEFT, doc.y - 6, {
-        width: RIGHT - LEFT,
-        align: 'right',
-      });
-      doc.y += 6;
-      doc.fillColor(INK);
-    }
 
     // ── Pie ──
     doc
