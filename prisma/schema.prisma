@@ -1091,6 +1091,13 @@ model Client {
   developmentHourlyRate Decimal?     @map("development_hourly_rate") @db.Decimal(12, 2)
   supportHourlyRate     Decimal?     @map("support_hourly_rate") @db.Decimal(12, 2)
   currency              String       @default("PYG")
+  // #63: CONFIGURACION del IVA del cliente ("la tarifa de este cliente, ¿es neta o bruta?"). Es una
+  //   propiedad del acuerdo comercial, no de la agencia ni de una factura suelta. Se ESTAMPA en cada
+  //   factura al emitir (ClientBillingCycle.taxRate/taxMode) y NUNCA se recalcula al leer: cambiar
+  //   esto acá no mueve ni un guaraní de lo ya emitido. NULL = sin IVA (el estado de todos los
+  //   clientes al desplegar #63; el propio NULL es el apagado, no hay flag global).
+  taxRate               Decimal?     @map("tax_rate") @db.Decimal(5, 4) // fracción: 0.1000 = 10%
+  taxMode               String?      @map("tax_mode") // EXCLUDED (tarifa neta, el IVA se suma) | INCLUDED (la tarifa ya lo trae)
   // #23: cuenta Botmaker mapeada (clave del GET de consumo). NULL = sin cuenta → variables 100% manuales.
   botmakerAccountId     String?      @map("botmaker_account_id")
   createdAt             DateTime     @default(now()) @map("created_at")
@@ -1711,7 +1718,19 @@ model ClientBillingCycle {
   kind             String    @default("MONTH") @map("kind") // MONTH | ACCUMULATED
   invoiceNumber    String    @map("invoice_number") // FAC-YYYY-NNNNN (secuencia POR-ORG, §6.1)
   totalHours       Float     @default(0) @map("total_hours")
+  // #63: `totalAmount` conserva su nombre, su tipo y su significado — LO QUE EL CLIENTE PAGA. Con IVA
+  //   EXCLUDED crece 10%; con INCLUDED o sin IVA es idéntico a lo de siempre. Los campos de IVA se
+  //   SUMAN; ninguno lo reemplaza (por eso el portal, el listado y el PDF siguen andando sin tocarlos).
   totalAmount      Decimal   @default(0) @map("total_amount") @db.Decimal(15, 2)
+  // #63: IVA ESTAMPADO al emitir (copiado del cliente, congelado como la tasa USD→PYG de #23). Si mañana
+  //   el IVA pasa a 12%, las facturas viejas no se mueven. NULL = factura sin IVA → todo se comporta
+  //   byte a byte como antes de #63 (PDF de una sola línea TOTAL, portal sin etiqueta, sin desglose).
+  //   INVARIANTE: taxRate != null ⟹ totalAmount == netAmount + taxAmount (se cumple POR CONSTRUCCIÓN:
+  //   cada modo redondea UN solo término y saca el otro por resta — ver `computeTax`).
+  taxRate          Decimal?  @map("tax_rate") @db.Decimal(5, 4) // fracción: 0.1000 = 10%
+  taxMode          String?   @map("tax_mode") // EXCLUDED | INCLUDED
+  netAmount        Decimal?  @map("net_amount") @db.Decimal(15, 2) // base imponible
+  taxAmount        Decimal?  @map("tax_amount") @db.Decimal(15, 2) // el IVA
   currency         String
   notes            String?
   closedAt         DateTime? @map("closed_at")
@@ -1725,7 +1744,11 @@ model ClientBillingCycle {
   cancelledById    String?   @map("cancelled_by_id")
   // #23: estampado inmutable de las Variables (Botmaker) cobradas en esta factura + la tasa USD→PYG
   //   usada al emitir. JSON: { amountPyg, currency, rate, rateDate, lines:[{label, commercialUsd, convertedPyg}] }
-  //   (montos como string). NULL = factura sin variables. totalAmount ya incluye amountPyg. Aditivo (T0-bis).
+  //   (montos como string). NULL = factura sin variables. Aditivo (T0-bis).
+  //   #63: `totalAmount` sigue incluyendo `amountPyg` — y ahora, además, puede llevar IVA encima. Las
+  //   variables van ADENTRO de la base imponible: el IVA es del documento, no hay razón para eximirlas.
+  //   ORDEN OBLIGATORIO: primero USD→PYG con la tasa estampada, DESPUÉS el IVA sobre el total ya foldeado
+  //   (`netAmount`/`taxAmount` cuelgan de la suma soporte+variables, no de cada parte por separado).
   variablesBilling Json?     @map("variables_billing")
   createdAt        DateTime  @default(now()) @map("created_at")
   updatedAt        DateTime  @updatedAt @map("updated_at")
@@ -1787,6 +1810,16 @@ model CreditNote {
   returnHoursToBillable Boolean  @default(true) @map("return_hours_to_billable")
   totalAmount           Decimal  @default(0) @map("total_amount") @db.Decimal(15, 2) // NEGATIVO (efecto neto)
   totalHours            Float    @default(0) @map("total_hours") // NEGATIVO
+  // #63: IVA heredado de la FACTURA acreditada (`appliesToCycleId`), JAMÁS del cliente de hoy. Una NC
+  //   posterior a un cambio de configuración tiene que devolver EXACTAMENTE la plata que esa factura
+  //   cobró; leer el `taxRate` actual del cliente acreditaría un IVA que nunca se cobró. La NC es
+  //   PROPORCIONAL: se recalcula con el mismo rate/modo sobre el subtotal acreditado (no se prorratea
+  //   el `taxAmount` de la factura: son redondeos distintos). Los tres montos van NEGATIVOS, coherentes
+  //   con `totalAmount`. NULL (factura original sin IVA) = NC sin IVA, como antes de #63.
+  taxRate               Decimal? @map("tax_rate") @db.Decimal(5, 4)
+  taxMode               String?  @map("tax_mode") // EXCLUDED | INCLUDED
+  netAmount             Decimal? @map("net_amount") @db.Decimal(15, 2) // NEGATIVO
+  taxAmount             Decimal? @map("tax_amount") @db.Decimal(15, 2) // NEGATIVO
   currency              String
   issuedById            String?  @map("issued_by_id")
   issuedAt              DateTime @default(now()) @map("issued_at")

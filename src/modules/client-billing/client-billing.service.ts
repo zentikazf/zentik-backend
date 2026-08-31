@@ -12,6 +12,7 @@ import {
   ExchangeRateProvider,
 } from '../botmaker-billing/exchange-rate/exchange-rate.provider';
 import { buildVariablesStamp } from '../botmaker-billing/exchange-rate/convert-variables';
+import { computeTax } from './client-billing-tax.util';
 import { CloseCycleDto } from './dto/close-cycle.dto';
 import { CreateCreditNoteDto } from './dto/create-credit-note.dto';
 import { PreviewCycleDto } from './dto/preview-cycle.dto';
@@ -39,6 +40,11 @@ interface ClientScope {
   id: string;
   organizationId: string;
   currency: string;
+  // #63: configuración de IVA del cliente. Viaja acá —y no en una query aparte— para que el preview
+  //   y la emisión lean el MISMO dato en la MISMA lectura: si cada uno lo consultara por su lado,
+  //   un cambio de configuración entre los dos momentos daría un total distinto del que se leyó.
+  taxRate: Prisma.Decimal | null;
+  taxMode: string | null;
 }
 
 export interface BillingRowDto {
@@ -79,6 +85,13 @@ export interface CycleDto {
   cutoffDate: Date | null; // H8b: instante efectivo del corte (= periodEnd si mes completo)
   totalHours: number;
   totalAmount: string;
+  // #63: IVA ESTAMPADO en esta factura. Los cuatro null = factura sin IVA → todo consumidor la pinta
+  //   exactamente como antes de #63 (PDF de una línea, portal sin etiqueta). `taxMode` es además el que
+  //   etiqueta la factura en el portal: sale de ACÁ, del ciclo, nunca de la configuración del cliente.
+  taxRate: string | null;
+  taxMode: string | null;
+  netAmount: string | null;
+  taxAmount: string | null;
   currency: string;
   notes: string | null;
   closedAt: Date | null;
@@ -137,6 +150,10 @@ interface ComputeFacturableResult {
   periodEnd: Date; // borde nominal superior (= cutoffDate)
   cutoffDate: Date; // instante efectivo del corte (= until)
   currency: string;
+  // #63: IVA del cliente leído UNA vez en la fase compartida. El preview lo muestra y la emisión lo
+  //   estampa: los dos salen de esta misma lectura, así que no pueden discrepar.
+  taxRate: Prisma.Decimal | null;
+  taxMode: string | null;
   // #23: Variables (Botmaker) NO facturadas de los períodos elegidos — se combinan con Soporte al emitir.
   variables: CommercialLine[];
   variablesSubtotalUsd: number;
@@ -166,7 +183,7 @@ export class ClientBillingService {
   private async assertClient(orgId: string, clientId: string): Promise<ClientScope> {
     const client = await this.prisma.client.findFirst({
       where: { id: clientId, organizationId: orgId },
-      select: { id: true, organizationId: true, currency: true },
+      select: { id: true, organizationId: true, currency: true, taxRate: true, taxMode: true },
     });
     if (!client) {
       throw new AppException('El cliente no existe', 'CLIENT_NOT_FOUND', 404, { clientId });
@@ -407,6 +424,10 @@ export class ClientBillingService {
     cutoffDate: Date | null;
     totalHours: number;
     totalAmount: Prisma.Decimal;
+    taxRate?: Prisma.Decimal | null; // #63
+    taxMode?: string | null; // #63
+    netAmount?: Prisma.Decimal | null; // #63
+    taxAmount?: Prisma.Decimal | null; // #63
     currency: string;
     notes: string | null;
     closedAt: Date | null;
@@ -427,6 +448,12 @@ export class ClientBillingService {
       cutoffDate: c.cutoffDate,
       totalHours: c.totalHours,
       totalAmount: c.totalAmount.toString(),
+      // #63: `?? null` y no `!`: los cuatro son opcionales en el input porque hay call sites que
+      //   proyectan el ciclo con `select` acotado. Sin dato = sin IVA, que es el comportamiento previo.
+      taxRate: c.taxRate?.toString() ?? null,
+      taxMode: c.taxMode ?? null,
+      netAmount: c.netAmount?.toString() ?? null,
+      taxAmount: c.taxAmount?.toString() ?? null,
       currency: c.currency,
       notes: c.notes,
       closedAt: c.closedAt,
@@ -885,6 +912,8 @@ export class ClientBillingService {
       periodEnd,
       cutoffDate: until,
       currency: client.currency,
+      taxRate: client.taxRate, // #63
+      taxMode: client.taxMode, // #63
       variables: variables.lines,
       variablesSubtotalUsd: variables.subtotalUsd,
       variablePeriods: variables.contributingPeriods, // solo los períodos que aportan → sellar exactamente esos
@@ -939,7 +968,19 @@ export class ClientBillingService {
         horasMes: b.horas,
       }));
 
-    const total = grupos.reduce((acc, g) => acc.plus(g.subtotalMes), new Prisma.Decimal(0)).toString();
+    // #63: la base imponible del preview es la MISMA que la de la emisión: soporte + variables ya
+    //   convertidas. Ojo con el detalle que hace que preview y emisión no mientan: acá las variables
+    //   todavía no tienen tasa (el admin la elige en /facturacion/generar), así que el preview con
+    //   variables muestra sólo el soporte — igual que antes de #63. Este diálogo no puede emitir con
+    //   variables (409 EXCHANGE_RATE_REQUIRED), así que no hay un caso en el que se lea un IVA acá y
+    //   se estampe otro: donde se puede emitir, la base es idéntica.
+    const base = grupos.reduce((acc, g) => acc.plus(g.subtotalMes), new Prisma.Decimal(0));
+
+    // #63: MISMA función que usa `closeCycle` — no una segunda implementación "equivalente". Si el
+    //   preview calculara el IVA por su cuenta, tarde o temprano se separarían en un redondeo y el
+    //   admin leería un total y firmaría otro. `total` sigue significando "lo que se va a facturar",
+    //   así que en EXCLUDED YA VIENE CON IVA: es exactamente lo que va a emitir T3.
+    const { netAmount, taxAmount, totalAmount } = computeTax(base, comp.taxRate, comp.taxMode);
 
     // #23: hay algo que facturar si hay Soporte O Variables (un mes solo-variables también se factura).
     const hayAlgoQueFacturar = comp.facturableIds.length > 0 || comp.variablesSubtotalUsd > 0;
@@ -964,7 +1005,12 @@ export class ClientBillingService {
       periodEnd: comp.periodEnd,
       cutoffDate: comp.cutoffDate,
       grupos,
-      total,
+      total: totalAmount.toString(),
+      // #63: desglose del IVA (los tres null cuando el cliente no tiene IVA → el diálogo queda como #60).
+      net: netAmount?.toString() ?? null,
+      tax: taxAmount?.toString() ?? null,
+      taxRate: netAmount != null ? (comp.taxRate?.toString() ?? null) : null,
+      taxMode: netAmount != null ? comp.taxMode : null,
       currency: comp.currency,
       variables: comp.variables, // #23: líneas comerciales USD que se sumarán (convertidas) al total
       variablesSubtotalUsd: comp.variablesSubtotalUsd,
@@ -1047,7 +1093,18 @@ export class ClientBillingService {
     const yearStart = this.asuncionInstant(issueYear, 0, 1, 0, 0, 0, 0);
     const yearEnd = this.asuncionInstant(issueYear + 1, 0, 1, 0, 0, 0, 0);
 
-    let result: { cycleId: string; invoiceNumber: string; movementCount: number; totalAmount: Prisma.Decimal; totalHours: number } | undefined;
+    let result:
+      | {
+          cycleId: string;
+          invoiceNumber: string;
+          movementCount: number;
+          totalAmount: Prisma.Decimal;
+          totalHours: number;
+          // #63: net/tax estampados (null = factura sin IVA). Salen del tx para el audit y la respuesta.
+          netAmount: Prisma.Decimal | null;
+          taxAmount: Prisma.Decimal | null;
+        }
+      | undefined;
 
     for (let attempt = 0; attempt < MAX_INVOICE_RETRIES; attempt++) {
       try {
@@ -1102,17 +1159,43 @@ export class ClientBillingService {
               where: { billedCycleId: cycle.id },
               _sum: { priceAmount: true, hours: true },
             });
-            // #23: total de la factura = Soporte(Gs) + Variables(Gs). totalAmount folda ambos (todas las vistas
-            //   —lista, portal, PDF— muestran el gran total); el desglose sale de variablesBilling.amountPyg.
-            const totalAmount = (agg._sum.priceAmount ?? new Prisma.Decimal(0)).plus(variablesAmountPyg);
+            // #23: base de la factura = Soporte(Gs) + Variables(Gs). El USD ya se convirtió arriba con la
+            //   tasa estampada: primero la conversión, DESPUÉS el IVA (R2.4).
+            const base = (agg._sum.priceAmount ?? new Prisma.Decimal(0)).plus(variablesAmountPyg);
             const totalHours = agg._sum.hours ?? 0;
+
+            // #63: ÚNICO punto del sistema donde el total cambia de valor. Con `EXCLUDED` sube 10%; con
+            //   `INCLUDED` o sin IVA es idéntico al de siempre. El rate/modo se ESTAMPAN acá junto a los
+            //   montos: leídos del cliente al emitir y congelados para siempre (mismo criterio que la tasa
+            //   USD→PYG de #23). Nunca se recalculan al leer, así que subir el IVA no mueve lo ya emitido.
+            //   `totalAmount` sigue significando lo mismo: lo que el cliente paga.
+            const { netAmount, taxAmount, totalAmount } = computeTax(base, comp.taxRate, comp.taxMode);
 
             await tx.clientBillingCycle.update({
               where: { id: cycle.id },
-              data: { totalAmount, totalHours, closedAt: new Date(), closedById: user.id },
+              data: {
+                totalAmount,
+                totalHours,
+                // Los cuatro juntos o los cuatro en null: `computeTax` devuelve net/tax en null cuando no
+                // hay IVA, y ahí el rate/modo tampoco se estampan (una factura sin IVA no lleva ninguno).
+                taxRate: netAmount != null ? comp.taxRate : null,
+                taxMode: netAmount != null ? comp.taxMode : null,
+                netAmount,
+                taxAmount,
+                closedAt: new Date(),
+                closedById: user.id,
+              },
             });
 
-            return { cycleId: cycle.id, invoiceNumber, movementCount: stamped.count, totalAmount, totalHours };
+            return {
+              cycleId: cycle.id,
+              invoiceNumber,
+              movementCount: stamped.count,
+              totalAmount,
+              totalHours,
+              netAmount,
+              taxAmount,
+            };
           },
           { timeout: this.config.prismaTxTimeoutMs, maxWait: this.config.prismaTxMaxWaitMs },
         );
@@ -1149,6 +1232,12 @@ export class ClientBillingService {
         totalHours: result.totalHours,
         currency: comp.currency,
         movementCount: result.movementCount,
+        // #63: el IVA estampado queda en la traza. Si mañana alguien discute un total, el audit dice con
+        //   qué tasa y en qué modo se emitió ESA factura, sin depender de la configuración actual del cliente.
+        taxRate: result.netAmount != null ? (comp.taxRate?.toString() ?? null) : null,
+        taxMode: result.netAmount != null ? comp.taxMode : null,
+        netAmount: result.netAmount?.toString() ?? null,
+        taxAmount: result.taxAmount?.toString() ?? null,
       },
     });
 
@@ -1167,6 +1256,11 @@ export class ClientBillingService {
       totalHours: result.totalHours,
       movementCount: result.movementCount,
       currency: comp.currency,
+      // #63: desglose de lo recién emitido (null = sin IVA). Aditivo: ningún consumidor previo se rompe.
+      netAmount: result.netAmount?.toString() ?? null,
+      taxAmount: result.taxAmount?.toString() ?? null,
+      taxRate: result.netAmount != null ? (comp.taxRate?.toString() ?? null) : null,
+      taxMode: result.netAmount != null ? comp.taxMode : null,
     };
   }
 
@@ -1343,8 +1437,11 @@ export class ClientBillingService {
    */
   async previewCreditNote(orgId: string, clientId: string, cycleId: string, dto: CreateCreditNoteDto) {
     const { cycle, originals } = await this.resolveCreditNoteLines(orgId, clientId, cycleId, dto.lineIds);
-    const totalAmount = originals.reduce((s, t) => s.add(t.priceAmount!), new Prisma.Decimal(0));
+    const subtotal = originals.reduce((s, t) => s.add(t.priceAmount!), new Prisma.Decimal(0));
     const totalHours = originals.reduce((s, t) => s + t.hours, 0);
+    // #63: el IVA sale de la FACTURA (`cycle`), no del cliente — ver `emitCreditNote`. El preview usa
+    //   exactamente el mismo cálculo que la emisión, así que lo que se lee acá es lo que se acredita.
+    const { netAmount, taxAmount, totalAmount } = computeTax(subtotal, cycle.taxRate, cycle.taxMode);
     return {
       invoiceNumber: cycle.invoiceNumber,
       currency: cycle.currency,
@@ -1352,6 +1449,11 @@ export class ClientBillingService {
       lineCount: originals.length,
       totalAmount: totalAmount.negated().toString(), // negativo (presentación)
       totalHours: -totalHours,
+      // #63: desglose NEGATIVO, coherente con `totalAmount` (null = la factura original no tenía IVA).
+      netAmount: netAmount?.negated().toString() ?? null,
+      taxAmount: taxAmount?.negated().toString() ?? null,
+      taxRate: netAmount != null ? (cycle.taxRate?.toString() ?? null) : null,
+      taxMode: netAmount != null ? cycle.taxMode : null,
       lines: originals.map((t) => ({
         id: t.id,
         description: t.task?.title ?? t.note ?? '—',
@@ -1387,14 +1489,37 @@ export class ClientBillingService {
     const yearEnd = this.asuncionInstant(issueYear + 1, 0, 1, 0, 0, 0, 0);
 
     let result:
-      | { creditNoteId: string; number: string; totalAmount: Prisma.Decimal; totalHours: number; lineCount: number }
+      | {
+          creditNoteId: string;
+          number: string;
+          totalAmount: Prisma.Decimal;
+          totalHours: number;
+          lineCount: number;
+          netAmount: Prisma.Decimal | null; // #63
+          taxAmount: Prisma.Decimal | null; // #63
+        }
       | undefined;
 
     for (let attempt = 0; attempt < MAX_INVOICE_RETRIES; attempt++) {
       // Re-resolver DENTRO del loop (defensa ante cambios entre intentos). Lanza 404/409/400 tal cual.
       const { cycle, originals } = await this.resolveCreditNoteLines(orgId, clientId, cycleId, dto.lineIds);
-      const totalAmountPos = originals.reduce((s, t) => s.add(t.priceAmount!), new Prisma.Decimal(0));
+      const subtotalPos = originals.reduce((s, t) => s.add(t.priceAmount!), new Prisma.Decimal(0));
       const totalHoursPos = originals.reduce((s, t) => s + t.hours, 0);
+
+      // ⚠️ #63 — EL PUNTO DEL SPEC. El IVA sale de `cycle`, que ES la factura acreditada
+      //   (`resolveCreditNoteLines` la carga por `appliesToCycleId`), y JAMÁS del cliente de hoy.
+      //   Escribir `client.taxRate` acá es el bug silencioso más fácil de cometer: una NC emitida
+      //   después de cambiarle el modo al cliente acreditaría un IVA distinto del que se cobró. La NC
+      //   tiene que devolver EXACTAMENTE la plata que esa factura cobró.
+      //
+      //   Y es PROPORCIONAL, no prorrateada: acredita un subconjunto de líneas, así que se recalcula
+      //   con el MISMO rate y el MISMO modo sobre el subtotal acreditado. Repartir el `taxAmount` de la
+      //   factura entre las líneas daría redondeos distintos y no cerraría contra el PDF de la NC.
+      const {
+        netAmount: netPos,
+        taxAmount: taxPos,
+        totalAmount: totalAmountPos,
+      } = computeTax(subtotalPos, cycle.taxRate, cycle.taxMode);
       try {
         result = await this.prisma.$transaction(
           async (tx) => {
@@ -1413,6 +1538,12 @@ export class ClientBillingService {
                 returnHoursToBillable: returnHours,
                 totalAmount: totalAmountPos.negated(), // NEGATIVO (efecto neto)
                 totalHours: -totalHoursPos,
+                // #63: los tres montos NEGADOS, coherentes con `totalAmount`. rate/modo son los de la
+                //   FACTURA, congelados igual que en ella (null = original sin IVA → NC sin IVA).
+                taxRate: netPos != null ? cycle.taxRate : null,
+                taxMode: netPos != null ? cycle.taxMode : null,
+                netAmount: netPos?.negated() ?? null,
+                taxAmount: taxPos?.negated() ?? null,
                 currency: cycle.currency,
                 issuedById: user.id,
               },
@@ -1459,6 +1590,8 @@ export class ClientBillingService {
               totalAmount: nc.totalAmount,
               totalHours: nc.totalHours,
               lineCount: originals.length,
+              netAmount: nc.netAmount, // #63 (NEGATIVO; null = sin IVA)
+              taxAmount: nc.taxAmount, // #63 (NEGATIVO; null = sin IVA)
             };
           },
           { timeout: this.config.prismaTxTimeoutMs, maxWait: this.config.prismaTxMaxWaitMs },
@@ -1498,6 +1631,10 @@ export class ClientBillingService {
         totalHours: result.totalHours,
         returnHoursToBillable: returnHours,
         reason,
+        // #63: el IVA HEREDADO de la factura, en la traza. Es el dato que permite auditar después que la
+        //   NC devolvió el IVA que esa factura cobró y no el que el cliente tiene configurado hoy.
+        netAmount: result.netAmount?.toString() ?? null,
+        taxAmount: result.taxAmount?.toString() ?? null,
       },
     });
 
@@ -1514,6 +1651,8 @@ export class ClientBillingService {
       totalHours: result.totalHours,
       lineCount: result.lineCount,
       returnHoursToBillable: returnHours,
+      netAmount: result.netAmount?.toString() ?? null, // #63 (NEGATIVO; null = sin IVA)
+      taxAmount: result.taxAmount?.toString() ?? null, // #63
     };
   }
 
@@ -1534,6 +1673,11 @@ export class ClientBillingService {
         totalHours: true,
         returnHoursToBillable: true,
         issuedAt: true,
+        // #63: el IVA HEREDADO de la factura acreditada (null = esa factura no tenía IVA).
+        taxRate: true,
+        taxMode: true,
+        netAmount: true,
+        taxAmount: true,
       },
     });
     return notes.map((n) => ({
@@ -1544,6 +1688,11 @@ export class ClientBillingService {
       totalHours: n.totalHours,
       returnHoursToBillable: n.returnHoursToBillable,
       issuedAt: n.issuedAt,
+      // #63: ya NEGATIVOS en la tabla, como `totalAmount`. Null = NC sin IVA (idéntica a las de antes).
+      taxRate: n.taxRate?.toString() ?? null,
+      taxMode: n.taxMode,
+      netAmount: n.netAmount?.toString() ?? null,
+      taxAmount: n.taxAmount?.toString() ?? null,
     }));
   }
 

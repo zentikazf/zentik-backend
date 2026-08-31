@@ -1147,4 +1147,262 @@ describe('ClientBillingService (#25 + H8b)', () => {
       expect(sealArg.data).toEqual({ billedCycleId: 'cyc1' });
     });
   });
+
+  // ── #63 — IVA en facturación ─────────────────────────────────────────────
+  //
+  // Tres cosas se prueban acá y las tres son de plata:
+  //   1. La emisión estampa el IVA del cliente y `totalAmount` cambia SOLO en EXCLUDED.
+  //   2. Preview y emisión dan el MISMO `tax` para el mismo corte (la función es una sola).
+  //   3. La NC hereda el IVA de la FACTURA, no del cliente de hoy. ← el test que justifica el spec.
+  describe('IVA (#63)', () => {
+    /** Cliente con IVA: `assertClient` lo lee y viaja hasta el preview y la emisión. */
+    function conIvaDelCliente(taxRate: string | null, taxMode: string | null) {
+      prisma.client.findFirst.mockResolvedValue({
+        id: CLIENT,
+        organizationId: ORG,
+        currency: 'PYG',
+        taxRate: taxRate != null ? new Prisma.Decimal(taxRate) : null,
+        taxMode,
+      } as never);
+    }
+
+    /** Mismo stub de emisión que `closeCycle`, con el subtotal de soporte parametrizable. */
+    function stubEmision(sum: string) {
+      prisma.clientBillingCycle.findMany.mockResolvedValue([] as never);
+      prisma.hoursTransaction.findMany
+        .mockResolvedValueOnce([] as never) // sinTarifa
+        .mockResolvedValueOnce([] as never) // sinFecha
+        .mockResolvedValueOnce([{ id: 'h1', workedOn: new Date(Date.UTC(2026, 6, 10)) }] as never)
+        .mockResolvedValue([] as never);
+      tx.clientBillingCycle.count.mockResolvedValue(0 as never);
+      tx.clientBillingCycle.create.mockResolvedValue({ id: 'cyc1' } as never);
+      tx.hoursTransaction.updateMany.mockResolvedValue({ count: 1 } as never);
+      tx.hoursTransaction.aggregate.mockResolvedValue({
+        _sum: { priceAmount: new Prisma.Decimal(sum), hours: 5 },
+      } as never);
+      tx.clientBillingCycle.update.mockResolvedValue(makeCycle() as never);
+    }
+
+    /** Fila facturable cruda para el preview (mismo shape que `candidatos`). */
+    function stubPreview(price: string) {
+      prisma.clientBillingCycle.findMany.mockResolvedValue([] as never);
+      prisma.hoursTransaction.findMany
+        .mockResolvedValueOnce([] as never)
+        .mockResolvedValueOnce([] as never)
+        .mockResolvedValueOnce([makeRow({ id: 'h1', type: 'USAGE', taskType: 'SUPPORT', price })] as never)
+        .mockResolvedValue([] as never);
+    }
+
+    describe('emisión (T3)', () => {
+      it('EXCLUDED: estampa los cuatro campos y el TOTAL SUBE 10% — único punto donde cambia', async () => {
+        conIvaDelCliente('0.1000', 'EXCLUDED');
+        stubEmision('1000000');
+
+        const res = await service.closeCycle(ORG, CLIENT, '2026-07', {}, USER);
+
+        const snap = tx.clientBillingCycle.update.mock.calls[0][0].data as Record<string, any>;
+        expect(snap.netAmount.toString()).toBe('1000000');
+        expect(snap.taxAmount.toString()).toBe('100000');
+        expect(snap.totalAmount.toString()).toBe('1100000'); // ← el único total que cambia de valor
+        expect(snap.taxRate.toString()).toBe('0.1');
+        expect(snap.taxMode).toBe('EXCLUDED');
+        // La invariante del schema, verificada sobre lo que realmente se guarda.
+        expect(snap.netAmount.plus(snap.taxAmount).toString()).toBe(snap.totalAmount.toString());
+        expect(res.totalAmount).toBe('1100000');
+      });
+
+      it('INCLUDED: el total NO se mueve (idéntico al de hoy) y el IVA queda desglosado', async () => {
+        conIvaDelCliente('0.1000', 'INCLUDED');
+        stubEmision('1000000');
+
+        await service.closeCycle(ORG, CLIENT, '2026-07', {}, USER);
+
+        const snap = tx.clientBillingCycle.update.mock.calls[0][0].data as Record<string, any>;
+        expect(snap.totalAmount.toString()).toBe('1000000'); // NO-REGRESIÓN
+        expect(snap.netAmount.toString()).toBe('909090.91');
+        expect(snap.taxAmount.toString()).toBe('90909.09');
+        expect(snap.netAmount.plus(snap.taxAmount).toString()).toBe(snap.totalAmount.toString());
+      });
+
+      it('cliente SIN IVA: los cuatro campos en null y el total idéntico al de antes de #63', async () => {
+        conIvaDelCliente(null, null);
+        stubEmision('1000000');
+
+        await service.closeCycle(ORG, CLIENT, '2026-07', {}, USER);
+
+        const snap = tx.clientBillingCycle.update.mock.calls[0][0].data as Record<string, any>;
+        expect(snap.totalAmount.toString()).toBe('1000000');
+        expect(snap.taxRate).toBeNull();
+        expect(snap.taxMode).toBeNull();
+        expect(snap.netAmount).toBeNull();
+        expect(snap.taxAmount).toBeNull();
+      });
+
+      it('el IVA se aplica sobre soporte + VARIABLES ya convertidas (base foldeada, R2.4)', async () => {
+        conIvaDelCliente('0.1000', 'EXCLUDED');
+        stubEmision('1000000');
+        tx.clientBillingStatement.updateMany.mockResolvedValue({ count: 1 } as never);
+        variables.collectCommercial.mockResolvedValue({
+          lines: [{ label: 'SESSIONS', commercialValue: 100 }], subtotalUsd: 100, contributingPeriods: ['2026-07'],
+        } as never);
+
+        // 100 USD × 7000 = 700.000 Gs → base = 1.000.000 + 700.000 = 1.700.000 → IVA 170.000.
+        await service.closeCycle(ORG, CLIENT, '2026-07', { exchangeRate: 7000 }, USER);
+
+        const snap = tx.clientBillingCycle.update.mock.calls[0][0].data as Record<string, any>;
+        expect(snap.netAmount.toString()).toBe('1700000'); // primero USD→PYG, DESPUÉS el IVA
+        expect(snap.taxAmount.toString()).toBe('170000');
+        expect(snap.totalAmount.toString()).toBe('1870000');
+      });
+    });
+
+    describe('preview (T4)', () => {
+      it('devuelve net/tax/taxRate/taxMode y un total que YA trae el IVA en EXCLUDED', async () => {
+        conIvaDelCliente('0.1000', 'EXCLUDED');
+        stubPreview('1000000');
+
+        const res = await service.previewCycle(ORG, CLIENT, { mode: 'MES', period: '2026-07' });
+
+        expect(res.net).toBe('1000000');
+        expect(res.tax).toBe('100000');
+        expect(res.total).toBe('1100000'); // el admin ve el +10% ANTES de emitir
+        expect(res.taxMode).toBe('EXCLUDED');
+      });
+
+      it('sin IVA el preview queda exactamente como en #60 (los cuatro en null)', async () => {
+        conIvaDelCliente(null, null);
+        stubPreview('1000000');
+
+        const res = await service.previewCycle(ORG, CLIENT, { mode: 'MES', period: '2026-07' });
+
+        expect(res.total).toBe('1000000');
+        expect(res.net).toBeNull();
+        expect(res.tax).toBeNull();
+        expect(res.taxRate).toBeNull();
+        expect(res.taxMode).toBeNull();
+      });
+
+      it('PREVIEW Y EMISIÓN DAN EL MISMO tax PARA EL MISMO CORTE (una sola implementación, R7.1)', async () => {
+        // Base que no divide exacto a propósito: si preview y emisión tuvieran cada uno su cuenta,
+        // acá es donde se separarían en el redondeo.
+        conIvaDelCliente('0.1000', 'INCLUDED');
+        stubPreview('333333.33');
+        const preview = await service.previewCycle(ORG, CLIENT, { mode: 'MES', period: '2026-07' });
+
+        jest.clearAllMocks();
+        conIvaDelCliente('0.1000', 'INCLUDED');
+        stubEmision('333333.33');
+        await service.closeCycle(ORG, CLIENT, '2026-07', {}, USER);
+        const snap = tx.clientBillingCycle.update.mock.calls[0][0].data as Record<string, any>;
+
+        expect(preview.tax).toBe(snap.taxAmount.toString());
+        expect(preview.net).toBe(snap.netAmount.toString());
+        expect(preview.total).toBe(snap.totalAmount.toString());
+      });
+    });
+
+    // ⚠️ EL TEST QUE JUSTIFICA EL SPEC (T5 / R5).
+    describe('nota de crédito — hereda de la FACTURA, jamás del cliente de hoy', () => {
+      beforeEach(() => {
+        prisma.creditNoteLine.findMany.mockResolvedValue([] as never); // ninguna línea acreditada antes
+        tx.creditNote.count.mockResolvedValue(0 as never);
+        tx.creditNoteLine.create.mockResolvedValue({} as never);
+        tx.hoursTransaction.create.mockResolvedValue({} as never);
+        tx.creditNote.create.mockResolvedValue({
+          id: 'nc1', totalAmount: new Prisma.Decimal('-110'), totalHours: -2,
+          netAmount: new Prisma.Decimal('-100'), taxAmount: new Prisma.Decimal('-10'),
+        } as never);
+      });
+
+      function original(price: string) {
+        return {
+          id: 'o1', type: 'USAGE', hours: 2, taskId: 'task-o1', note: 'n',
+          priceAmount: new Prisma.Decimal(price), priceRate: new Prisma.Decimal('50'),
+          priceCurrency: 'PYG', workedOn: new Date(Date.UTC(2026, 6, 10)), task: { title: 'Task o1' },
+        };
+      }
+
+      it('USA EL IVA DE LA FACTURA AUNQUE AL CLIENTE YA LE CAMBIARON EL MODO', async () => {
+        // La factura se emitió con EXCLUDED 10% …
+        prisma.clientBillingCycle.findFirst.mockResolvedValue(
+          makeCycle({
+            status: 'SENT',
+            taxRate: new Prisma.Decimal('0.1000'),
+            taxMode: 'EXCLUDED',
+            netAmount: new Prisma.Decimal('1000000'),
+            taxAmount: new Prisma.Decimal('100000'),
+            totalAmount: new Prisma.Decimal('1100000'),
+          }) as never,
+        );
+        // … y DESPUÉS al cliente le cambiaron el modo (y hasta la tasa).
+        conIvaDelCliente('0.0500', 'INCLUDED');
+        prisma.hoursTransaction.findMany.mockResolvedValueOnce([original('100')] as never);
+
+        await service.emitCreditNote(ORG, CLIENT, 'cyc1', { lineIds: ['o1'], reason: 'motivo' }, USER);
+
+        const nc = tx.creditNote.create.mock.calls[0][0].data as Record<string, any>;
+        // Con el modo VIEJO (EXCLUDED 10%): neto 100 + IVA 10 = 110, todo NEGADO.
+        expect(nc.taxMode).toBe('EXCLUDED'); // ← NO 'INCLUDED' (el del cliente de hoy)
+        expect(nc.taxRate.toString()).toBe('0.1'); // ← NO 0.05
+        expect(nc.netAmount.toString()).toBe('-100');
+        expect(nc.taxAmount.toString()).toBe('-10');
+        expect(nc.totalAmount.toString()).toBe('-110');
+        // Si algún día alguien escribe `client.taxRate` acá, este cálculo daría -100 / -4,76 / -100.
+      });
+
+      it('PROPORCIONAL: recalcula con el rate de la factura sobre el subtotal acreditado (no prorratea)', async () => {
+        // Factura de 1.000.000 + IVA; se acredita UNA línea de 333.333,33.
+        prisma.clientBillingCycle.findFirst.mockResolvedValue(
+          makeCycle({
+            status: 'PAID',
+            taxRate: new Prisma.Decimal('0.1000'),
+            taxMode: 'EXCLUDED',
+            netAmount: new Prisma.Decimal('1000000'),
+            taxAmount: new Prisma.Decimal('100000'),
+          }) as never,
+        );
+        conIvaDelCliente('0.1000', 'EXCLUDED');
+        prisma.hoursTransaction.findMany.mockResolvedValueOnce([original('333333.33')] as never);
+
+        await service.emitCreditNote(ORG, CLIENT, 'cyc1', { lineIds: ['o1'], reason: 'motivo' }, USER);
+
+        const nc = tx.creditNote.create.mock.calls[0][0].data as Record<string, any>;
+        expect(nc.netAmount.toString()).toBe('-333333.33');
+        expect(nc.taxAmount.toString()).toBe('-33333.33'); // round(333333,33 × 0,1)
+        expect(nc.totalAmount.toString()).toBe('-366666.66');
+        // Y sigue cerrando: net + tax = total, con los tres negativos.
+        expect(nc.netAmount.plus(nc.taxAmount).toString()).toBe(nc.totalAmount.toString());
+      });
+
+      it('factura original SIN IVA → la NC tampoco lo lleva, aunque el cliente HOY sí tenga', async () => {
+        prisma.clientBillingCycle.findFirst.mockResolvedValue(makeCycle({ status: 'SENT' }) as never); // sin IVA
+        conIvaDelCliente('0.1000', 'EXCLUDED'); // el cliente lo prendió después
+        prisma.hoursTransaction.findMany.mockResolvedValueOnce([original('100')] as never);
+
+        await service.emitCreditNote(ORG, CLIENT, 'cyc1', { lineIds: ['o1'], reason: 'motivo' }, USER);
+
+        const nc = tx.creditNote.create.mock.calls[0][0].data as Record<string, any>;
+        expect(nc.taxRate).toBeNull();
+        expect(nc.taxMode).toBeNull();
+        expect(nc.netAmount).toBeNull();
+        expect(nc.taxAmount).toBeNull();
+        expect(nc.totalAmount.toString()).toBe('-100'); // exactamente como antes de #63
+      });
+
+      it('el preview de la NC usa el MISMO criterio que la emisión (mismo IVA de la factura)', async () => {
+        prisma.clientBillingCycle.findFirst.mockResolvedValue(
+          makeCycle({ status: 'SENT', taxRate: new Prisma.Decimal('0.1000'), taxMode: 'EXCLUDED' }) as never,
+        );
+        conIvaDelCliente('0.0500', 'INCLUDED'); // el cliente cambió: la NC lo ignora
+        prisma.hoursTransaction.findMany.mockResolvedValueOnce([original('100')] as never);
+
+        const res = await service.previewCreditNote(ORG, CLIENT, 'cyc1', { lineIds: ['o1'], reason: 'x' });
+
+        expect(res.taxMode).toBe('EXCLUDED');
+        expect(res.netAmount).toBe('-100');
+        expect(res.taxAmount).toBe('-10');
+        expect(res.totalAmount).toBe('-110');
+      });
+    });
+  });
 });
