@@ -1142,6 +1142,9 @@ export class PortalService {
           status: true,
           cancelReason: true,
           cancelledAt: true,
+          // #63: el modo ESTAMPADO en cada factura → su etiqueta en el listado. Sale del ciclo,
+          //   nunca del cliente: acá conviven facturas de distintas épocas y distintos modos.
+          taxMode: true,
         },
       }),
       this.prisma.creditNote.findMany({
@@ -1155,6 +1158,7 @@ export class PortalService {
           currency: true,
           issuedAt: true,
           appliesTo: { select: { invoiceNumber: true } },
+          taxMode: true, // #63: heredado de la factura acreditada
         },
       }),
     ]);
@@ -1170,6 +1174,7 @@ export class PortalService {
         totalHours: n.totalHours,
         currency: n.currency,
         issuedAt: n.issuedAt,
+        taxMode: n.taxMode, // #63
       })),
     };
   }
@@ -1220,8 +1225,36 @@ export class PortalService {
   async getMyInvoiceDetail(userId: string, cycleId: string) {
     const client = await this.getClientByUserId(userId);
     const cycle = await this.prisma.clientBillingCycle.findFirst({
-      where: { id: cycleId, clientId: client.id, status: { in: ['SENT', 'PAID'] } },
-      select: { invoiceNumber: true, currency: true, totalAmount: true, variablesBilling: true },
+      // #63: la factura ahora tiene PÁGINA PROPIA (`/portal/billing/<id>`), así que el detalle
+      //   pasa a la MISMA regla de visibilidad que el listado (`invoice-visibility.util`, #61) en
+      //   vez de `SENT`/`PAID` a secas. Antes, una anulada se listaba pero su detalle daba 404 y
+      //   el acordeón mostraba "No se pudo cargar el detalle": ahora abre y muestra su banda
+      //   ANULADA con el motivo, que es lo que el cliente necesita ver. Un DRAFT sigue sin existir.
+      where: { id: cycleId, clientId: client.id, ...PORTAL_VISIBLE_INVOICE_WHERE },
+      select: {
+        id: true,
+        invoiceNumber: true,
+        kind: true,
+        periodStart: true,
+        periodEnd: true,
+        cutoffDate: true,
+        status: true,
+        totalHours: true,
+        totalAmount: true,
+        currency: true,
+        sentAt: true,
+        paidAt: true,
+        cancelReason: true,
+        cancelledAt: true,
+        variablesBilling: true,
+        // #63: el IVA ESTAMPADO en ESTA factura. Acá sí van los montos (a diferencia de
+        //   `getMyHours`, que sólo necesita el modo para etiquetar): esta pantalla ES la factura y
+        //   tiene que desglosar lo que el cliente pagó. Nada se recalcula — todo sale del ciclo.
+        taxRate: true,
+        taxMode: true,
+        netAmount: true,
+        taxAmount: true,
+      },
     });
     if (!cycle) {
       throw new AppException('Factura no encontrada', 'INVOICE_NOT_FOUND', 404);
@@ -1256,8 +1289,30 @@ export class PortalService {
       .toString();
     const totalHoras = txs.reduce((s, t) => s + t.hours, 0);
 
+    // #63: las NC emitidas sobre ESTA factura. Antes vivían en el listado (`getMyInvoices`) y la
+    //   página de la factura no las tenía; con página propia, el documento tiene que mostrar
+    //   completo lo que se le cobró Y lo que se le devolvió, sin volver a la lista.
+    const creditNotes = await this.prisma.creditNote.findMany({
+      where: { appliesToCycleId: cycle.id, clientId: client.id },
+      orderBy: { issuedAt: 'desc' },
+      // `select` mínimo (#55): el `reason` es texto del staff y NO se le manda al cliente.
+      select: { id: true, number: true, totalAmount: true, totalHours: true, issuedAt: true, taxMode: true },
+    });
+
     return {
+      id: cycle.id,
       invoiceNumber: cycle.invoiceNumber,
+      kind: cycle.kind,
+      periodStart: cycle.periodStart,
+      periodEnd: cycle.periodEnd,
+      cutoffDate: cycle.cutoffDate,
+      status: cycle.status,
+      sentAt: cycle.sentAt,
+      paidAt: cycle.paidAt,
+      // Una anulada se abre y muestra su motivo (antes daba 404). `cancelReason` lo escribe el
+      // staff sabiendo que es el motivo del documento; es lo mismo que ya muestra el listado.
+      cancelReason: cycle.cancelReason,
+      cancelledAt: cycle.cancelledAt,
       currency: cycle.currency, // Gs (PYG)
       consumo,
       fee,
@@ -1266,7 +1321,21 @@ export class PortalService {
       tiempo,
       subtotalTiempo,
       totalHoras,
-      total: cycle.totalAmount.toString(), // gran total facturado (Soporte + Variables), Gs
+      total: cycle.totalAmount.toString(), // gran total facturado (Soporte + Variables + IVA), Gs
+      // #63: desglose estampado. Los cuatro en null = factura emitida sin IVA → la página no
+      //   dibuja ninguna línea de impuesto y queda como antes de #63.
+      taxRate: cycle.taxRate?.toString() ?? null,
+      taxMode: cycle.taxMode,
+      netAmount: cycle.netAmount?.toString() ?? null,
+      taxAmount: cycle.taxAmount?.toString() ?? null,
+      creditNotes: creditNotes.map((n) => ({
+        id: n.id,
+        number: n.number,
+        totalAmount: n.totalAmount.toString(), // ya NEGATIVO
+        totalHours: n.totalHours,
+        issuedAt: n.issuedAt,
+        taxMode: n.taxMode, // heredado de esta misma factura
+      })),
     };
   }
 

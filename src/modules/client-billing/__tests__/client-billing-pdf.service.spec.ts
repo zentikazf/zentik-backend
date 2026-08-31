@@ -257,6 +257,19 @@ describe('ClientBillingPdfService (#39 H8e)', () => {
       expect(model.totalMonto).toBe(fmtMoney('1000000', 'PYG')); // 1.000.000
     });
 
+    it('la LEYENDA distingue los dos modos (las tres líneas se dibujan igual en ambos)', () => {
+      const leyendaDe = (taxMode: string) =>
+        buildInvoiceModel({
+          cycle: makeCycle({ taxRate: '0.1000', taxMode, netAmount: '100', taxAmount: '10' }),
+          ...comunes,
+        }).ivaLeyenda;
+
+      expect(leyendaDe('INCLUDED')).toBe('Los importes de las líneas ya incluyen IVA 10%.');
+      expect(leyendaDe('EXCLUDED')).toBe('Los importes de las líneas no incluyen IVA. Se suma 10% al total.');
+      // Sin IVA no hay leyenda: el PDF queda idéntico al de antes de #63.
+      expect(buildInvoiceModel({ cycle: makeCycle(), ...comunes }).ivaLeyenda).toBeNull();
+    });
+
     it('la etiqueta soporta tasas no enteras (5%, 10,5%)', () => {
       const conTasa = (rate: string) =>
         buildInvoiceModel({
