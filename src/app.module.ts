@@ -28,7 +28,6 @@ import { ChatModule } from './modules/chat/chat.module';
 import { NotificationModule } from './modules/notification/notification.module';
 import { NotificationPushModule } from './modules/notification-push/notification-push.module';
 import { FileModule } from './modules/file/file.module';
-import { BillingModule } from './modules/billing/billing.module';
 import { ReportModule } from './modules/report/report.module';
 import { CalendarModule } from './modules/calendar/calendar.module';
 import { AuditModule } from './modules/audit/audit.module';
@@ -88,7 +87,6 @@ import { SlaModule } from './modules/sla/sla.module';
     NotificationModule,
     NotificationPushModule,
     FileModule,
-    BillingModule,
     ReportModule,
     CalendarModule,
     AuditModule,

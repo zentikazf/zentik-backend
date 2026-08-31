@@ -258,7 +258,6 @@ export class ProjectService {
             tasks: true,
             boards: true,
             sprints: true,
-            invoices: true,
             suggestions: true,
           },
         },

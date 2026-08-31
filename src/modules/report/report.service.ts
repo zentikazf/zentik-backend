@@ -170,27 +170,12 @@ export class ReportService {
         project_id: string;
         project_name: string;
         total_hours: number;
-        total_invoiced: number;
-        total_paid: number;
       }[]
     >`
       SELECT
         p.id AS project_id,
         p.name AS project_name,
-        COALESCE(SUM(te.duration) / 60.0, 0) AS total_hours,
-        COALESCE((
-          SELECT SUM(i.total) FROM invoices i
-          WHERE i.project_id = p.id
-            AND i.issue_date >= ${range.startDate}
-            AND i.issue_date <= ${range.endDate}
-        ), 0) AS total_invoiced,
-        COALESCE((
-          SELECT SUM(i.total) FROM invoices i
-          WHERE i.project_id = p.id
-            AND i.status = 'PAID'
-            AND i.paid_at >= ${range.startDate}
-            AND i.paid_at <= ${range.endDate}
-        ), 0) AS total_paid
+        COALESCE(SUM(te.duration) / 60.0, 0) AS total_hours
       FROM projects p
       LEFT JOIN tasks t ON p.id = t.project_id
       LEFT JOIN time_entries te ON t.id = te.task_id
@@ -198,7 +183,7 @@ export class ReportService {
         AND te.start_time <= ${range.endDate}
       WHERE p.organization_id = ${orgId}
       GROUP BY p.id, p.name
-      ORDER BY total_invoiced DESC
+      ORDER BY total_hours DESC
     `;
 
     return {
@@ -206,8 +191,6 @@ export class ReportService {
         projectId: row.project_id,
         projectName: row.project_name,
         totalHours: parseFloat(Number(row.total_hours).toFixed(2)),
-        totalInvoiced: parseFloat(Number(row.total_invoiced).toFixed(2)),
-        totalPaid: parseFloat(Number(row.total_paid).toFixed(2)),
       })),
       period: range,
     };

@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Patch, Body, Param, UseGuards, Query } from '@nestjs/common';
+import { Controller, Get, Post, Body, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { AuthGuard } from '@modules/auth/guards/auth.guard';
 import { RolesGuard } from '@modules/auth/guards/roles.guard';
@@ -57,11 +57,5 @@ export class SubscriptionController {
   @ApiOperation({ summary: 'Get usage statistics' })
   getUsage(@CurrentUser() user: any) {
     return this.usageTrackingService.getUsage(user.organizationId);
-  }
-
-  @Get('invoices')
-  @ApiOperation({ summary: 'List invoices' })
-  getInvoices(@CurrentUser() user: any, @Query('page') page?: number) {
-    return this.subscriptionService.getInvoices(user.organizationId, page);
   }
 }
