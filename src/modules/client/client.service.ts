@@ -921,6 +921,45 @@ export class ClientService {
       return;
     }
 
+    // ── #65 T7 (B2.2) — un REFUND no se borra a mano ────────────────────────────────────────
+    //
+    // Un REFUND no es un movimiento que alguien cargue: lo fabrica `hours.listener` cuando se
+    // revierte una carga de tiempo, y nace ATADO a dos efectos que el borrado no puede deshacer
+    // solo. Al crearse (hours.listener.ts:116-152) el listener hace TRES cosas en una
+    // transacción: inserta el REFUND, TOMBSTONEA el cargo original, y baja `usedHours` o
+    // `loanedHours` según el tipo de ese cargo.
+    //
+    // Borrar el REFUND deshace UNA de las tres. Las otras dos quedan como estaban: el cargo
+    // original sigue tombstoneado —o sea fuera del pool facturable para siempre, porque no
+    // existe endpoint que lo reviva— y el cupo sigue devuelto. Por eso la decisión del dueño es
+    // prohibirlo en vez de intentar una reversa parcial que deja el ledger a medio camino.
+    //
+    // Los dos casos llevan código propio a propósito: dicen cosas distintas y se arreglan
+    // distinto.
+    if (tx.type === 'REFUND') {
+      if (tx.reversesTransactionId) {
+        throw new AppException(
+          'Un REFUND lo genera el sistema al revertir una carga y no se elimina a mano. Si la ' +
+            'reversión fue un error, volvé a aprobar o a cargar el tiempo en la tarea: eso emite ' +
+            'un cargo nuevo y limpio.',
+          'REFUND_NOT_DELETABLE',
+          409,
+          { transactionId, reversesTransactionId: tx.reversesTransactionId },
+        );
+      }
+      // Sin `reversesTransactionId` (REFUND legacy, anterior a H9a) no hay forma de saber si el
+      // cargo que revirtió era USAGE o LOAN, así que tampoco hay forma de saber qué contador
+      // tocaría el borrado. Fallar explícito es la única salida honesta: adivinar acá es
+      // exactamente el bug que este bloque vino a matar, sólo que en el otro contador (B2.1).
+      throw new AppException(
+        'Este REFUND es anterior al registro de reversas y no se puede eliminar: no hay forma de ' +
+          'saber qué cargo revirtió, y por lo tanto qué horas habría que devolver.',
+        'REFUND_ORPHAN_NOT_DELETABLE',
+        409,
+        { transactionId },
+      );
+    }
+
     await this.prisma.$transaction(async (prisma) => {
       // Soft-delete the transaction
       await prisma.hoursTransaction.update({
@@ -928,27 +967,79 @@ export class ClientService {
         data: { deletedAt: new Date(), deletedById, deleteReason: reason },
       });
 
-      // Reverse the effect on client counters
-      if (tx.type === 'PURCHASE') {
-        await prisma.client.update({
-          where: { id: clientId },
-          data: { contractedHours: { decrement: tx.hours } },
-        });
-      } else if (tx.type === 'USAGE') {
-        await prisma.client.update({
-          where: { id: clientId },
-          data: { usedHours: { decrement: tx.hours } },
-        });
-      } else if (tx.type === 'LOAN') {
-        await prisma.client.update({
-          where: { id: clientId },
-          data: { loanedHours: { decrement: tx.hours } },
-        });
-      } else if (tx.type === 'REFUND') {
-        await prisma.client.update({
-          where: { id: clientId },
-          data: { contractedHours: { decrement: tx.hours } },
-        });
+      // ── #65 T9 (B3) — reversa de contadores, un caso por CADA type del enum ────────────────
+      //
+      // Antes era una cadena `if/else if` sin cierre, y ahí vivía el bug: la rama REFUND
+      // decrementaba `contractedHours`, un contador que crear un REFUND NUNCA incrementó
+      // (hours.listener.ts:142-152 sólo baja usedHours/loanedHours). Le restaba al cliente horas
+      // COMPRADAS, en la misma dirección que la creación en vez de revertirla. La causa probable
+      // está en client.service.ts:19, donde el filtro de la UI agrupa `ACUMULADAS: ['PURCHASE',
+      // 'REFUND']`: alguien leyó "el REFUND suma cupo, como un PURCHASE" y copió su reversa.
+      //
+      // La tabla que queda fija, verificada contra los 5 únicos sitios de creación del repo:
+      //
+      //   type      | al CREAR mueve                            | al BORRAR
+      //   ----------|-------------------------------------------|--------------------------------
+      //   PURCHASE  | contractedHours +h   (addHours :833)      | contractedHours −h
+      //   USAGE     | usedHours       +h   (recordHours :1257)  | usedHours       −h
+      //   LOAN      | loanedHours     +h   (recordHours :1252)  | loanedHours     −h
+      //   REFUND    | usedHours|loanedHours −h  (listener :145) | PROHIBIDO (guard de arriba)
+      //   INTERNAL  | NADA                 (recordHours :1179)  | NADA
+      //
+      // INTERNAL no tiene rama porque es CORRECTO que no la tenga, no porque falte: su creación
+      // no toca ningún contador (es tiempo no facturable, se registra sólo para trazabilidad),
+      // así que la reversa de un contador que nunca movió sería regalarle cupo al cliente. Va
+      // como `case` vacío y explícito para que se lea como decisión y no como olvido — que es
+      // justo la ambigüedad que dejó pasar el bug del REFUND.
+      //
+      // El `default` es el candado: `type` es un String libre en el schema, no un enum de
+      // Postgres (schema.prisma:1571). Si mañana alguien agrega un tipo nuevo y se olvida de
+      // esta tabla, hoy caería en el else implícito y se soft-detearía EN SILENCIO, dejando los
+      // contadores desincronizados sin que nadie se entere. Ahora falla ruidoso y la transacción
+      // se revierte entera.
+      switch (tx.type) {
+        case 'PURCHASE':
+          await prisma.client.update({
+            where: { id: clientId },
+            data: { contractedHours: { decrement: tx.hours } },
+          });
+          break;
+
+        case 'USAGE':
+          await prisma.client.update({
+            where: { id: clientId },
+            data: { usedHours: { decrement: tx.hours } },
+          });
+          break;
+
+        case 'LOAN':
+          await prisma.client.update({
+            where: { id: clientId },
+            data: { loanedHours: { decrement: tx.hours } },
+          });
+          break;
+
+        case 'INTERNAL':
+          // Nació sin mover contadores. Se borra sin moverlos. Simétrico.
+          break;
+
+        case 'REFUND':
+          // Inalcanzable: el guard de arriba corta antes. Queda como fail-safe por si alguien
+          // lo saca — no tocar nada es siempre menos dañino que tocar el contador equivocado.
+          throw new AppException(
+            'Un REFUND no se elimina a mano.',
+            'REFUND_NOT_DELETABLE',
+            409,
+            { transactionId },
+          );
+
+        default:
+          throw new AppException(
+            `Tipo de movimiento desconocido: no se sabe qué contador revertir (${tx.type}).`,
+            'UNKNOWN_TRANSACTION_TYPE',
+            500,
+            { transactionId, type: tx.type },
+          );
       }
     });
 
