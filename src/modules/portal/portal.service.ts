@@ -837,7 +837,7 @@ export class PortalService {
       deletedAt: null,
     } satisfies Prisma.HoursTransactionWhereInput;
 
-    const [recentTransactions, sumsByCycle, cycles] = await Promise.all([
+    const [recentTransactions, sumsByCycle, creditedByCycle, cycles] = await Promise.all([
       // (1) La VENTANA QUE SE PINTA: los últimos 100 movimientos. No alcanza para los totales
       //     —ver (2)—, pero es lo que la pantalla lista.
       this.prisma.hoursTransaction.findMany({
@@ -917,6 +917,35 @@ export class PortalService {
         _sum: { priceAmount: true, hours: true },
       }),
 
+      // (2-bis) #65 A3 — CUÁNTO DE CADA CICLO YA SE ACREDITÓ.
+      //
+      // El bug que cierra: el cliente veía el mismo trabajo sumado dos veces en su propia
+      // pantalla de facturación. Al emitir una nota de crédito, la fila ORIGINAL conserva su
+      // `billedCycleId` (la factura es un snapshot inmutable, client-billing.service.ts:1470)
+      // así que sigue cayendo en Facturado/Cobrado; y la fila ESPEJO nace con `billedCycleId`
+      // null, así que cae en Pendiente. El `totalAmount` negativo de la NC no se restaba en
+      // ningún lado. Resultado: 2× el importe y 2× las horas por un trabajo que se hizo una vez.
+      //
+      // Mismo eje y misma forma que (2) para que entre en el mismo loop de clasificación.
+      // El predicado es `creditedByLine`, la relación 1:1 con `CreditNoteLine`
+      // (schema.prisma:1620), que es la ÚNICA fuente de verdad de "esta fila fue acreditada":
+      // deducirlo desde la existencia de la espejo da dos falsos negativos (la espejo es
+      // opcional y además borrable), que fue el hallazgo de #55.
+      //
+      // Por qué RESTAR y no excluir del `where` de (2): excluyéndolas, la plata acreditada
+      // desaparecería sin dejar rastro y el detalle de la factura dejaría de cuadrar con el PDF
+      // que el cliente ya tiene. Restando, el importe acreditado se expone aparte
+      // (`creditedAmount`) y la card puede explicar su propio número.
+      //
+      // El `@unique` de `creditedTransactionId` (schema.prisma:1777) garantiza que el LEFT JOIN
+      // no abanique filas: el `_sum` no se puede inflar. Y la fila espejo no entra por accidente
+      // — nace sin `CreditNoteLine` propia.
+      this.prisma.hoursTransaction.groupBy({
+        by: ['billedCycleId'],
+        where: { ...consumedByClient, priceAmount: { not: null }, creditedByLine: { isNot: null } },
+        _sum: { priceAmount: true, hours: true },
+      }),
+
       // (3) Los ciclos del cliente, para saber EN QUÉ ESTADO cayó cada estampado. Va en el mismo
       //     `Promise.all` que las otras dos —no depende del resultado de ninguna—, así que las
       //     tres salen en un solo viaje y no hay un round-trip por movimiento.
@@ -961,9 +990,18 @@ export class PortalService {
      *    movimientos al anular, así que vuelven solos a pendiente), pero si un día llega por
      *    deriva de datos, "todavía no te lo facturamos" es la lectura correcta y la segura.
      *  - un estado futuro que nadie enseñó a clasificar → pendiente antes que cobrado.
+     *
+     * #65 A1.4: `WRITTEN_OFF` (cerrada sin cobro) se clasifica EXPLÍCITAMENTE como INVOICED, y
+     * no por el fail-safe de abajo. Si cayera en PENDING, cerrar una factura le movería plata al
+     * cliente desde "Facturado" de vuelta a "Pendiente de facturar": le estaríamos diciendo que
+     * un trabajo ya facturado volvió a estar sin facturar, por una decisión interna nuestra.
+     * INVOICED es lo literalmente cierto (se facturó y no se cobró) y además es el bucket donde
+     * la factura ya estaba viniendo de SENT — o sea que el cierre no le cambia nada al cliente,
+     * que es exactamente lo correcto. Tampoco va a PAID: no entró plata, y ése es el punto
+     * entero de que este estado exista.
      */
     const stateOf = (cycle: { status: string } | undefined): 'PENDING' | 'INVOICED' | 'PAID' => {
-      if (cycle?.status === 'SENT') return 'INVOICED';
+      if (cycle?.status === 'SENT' || cycle?.status === 'WRITTEN_OFF') return 'INVOICED';
       if (cycle?.status === 'PAID') return 'PAID';
       return 'PENDING';
     };
@@ -989,6 +1027,10 @@ export class PortalService {
         hours: number;
         amount: string;
         taxMode: string | null; // #63: el estampado de ESTA factura (null = se emitió sin IVA)
+        // #65 A3: cuánto de esta factura ya se acreditó. Los campos `amount` y `hours` de
+        // arriba vienen NETOS de esto; estos dos dicen de cuánto fue el descuento.
+        creditedAmount: string;
+        creditedHours: number;
       }>
     > = { INVOICED: [], PAID: [] };
 
@@ -999,10 +1041,37 @@ export class PortalService {
     // muestra sin gate. Mismo criterio de defensa en profundidad que `getMyVariables`.
     const canSeeInvoices = client.portalBillingEnabled === true;
 
+    // #65 A3: lo acreditado por ciclo, indexado igual que los buckets para restarlo en el loop.
+    // La clave `null` (movimientos sin facturar) también existe y es legítima: un movimiento sin
+    // `billedCycleId` no puede estar acreditado —una NC sólo se emite sobre líneas facturadas—,
+    // así que en la práctica ese balde queda en cero, pero el índice no lo asume.
+    const creditedOf = new Map(
+      creditedByCycle.map((g) => [
+        g.billedCycleId,
+        {
+          // `new Prisma.Decimal(...)` y no el valor crudo: el driver puede entregar el agregado
+          // como string, y `.minus()` de abajo necesita un Decimal de verdad. El constructor
+          // acepta las dos formas, así que normalizar acá es la defensa barata.
+          amount: new Prisma.Decimal(g._sum.priceAmount ?? 0),
+          hours: g._sum.hours ?? 0,
+        },
+      ]),
+    );
+
     for (const group of sumsByCycle) {
       const cycle = cycleOf(group.billedCycleId);
       const state = stateOf(cycle);
-      const amount = group._sum.priceAmount ?? new Prisma.Decimal(0);
+      const credited = creditedOf.get(group.billedCycleId) ?? {
+        amount: new Prisma.Decimal(0),
+        hours: 0,
+      };
+
+      // Bruto de la factura y lo que de eso ya se acreditó. El neto es lo que el cliente debe (o
+      // pagó) DE VERDAD por estas horas; el bruto se sigue exponiendo para que la card pueda
+      // mostrar el descuento en vez de un número que aparece achicado sin explicación.
+      const grossAmount = new Prisma.Decimal(group._sum.priceAmount ?? 0);
+      const grossHours = group._sum.hours ?? 0;
+      const amount = grossAmount.minus(credited.amount);
       totals[state] = totals[state].plus(amount);
 
       // ⚠️ La regla de "qué factura puede ver el cliente" NO se reescribe acá: se importa de
@@ -1027,8 +1096,15 @@ export class PortalService {
         // documento: es lo que hace que las filas SUMEN la card que las contiene. Difieren del
         // total de la factura sólo cuando ésta además cobra Variables (#23), que no son horas y
         // tienen su propia pantalla; el gran total se ve al abrir la factura.
-        hours: group._sum.hours ?? 0,
+        // #65 A3: netos de lo acreditado, para que la fila SUME la card que la contiene — si el
+        // total se netea y el desglose no, la card no cuadra con su propio detalle.
+        hours: grossHours - credited.hours,
         amount: amount.toString(),
+        // …y el crédito aparte, para que la UI pueda decir POR QUÉ el número es más chico que la
+        // factura que el cliente tiene en la mano. Sin esto el importe simplemente aparece
+        // achicado y el cliente no puede conciliar contra su PDF.
+        creditedAmount: credited.amount.toString(),
+        creditedHours: credited.hours,
         // #63 — Sale del CICLO, no del cliente. Un cliente que cambió de modo tiene facturas viejas
         // con otro (o sin ninguno), y leer el del cliente les pondría una etiqueta que nunca tuvieron.
         taxMode: cycle.taxMode,
@@ -1148,7 +1224,10 @@ export class PortalService {
         },
       }),
       this.prisma.creditNote.findMany({
-        where: { clientId: client.id, appliesTo: { status: { in: ['SENT', 'PAID'] } } }, // NC de facturas que el cliente ve
+        // #65 A1.4: WRITTEN_OFF va en la lista. Sin él, cerrar una factura sin cobro le borra
+        // del portal las notas de crédito que el cliente ya tenía — y son justamente el motivo
+        // por el que esa factura se cerró.
+        where: { clientId: client.id, appliesTo: { status: { in: ['SENT', 'PAID', 'WRITTEN_OFF'] } } },
         orderBy: { issuedAt: 'desc' },
         select: {
           id: true,
@@ -1350,7 +1429,7 @@ export class PortalService {
       where: {
         id: cycleId,
         clientId: client.id,
-        status: { in: ['SENT', 'PAID'] },
+        status: { in: ['SENT', 'PAID', 'WRITTEN_OFF'] }, // #65 A1.4: ya la recibió, se la puede bajar
       },
       select: { id: true, organizationId: true },
     });
@@ -1374,7 +1453,7 @@ export class PortalService {
   async downloadMyCreditNote(userId: string, creditNoteId: string, res: Response): Promise<void> {
     const client = await this.getClientByUserId(userId);
     const nc = await this.prisma.creditNote.findFirst({
-      where: { id: creditNoteId, clientId: client.id, appliesTo: { status: { in: ['SENT', 'PAID'] } } },
+      where: { id: creditNoteId, clientId: client.id, appliesTo: { status: { in: ['SENT', 'PAID', 'WRITTEN_OFF'] } } }, // #65 A1.4
       select: { id: true, organizationId: true },
     });
     if (!nc) throw new AppException('Nota de crédito no encontrada', 'CREDIT_NOTE_NOT_FOUND', 404);

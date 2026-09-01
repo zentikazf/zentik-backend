@@ -99,6 +99,13 @@ export interface InvoiceModel {
   subtotalMonto: string | null;
   ivaLabel: string | null; // 'IVA (10%)'
   ivaMonto: string | null;
+  // #65 A1.2 — SALDO. Van JUNTOS y sólo cuando la factura tiene notas de crédito: con `null` el
+  //   bloque de totales queda exactamente como antes de #65. Igual que el IVA, llegan
+  //   PRE-FORMATEADOS: el render dibuja, no formatea plata.
+  //   Sin esto, el PDF que el cliente descarga —y reenvía a su contador— seguiría diciendo
+  //   "TOTAL 1.100.000" sobre una factura que ya se le acreditó entera.
+  creditadoMonto: string | null; // ya viene NEGATIVO
+  saldoMonto: string | null;
   // ⚠️ NO va acá la frase explicativa del modo ("los importes ya incluyen IVA…"). Decisión del
   // dueño: el PDF es el documento formal y no lleva textos didácticos — sólo las tres cifras. Esa
   // explicación vive en las pantallas (`taxLegend` del front, portal y admin), donde el cliente
@@ -224,6 +231,15 @@ export function buildInvoiceModel(input: {
     //   `cycle.totalAmount` — lo que el cliente paga — y con IVA se cumple `subtotal + IVA = TOTAL`
     //   por construcción (ver `computeTax`), así que las tres líneas del PDF cierran solas.
     ...buildTaxLines(cycle.taxRate, cycle.netAmount, cycle.taxAmount, currency),
+    // #65 A1.2: sólo si la factura tiene NC. Se decide por `creditNoteCount` y NO por
+    //   `creditedTotal !== '0'`: el redondeo del IVA puede dejar un crédito de exactamente 0 y una
+    //   factura con NC igual tiene que mostrar su saldo.
+    ...(cycle.creditNoteCount > 0
+      ? {
+          creditadoMonto: fmtMoney(cycle.creditedTotal, currency),
+          saldoMonto: fmtMoney(cycle.balance, currency),
+        }
+      : { creditadoMonto: null, saldoMonto: null }),
     currency,
   };
 }
@@ -329,6 +345,9 @@ export function buildCreditNoteModel(input: CreditNoteModelInput): InvoiceModel 
     totalMonto: fmtMoney(creditNote.totalAmount.toString(), currency), // ya NEGATIVO
     // #63: mismo bloque de tres líneas que la factura, con los montos ya negativos de la tabla. La NC
     //   hereda el IVA de la factura acreditada, así que su PDF desglosa exactamente lo que se devuelve.
+    // #65: el saldo es de la FACTURA. Una NC es el documento del credito y no tiene saldo propio.
+    creditadoMonto: null,
+    saldoMonto: null,
     ...buildTaxLines(
       creditNote.taxRate?.toString() ?? null,
       creditNote.netAmount?.toString() ?? null,
@@ -623,7 +642,12 @@ export class ClientBillingPdfService {
     //   —o pisar el pie— justo en la parte del documento que el cliente mira primero (R6.5). Se suman
     //   los 26pt del pie para que nunca quede colgado solo en la hoja siguiente.
     const conIva = model.subtotalMonto != null && model.ivaMonto != null;
-    ensureSpace((conIva ? 34 + 2 * 16 : 34) + 26);
+    // #65 A1.2: dos líneas más cuando hay notas de crédito (Notas de crédito / SALDO). La reserva
+    //   de espacio es aritmética manual por línea, así que agregar líneas SIN tocarla dejaría el
+    //   bloque partido entre páginas o pisando el pie — justo la parte del documento que el
+    //   cliente mira primero (R6.5).
+    const conSaldo = model.creditadoMonto != null && model.saldoMonto != null;
+    ensureSpace((conIva ? 34 + 2 * 16 : 34) + (conSaldo ? 2 * 16 + 8 : 0) + 26);
     doc.moveTo(LEFT, doc.y).lineTo(RIGHT, doc.y).lineWidth(1).strokeColor(INK).stroke();
     doc.y += 8;
 
@@ -644,10 +668,40 @@ export class ClientBillingPdfService {
 
     const ty = doc.y;
     doc.font('Helvetica-Bold').fontSize(11).fillColor(INK);
-    doc.text('TOTAL', COL.concepto.x, ty, { width: 200, lineBreak: false });
+    // Con saldo, esta línea deja de ser "lo que el cliente paga" y pasa a ser el total emitido:
+    // la que manda abajo es SALDO. Por eso cambia de rótulo, o dos líneas en negrita dirían cosas
+    // distintas con el mismo peso.
+    doc.text(conSaldo ? 'TOTAL FACTURA' : 'TOTAL', COL.concepto.x, ty, { width: 200, lineBreak: false });
     doc.text(model.totalHoras, COL.horas.x, ty, { width: COL.horas.w, align: 'right', lineBreak: false });
     doc.text(model.totalMonto, COL.monto.x, ty, { width: COL.monto.w, align: 'right', lineBreak: false });
     doc.y = ty + 22;
+
+    // ── #65 A1.2: Notas de crédito + SALDO ──
+    if (conSaldo) {
+      const cy = doc.y;
+      doc.font('Helvetica').fontSize(10).fillColor(MUTED);
+      doc.text('Notas de crédito', COL.concepto.x, cy, { width: 200, lineBreak: false });
+      doc.text(model.creditadoMonto!, COL.monto.x, cy, {
+        width: COL.monto.w,
+        align: 'right',
+        lineBreak: false,
+      });
+      doc.y = cy + 16;
+
+      // Regla fina antes del saldo: es el número que cierra el documento.
+      doc.moveTo(COL.concepto.x, doc.y).lineTo(RIGHT, doc.y).lineWidth(0.5).strokeColor(MUTED).stroke();
+      doc.y += 6;
+
+      const sy = doc.y;
+      doc.font('Helvetica-Bold').fontSize(11).fillColor(INK);
+      doc.text('SALDO', COL.concepto.x, sy, { width: 200, lineBreak: false });
+      doc.text(model.saldoMonto!, COL.monto.x, sy, {
+        width: COL.monto.w,
+        align: 'right',
+        lineBreak: false,
+      });
+      doc.y = sy + 22;
+    }
 
     // ── Pie ──
     doc

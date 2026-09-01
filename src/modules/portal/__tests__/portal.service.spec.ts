@@ -10,6 +10,28 @@ import { ClientBillingPdfService } from '../../client-billing/client-billing-pdf
 import { PORTAL_VISIBLE_INVOICE_WHERE } from '../invoice-visibility.util';
 
 /**
+ * #65 A3 — `getMyHours` hace DOS `hoursTransaction.groupBy` sobre el mismo eje:
+ *   (2)     el BRUTO por ciclo, y
+ *   (2-bis) el ACREDITADO por ciclo, que es el mismo query más `creditedByLine: { isNot: null }`.
+ *
+ * Con un `mockResolvedValue` plano los dos devuelven lo MISMO, así que el service resta el bruto
+ * de sí mismo y todos los buckets dan cero. Este helper discrimina por el `where`, que es
+ * exactamente lo que los distingue en producción.
+ *
+ * Por defecto `credited` es `[]` — o sea "ningún movimiento acreditado" —, que es el escenario de
+ * la enorme mayoría de los casos y deja el comportamiento previo intacto. Los casos que prueban
+ * el neteo pasan el tercer argumento.
+ */
+function mockGroupBy(
+  prisma: DeepMockProxy<PrismaService>,
+  sums: unknown,
+  credited: unknown[] = [],
+): void {
+  prisma.hoursTransaction.groupBy.mockImplementation(((args: { where?: Record<string, unknown> }) =>
+    Promise.resolve(args?.where?.creditedByLine ? credited : sums)) as never);
+}
+
+/**
  * H8f — getMyInvoices: scoping del portal. Prisma MOCKEADO (jest-mock-extended), NUNCA toca
  * DATABASE_URL (prod). GATE-1: el cliente ve SENT/PAID/CANCELLED de SU cliente; nunca DRAFT.
  */
@@ -103,7 +125,9 @@ describe('PortalService.getMyInvoices (H8f)', () => {
     // solo las NC de facturas SENT/PAID (nunca DRAFT/CANCELLED).
     const ncArg = prisma.creditNote.findMany.mock.calls[0][0] as any;
     expect(ncArg.where.clientId).toBe(CLIENT);
-    expect(ncArg.where.appliesTo.status.in).toEqual(['SENT', 'PAID']);
+    // #65 A1.4: WRITTEN_OFF entra en la lista. Cerrar una factura sin cobro no puede borrarle al
+    // cliente las notas de crédito que ya tenía — y son justamente el motivo del cierre.
+    expect(ncArg.where.appliesTo.status.in).toEqual(['SENT', 'PAID', 'WRITTEN_OFF']);
   });
 
   it('sin NC devuelve creditNotes vacío y las FAC en invoices', async () => {
@@ -214,7 +238,7 @@ describe('PortalService.getMyHours — acreditado por nota de crédito (#55)', (
     } as never);
     // #62 — getMyHours resuelve los tres buckets con dos consultas mas (agregado por ciclo +
     // estado de los ciclos del cliente). Default vacio: sin ciclos, todo cae en PENDIENTE.
-    prisma.hoursTransaction.groupBy.mockResolvedValue([] as never);
+    mockGroupBy(prisma, [] as never);
     prisma.clientBillingCycle.findMany.mockResolvedValue([] as never);
   });
 
@@ -288,7 +312,7 @@ describe('PortalService.getMyHours — acreditado por nota de crédito (#55)', (
       },
     ] as never);
     // #62 — el KPI ya no se suma sobre la ventana de 100 filas: sale del agregado por ciclo.
-    prisma.hoursTransaction.groupBy.mockResolvedValue([
+    mockGroupBy(prisma, [
       { billedCycleId: null, _sum: { priceAmount: '300000', hours: 3 } },
     ] as never);
 
@@ -382,7 +406,7 @@ describe('PortalService.getMyHours — el payload no filtra plomería interna (#
     } as never);
     // #62 — getMyHours resuelve los tres buckets con dos consultas mas (agregado por ciclo +
     // estado de los ciclos del cliente). Default vacio: sin ciclos, todo cae en PENDIENTE.
-    prisma.hoursTransaction.groupBy.mockResolvedValue([] as never);
+    mockGroupBy(prisma, [] as never);
     prisma.clientBillingCycle.findMany.mockResolvedValue([] as never);
   });
 
@@ -564,14 +588,152 @@ describe('PortalService.getMyHours — los tres estados de facturación (#62)', 
       portalBillingEnabled: true, // el detalle de las cards se lista (ver el test del gate)
     } as never);
     prisma.hoursTransaction.findMany.mockResolvedValue([] as never);
-    prisma.hoursTransaction.groupBy.mockResolvedValue([] as never);
+    mockGroupBy(prisma, [] as never);
     prisma.clientBillingCycle.findMany.mockResolvedValue([] as never);
+  });
+
+  // ── #65 A3/T13 — la hora acreditada no se cuenta dos veces ──────────────────
+  //
+  // La brecha que dejó la suite verde: #55 probó que una fila acreditada expone su
+  // `creditNoteNumber`, y #62 probó los tres buckets — pero NINGÚN test montó una NC y miró los
+  // BUCKETS. Por eso el doble conteo convivía con 1159 tests en verde. Es el patrón de
+  // `feedback_flag_off_path_testing`: la suite certificando el camino que nadie recorrió.
+
+  it('EL TEST QUE FALTABA: original acreditada + espejo → el trabajo se cuenta UNA vez', async () => {
+    // El escenario real: 5h por Gs. 500.000 facturadas en FAC-cyc-sent, después acreditadas por
+    // una NC que devolvió las horas al pool. Quedan DOS filas vivas:
+    //   · la ORIGINAL, que conserva billedCycleId = cyc-sent  → cae en Facturado
+    //   · la ESPEJO,   que nace con billedCycleId = null      → cae en Pendiente
+    // Antes de #65 el cliente veía Gs. 1.000.000 y 10h por un trabajo de Gs. 500.000 y 5h.
+    mockGroupBy(
+      prisma,
+      [grupo('cyc-sent', '500000', 5), grupo(null, '500000', 5)] as never,
+      [grupo('cyc-sent', '500000', 5)] as never, // esas mismas 5h están acreditadas
+    );
+    prisma.clientBillingCycle.findMany.mockResolvedValue([
+      ciclo('cyc-sent', 'SENT', { sentAt: new Date('2026-08-01T00:00:00Z') }),
+    ] as never);
+
+    const res = await service.getMyHours('user-1');
+
+    // Facturado queda en cero: esa plata ya se le devolvió.
+    expect(res.billing!.invoiced.amount).toBe('0');
+    // Pendiente conserva la espejo: es deuda VIVA, se va a re-facturar.
+    expect(res.billing!.pending.amount).toBe('500000');
+    // Y el total de la pantalla es el trabajo real, no el doble.
+    const total =
+      Number(res.billing!.pending.amount) +
+      Number(res.billing!.invoiced.amount) +
+      Number(res.billing!.paid.amount);
+    expect(total).toBe(500000);
+  });
+
+  it('una NC PARCIAL resta sólo su parte', async () => {
+    mockGroupBy(
+      prisma,
+      [grupo('cyc-sent', '500000', 5)] as never,
+      [grupo('cyc-sent', '200000', 2)] as never,
+    );
+    prisma.clientBillingCycle.findMany.mockResolvedValue([
+      ciclo('cyc-sent', 'SENT', { sentAt: new Date('2026-08-01T00:00:00Z') }),
+    ] as never);
+
+    const res = await service.getMyHours('user-1');
+
+    expect(res.billing!.invoiced.amount).toBe('300000');
+  });
+
+  it('también se netea en COBRADO: una factura PAID con NC no sigue contando entera', async () => {
+    mockGroupBy(
+      prisma,
+      [grupo('cyc-paid', '800000', 8)] as never,
+      [grupo('cyc-paid', '800000', 8)] as never,
+    );
+    prisma.clientBillingCycle.findMany.mockResolvedValue([
+      ciclo('cyc-paid', 'PAID', {
+        sentAt: new Date('2026-08-01T00:00:00Z'),
+        paidAt: new Date('2026-08-05T00:00:00Z'),
+      }),
+    ] as never);
+
+    const res = await service.getMyHours('user-1');
+
+    expect(res.billing!.paid.amount).toBe('0');
+  });
+
+  it('la card CUADRA con su propio desglose: la factura listada trae el neto y el crédito aparte', async () => {
+    // Si el total se netea y la factura del desplegable no, la card no suma sus propias filas.
+    mockGroupBy(
+      prisma,
+      [grupo('cyc-sent', '500000', 5)] as never,
+      [grupo('cyc-sent', '200000', 2)] as never,
+    );
+    prisma.clientBillingCycle.findMany.mockResolvedValue([
+      ciclo('cyc-sent', 'SENT', { sentAt: new Date('2026-08-01T00:00:00Z') }),
+    ] as never);
+
+    const res = await service.getMyHours('user-1');
+
+    const fac = res.billing!.invoiced.invoices[0];
+    expect(fac.amount).toBe('300000'); // neto, igual que la card
+    expect(fac.hours).toBe(3);
+    expect(fac.creditedAmount).toBe('200000'); // …y el porqué del descuento
+    expect(fac.creditedHours).toBe(2);
+    expect(res.billing!.invoiced.amount).toBe(fac.amount);
+  });
+
+  it('sin ninguna NC nada cambia: los números son exactamente los de #62', async () => {
+    // No regresión: el neteo no puede mover un solo peso cuando no hay nada acreditado.
+    mockGroupBy(prisma, [grupo('cyc-sent', '4000000', 4)] as never, [] as never);
+    prisma.clientBillingCycle.findMany.mockResolvedValue([
+      ciclo('cyc-sent', 'SENT', { sentAt: new Date('2026-08-01T00:00:00Z') }),
+    ] as never);
+
+    const res = await service.getMyHours('user-1');
+
+    expect(res.billing!.invoiced.amount).toBe('4000000');
+    expect(res.billing!.invoiced.invoices[0].creditedAmount).toBe('0');
+    expect(res.billing!.invoiced.invoices[0].creditedHours).toBe(0);
+  });
+
+  it('el groupBy del acreditado filtra por creditedByLine, que es la única fuente de verdad', async () => {
+    // Deducir "acreditada" desde la existencia de la fila espejo da dos falsos negativos: la
+    // espejo es opcional (NC sin devolución de horas) y además borrable. Fue el hallazgo de #55.
+    mockGroupBy(prisma, [] as never, [] as never);
+    prisma.clientBillingCycle.findMany.mockResolvedValue([] as never);
+
+    await service.getMyHours('user-1');
+
+    const wheres = prisma.hoursTransaction.groupBy.mock.calls.map(
+      (c) => (c[0] as { where: Record<string, unknown> }).where,
+    );
+    expect(wheres.some((w) => w.creditedByLine != null)).toBe(true);
+    // Y el otro groupBy NO filtra por eso: si filtrara, el bruto ya vendría neteado y la resta
+    // sería doble.
+    expect(wheres.filter((w) => w.creditedByLine == null)).toHaveLength(1);
+  });
+
+  it('WRITTEN_OFF cuenta como FACTURADO, no vuelve a Pendiente (#65 A1.4)', async () => {
+    // Sin la rama explícita en `stateOf`, el fail-safe la mandaría a PENDING: cerrar una factura
+    // le movería plata al cliente de "Facturado" de vuelta a "Pendiente de facturar".
+    mockGroupBy(prisma, [grupo('cyc-wo', '900000', 9)] as never, [] as never);
+    prisma.clientBillingCycle.findMany.mockResolvedValue([
+      ciclo('cyc-wo', 'WRITTEN_OFF', { sentAt: new Date('2026-08-01T00:00:00Z') }),
+    ] as never);
+
+    const res = await service.getMyHours('user-1');
+
+    expect(res.billing!.invoiced.amount).toBe('900000');
+    expect(res.billing!.pending.amount).toBe('0');
+    expect(res.billing!.paid.amount).toBe('0');
+    // Y la sigue viendo listada: el cliente recibió ese documento.
+    expect(res.billing!.invoiced.invoices.map((i) => i.id)).toContain('cyc-wo');
   });
 
   // ── Clasificación ───────────────────────────────────────────────────────────
 
   it('R0 — horas estampadas en un BORRADOR cuentan como PENDIENTE (el bug que motivó #62)', async () => {
-    prisma.hoursTransaction.groupBy.mockResolvedValue([grupo('cyc-draft', '4000000')] as never);
+    mockGroupBy(prisma, [grupo('cyc-draft', '4000000')] as never);
     prisma.clientBillingCycle.findMany.mockResolvedValue([ciclo('cyc-draft', 'DRAFT')] as never);
     prisma.hoursTransaction.findMany.mockResolvedValue([mov('tx-1', 'cyc-draft')] as never);
 
@@ -589,7 +751,7 @@ describe('PortalService.getMyHours — los tres estados de facturación (#62)', 
   });
 
   it('R2 — SENT cae en FACTURADO y PAID en COBRADO', async () => {
-    prisma.hoursTransaction.groupBy.mockResolvedValue([
+    mockGroupBy(prisma, [
       grupo('cyc-sent', '3100000'),
       grupo('cyc-paid', '12000000'),
     ] as never);
@@ -615,7 +777,7 @@ describe('PortalService.getMyHours — los tres estados de facturación (#62)', 
   });
 
   it('R2 — los tres buckets conviven y cada peso cae en exactamente uno', async () => {
-    prisma.hoursTransaction.groupBy.mockResolvedValue([
+    mockGroupBy(prisma, [
       grupo(null, '2400000'), // nunca facturado
       grupo('cyc-draft', '4000000'), // borrador → también pendiente
       grupo('cyc-sent', '3100000'),
@@ -635,7 +797,7 @@ describe('PortalService.getMyHours — los tres estados de facturación (#62)', 
   });
 
   it('R4.1 — `totalAmount` sobrevive con el mismo nombre y tipo, y vale exactamente el bucket PENDIENTE', async () => {
-    prisma.hoursTransaction.groupBy.mockResolvedValue([
+    mockGroupBy(prisma, [
       grupo(null, '2400000'),
       grupo('cyc-draft', '4000000'),
       grupo('cyc-paid', '12000000'),
@@ -658,7 +820,7 @@ describe('PortalService.getMyHours — los tres estados de facturación (#62)', 
     // (probado en client-billing.service.spec: "reopenCycle"), así que vuelven sueltos.
     // Vía de respaldo: si por deriva de datos un movimiento quedara apuntando a un ciclo
     // CANCELLED, tampoco puede leerse como facturado.
-    prisma.hoursTransaction.groupBy.mockResolvedValue([
+    mockGroupBy(prisma, [
       grupo(null, '3100000'), // liberado por la anulación
       grupo('cyc-cancel', '500000'), // huérfano apuntando a un ciclo anulado
     ] as never);
@@ -679,7 +841,7 @@ describe('PortalService.getMyHours — los tres estados de facturación (#62)', 
   });
 
   it('un ciclo que no existe en el mapa (puntero colgado) cae en PENDIENTE, nunca en cobrado', async () => {
-    prisma.hoursTransaction.groupBy.mockResolvedValue([grupo('cyc-fantasma', '900000')] as never);
+    mockGroupBy(prisma, [grupo('cyc-fantasma', '900000')] as never);
     prisma.clientBillingCycle.findMany.mockResolvedValue([] as never);
 
     const res = await service.getMyHours('user-1');
@@ -691,7 +853,7 @@ describe('PortalService.getMyHours — los tres estados de facturación (#62)', 
   // ── Detalle de las cards ────────────────────────────────────────────────────
 
   it('R3.1/R3.2 — COBRADO lista sus facturas con número, período, fecha de pago, importe e id para enlazar', async () => {
-    prisma.hoursTransaction.groupBy.mockResolvedValue([grupo('cyc-paid', '12000000', 24)] as never);
+    mockGroupBy(prisma, [grupo('cyc-paid', '12000000', 24)] as never);
     prisma.clientBillingCycle.findMany.mockResolvedValue([
       ciclo('cyc-paid', 'PAID', {
         sentAt: new Date('2026-07-01T12:00:00Z'),
@@ -713,7 +875,7 @@ describe('PortalService.getMyHours — los tres estados de facturación (#62)', 
   });
 
   it('R3.4 — FACTURADO también es navegable, y su fecha es la de ENVÍO (todavía no hay pago)', async () => {
-    prisma.hoursTransaction.groupBy.mockResolvedValue([grupo('cyc-sent', '3100000', 6)] as never);
+    mockGroupBy(prisma, [grupo('cyc-sent', '3100000', 6)] as never);
     prisma.clientBillingCycle.findMany.mockResolvedValue([
       ciclo('cyc-sent', 'SENT', { sentAt: new Date('2026-08-01T12:00:00Z') }),
     ] as never);
@@ -729,7 +891,7 @@ describe('PortalService.getMyHours — los tres estados de facturación (#62)', 
   });
 
   it('R3.3 — el detalle NO lista borradores ni anulados-nunca-enviados (filtro de visibilidad de #61)', async () => {
-    prisma.hoursTransaction.groupBy.mockResolvedValue([
+    mockGroupBy(prisma, [
       grupo('cyc-draft', '4000000'),
       grupo('cyc-descartado', '700000'), // CANCELLED con sentAt null = borrador descartado
       grupo('cyc-paid', '12000000'),
@@ -750,7 +912,7 @@ describe('PortalService.getMyHours — los tres estados de facturación (#62)', 
   });
 
   it('ordena las facturas de cada card por período, más reciente primero', async () => {
-    prisma.hoursTransaction.groupBy.mockResolvedValue([
+    mockGroupBy(prisma, [
       grupo('cyc-jun', '1000000'),
       grupo('cyc-ago', '3000000'),
       grupo('cyc-jul', '2000000'),
@@ -785,7 +947,7 @@ describe('PortalService.getMyHours — los tres estados de facturación (#62)', 
       supportHourlyRate: null,
       portalBillingEnabled: false,
     } as never);
-    prisma.hoursTransaction.groupBy.mockResolvedValue([grupo('cyc-paid', '12000000')] as never);
+    mockGroupBy(prisma, [grupo('cyc-paid', '12000000')] as never);
     prisma.clientBillingCycle.findMany.mockResolvedValue([
       ciclo('cyc-paid', 'PAID', { sentAt: new Date('2026-07-01T12:00:00Z'), paidAt: new Date('2026-07-10T12:00:00Z') }),
     ] as never);
@@ -803,7 +965,7 @@ describe('PortalService.getMyHours — los tres estados de facturación (#62)', 
     // Lo COBRADO es lo VIEJO: es lo primero que se cae de un `take: 100` ordenado por createdAt
     // desc. Con la lista vacía, los buckets tienen que seguir siendo correctos.
     prisma.hoursTransaction.findMany.mockResolvedValue([] as never);
-    prisma.hoursTransaction.groupBy.mockResolvedValue([grupo('cyc-paid', '12000000')] as never);
+    mockGroupBy(prisma, [grupo('cyc-paid', '12000000')] as never);
     prisma.clientBillingCycle.findMany.mockResolvedValue([
       ciclo('cyc-paid', 'PAID', { sentAt: new Date('2026-07-01T12:00:00Z'), paidAt: new Date('2026-07-10T12:00:00Z') }),
     ] as never);
@@ -850,7 +1012,7 @@ describe('PortalService.getMyHours — los tres estados de facturación (#62)', 
   });
 
   it('#55 — `status` y `sentAt` se usan para clasificar pero no viajan crudos en el payload', async () => {
-    prisma.hoursTransaction.groupBy.mockResolvedValue([grupo('cyc-draft', '4000000')] as never);
+    mockGroupBy(prisma, [grupo('cyc-draft', '4000000')] as never);
     prisma.clientBillingCycle.findMany.mockResolvedValue([ciclo('cyc-draft', 'DRAFT')] as never);
     prisma.hoursTransaction.findMany.mockResolvedValue([mov('tx-1', 'cyc-draft')] as never);
 
@@ -884,7 +1046,7 @@ describe('PortalService.getMyHours — los tres estados de facturación (#62)', 
     it('EL TEST DE LA SECCIÓN: dos facturas con modos distintos → CADA UNA muestra el suyo, y la que se emitió sin IVA no muestra ninguno', async () => {
       // El cliente cambió a INCLUDED en algún momento; sus facturas viejas conservan lo suyo.
       clienteConModo('INCLUDED');
-      prisma.hoursTransaction.groupBy.mockResolvedValue([
+      mockGroupBy(prisma, [
         grupo('cyc-vieja', '1000000'),
         grupo('cyc-nueva', '2000000'),
         grupo('cyc-preiva', '3000000'),
@@ -905,7 +1067,7 @@ describe('PortalService.getMyHours — los tres estados de facturación (#62)', 
 
     it('Pendiente lleva el modo ACTUAL DEL CLIENTE (todavía no hay ningún documento emitido)', async () => {
       clienteConModo('EXCLUDED');
-      prisma.hoursTransaction.groupBy.mockResolvedValue([grupo(null, '4000000')] as never);
+      mockGroupBy(prisma, [grupo(null, '4000000')] as never);
 
       const res = await service.getMyHours('user-1');
 
@@ -915,7 +1077,7 @@ describe('PortalService.getMyHours — los tres estados de facturación (#62)', 
 
     it('cliente sin IVA → Pendiente sin modo: la pantalla queda idéntica a como la dejó #62', async () => {
       clienteConModo(null);
-      prisma.hoursTransaction.groupBy.mockResolvedValue([grupo(null, '4000000'), grupo('cyc-1', '1000000')] as never);
+      mockGroupBy(prisma, [grupo(null, '4000000'), grupo('cyc-1', '1000000')] as never);
       prisma.clientBillingCycle.findMany.mockResolvedValue([
         ciclo('cyc-1', 'SENT', { taxMode: null, sentAt: new Date('2026-07-05T12:00:00Z') }),
       ] as never);
@@ -928,7 +1090,7 @@ describe('PortalService.getMyHours — los tres estados de facturación (#62)', 
 
     it('NINGÚN NÚMERO cambia: prender el IVA en el cliente no mueve los tres buckets (R8.1)', async () => {
       const stubs = () => {
-        prisma.hoursTransaction.groupBy.mockResolvedValue([
+        mockGroupBy(prisma, [
           grupo(null, '4000000'),
           grupo('cyc-sent', '1000000'),
           grupo('cyc-paid', '2000000'),

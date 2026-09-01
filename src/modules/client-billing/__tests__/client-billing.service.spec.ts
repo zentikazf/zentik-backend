@@ -73,6 +73,10 @@ describe('ClientBillingService (#25 + H8b)', () => {
       paidAt: null,
       createdAt: new Date('2026-07-31T00:00:00Z'),
       updatedAt: new Date('2026-07-31T00:00:00Z'),
+      // #65 A1.1: los 4 finds del service traen las NC con `include` para calcular el saldo
+      // derivado. Por defecto vacío = factura sin acreditar, que es el estado de casi todos los
+      // casos; los que prueban el saldo lo pisan con `makeCycle({ creditNotes: [...] })`.
+      creditNotes: [] as Array<{ totalAmount: Prisma.Decimal }>,
       ...over,
     };
   }

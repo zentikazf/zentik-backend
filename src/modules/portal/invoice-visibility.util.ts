@@ -38,7 +38,13 @@ export interface InvoiceVisibilityLike {
  * un borrador interno que nunca vio, no — se lo cree.
  */
 export function isPortalVisibleInvoice(cycle: InvoiceVisibilityLike): boolean {
-  if (cycle.status === 'SENT' || cycle.status === 'PAID') return true;
+  // #65 A1.4: `WRITTEN_OFF` es visible sin condición, igual que SENT y PAID. Sólo se llega ahí
+  // desde SENT, o sea que el cliente YA recibió ese documento; que después se cierre sin cobro
+  // es una decisión contable nuestra y no puede hacerle desaparecer una factura que tiene.
+  // (Si no estuviera acá, el fail-closed del final se la escondería en silencio.)
+  if (cycle.status === 'SENT' || cycle.status === 'PAID' || cycle.status === 'WRITTEN_OFF') {
+    return true;
+  }
   return cycle.status === 'CANCELLED' && cycle.sentAt !== null;
 }
 
@@ -52,7 +58,7 @@ export function isPortalVisibleInvoice(cycle: InvoiceVisibilityLike): boolean {
  */
 export const PORTAL_VISIBLE_INVOICE_WHERE = {
   OR: [
-    { status: { in: ['SENT', 'PAID'] } },
+    { status: { in: ['SENT', 'PAID', 'WRITTEN_OFF'] } }, // #65 A1.4
     { status: 'CANCELLED', sentAt: { not: null } },
   ],
 };

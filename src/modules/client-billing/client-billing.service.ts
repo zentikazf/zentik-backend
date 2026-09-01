@@ -17,6 +17,7 @@ import { CloseCycleDto } from './dto/close-cycle.dto';
 import { CreateCreditNoteDto } from './dto/create-credit-note.dto';
 import { PreviewCycleDto } from './dto/preview-cycle.dto';
 import { ReopenCycleDto } from './dto/reopen-cycle.dto';
+import { WriteOffCycleDto } from './dto/write-off-cycle.dto';
 import { UpdateCycleDto } from './dto/update-cycle.dto';
 
 // Zona del negocio (es-PY). Los bordes del período se computan en esta zona y se
@@ -28,9 +29,24 @@ const ASUNCION_TZ = 'America/Asuncion';
 const BILLABLE_TYPES = ['USAGE', 'LOAN'];
 
 // Transiciones válidas de la factura formal (R7).
+//
+// #65 A1.4: `WRITTEN_OFF` ("cerrada sin cobro") sale de SENT igual que PAID, y su vuelta a PAID
+// está permitida a propósito: el caso más común de una incobrable es que el cliente pague tarde,
+// y sin esa salida el cierre sería irreversible (PAID no tiene transición de salida y
+// `reopenCycle` rechaza las cobradas con CYCLE_ALREADY_PAID). Un click equivocado tiene que
+// poder deshacerse sin un UPDATE a mano contra producción.
+//
+// NO lleva migración: `status` es un String libre en el schema (schema.prisma:1657), no un enum
+// de Postgres. Un estado nuevo cuesta una clave acá y un valor en el DTO; ninguna fila existente
+// cambia. Ése fue el argumento para NO reusar `PAID` con `paidAt` en null, que era la otra
+// opción: `status` lo leen ~15 consumidores (el bucket del portal, la visibilidad de facturas,
+// el candado del mes en time-tracking, cinco mapas de badge) y `paidAt` se renderiza en UNO.
+// Con PAID + paidAt null, todos esos consumidores habrían seguido diciéndole "Cobrada" al
+// cliente —y el portal, con `paidAt ?? sentAt`, le habría inventado una fecha de pago—.
 const CYCLE_TRANSITIONS: Record<string, string[]> = {
   DRAFT: ['SENT'],
-  SENT: ['PAID'],
+  SENT: ['PAID', 'WRITTEN_OFF'],
+  WRITTEN_OFF: ['PAID'],
 };
 
 // Cap de reintentos ante colisión del invoice_number (§1.3).
@@ -93,6 +109,25 @@ export interface CycleDto {
   netAmount: string | null;
   taxAmount: string | null;
   currency: string;
+  // ── #65 A1.1: el SALDO de la factura. Los tres son DERIVADOS y no existen como columna ────
+  //   `creditedTotal` = Σ CreditNote.totalAmount del ciclo. Ya viene NEGATIVO de la DB
+  //     (client-billing.service.ts:1538 lo guarda con `.negated()`), así que el saldo se calcula
+  //     SUMANDO. Restarlo duplicaría el crédito.
+  //   `balance` = totalAmount + creditedTotal. Es "cuánto se debe todavía": el número que el
+  //     sistema emitía facturas y notas de crédito sin calcular nunca, dejando que el operador
+  //     lo restara de cabeza mirando un banner.
+  //   `creditNoteCount` = cuántas NC tiene. Es el predicado que la UI necesita para ocultar
+  //     "Anular" (A1.3) y el mismo que usa el guard CYCLE_HAS_CREDIT_NOTES (:1298). Se expone
+  //     como CONTEO y no como `balance === 0`: una factura puede tener NC y saldo distinto de
+  //     cero (crédito parcial), y el redondeo del IVA deja residuales de ±1 Gs. que harían fallar
+  //     una comparación de montos.
+  //
+  // NO se persisten a propósito: una columna se desincroniza con la primera NC que alguien emita
+  // fuera del camino feliz, y entonces el saldo miente sin que nadie lo note. Por eso #65 no
+  // lleva migración.
+  creditedTotal: string;
+  balance: string;
+  creditNoteCount: number;
   notes: string | null;
   closedAt: Date | null;
   sentAt: Date | null;
@@ -437,7 +472,25 @@ export class ClientBillingService {
     cancelledAt: Date | null;
     variablesBilling?: Prisma.JsonValue | null;
     createdAt: Date;
-  }): CycleDto {
+  },
+  // #65 A1.1: las NC del ciclo. OBLIGATORIO y posicional a propósito, no una propiedad opcional
+  // del objeto: así TypeScript rompe en cualquier call site que no lo provea, en vez de devolver
+  // en silencio un saldo igual al total. Para el IVA el patrón `?? null` está bien porque degrada
+  // a "invisible"; para un número de plata, degradar es mentir.
+  creditNotes: Array<{ totalAmount: Prisma.Decimal }>,
+  ): CycleDto {
+    const creditedTotal = creditNotes.reduce(
+      (acc, n) => acc.plus(n.totalAmount),
+      new Prisma.Decimal(0),
+    );
+
+    // Una factura ANULADA liberó sus `billedCycleId` (reopenCycle:1310) y esas horas se
+    // re-facturan en un ciclo nuevo, pero `totalAmount` se queda con el importe viejo. Publicar
+    // ese número como "saldo" haría que sumar los saldos de la lista contara dos veces la misma
+    // plata. Una anulada no debe nada: su saldo es 0.
+    const balance =
+      c.status === 'CANCELLED' ? new Prisma.Decimal(0) : c.totalAmount.plus(creditedTotal);
+
     return {
       id: c.id,
       status: c.status,
@@ -455,6 +508,9 @@ export class ClientBillingService {
       netAmount: c.netAmount?.toString() ?? null,
       taxAmount: c.taxAmount?.toString() ?? null,
       currency: c.currency,
+      creditedTotal: creditedTotal.toString(),
+      balance: balance.toString(),
+      creditNoteCount: creditNotes.length,
       notes: c.notes,
       closedAt: c.closedAt,
       sentAt: c.sentAt,
@@ -584,6 +640,9 @@ export class ClientBillingService {
     const cycles = await this.prisma.clientBillingCycle.findMany({
       where: { clientId, organizationId: orgId, periodStart: { gte: periodStart, lte: periodEnd } },
       orderBy: { createdAt: 'desc' },
+      // #65 A1.1: sólo el monto de cada NC, que es lo único que el saldo necesita. Va por el
+      // índice de `appliesToCycleId` (schema.prisma:1768) y evita el N+1 de pedirlas por ciclo.
+      include: { creditNotes: { select: { totalAmount: true } } },
     });
 
     // #23: Variables (Botmaker) del mes — reemplazan la columna Proyecto/Interno en el builder. Montos
@@ -611,7 +670,7 @@ export class ClientBillingService {
       totalFacturable: subtotalSoporte.toString(),
       currency: client.currency,
       sinFechaTrabajo,
-      cycles: cycles.map((c) => this.toCycleDto(c)),
+      cycles: cycles.map((c) => this.toCycleDto(c, c.creditNotes)),
     };
   }
 
@@ -625,6 +684,7 @@ export class ClientBillingService {
     const cycles = await this.prisma.clientBillingCycle.findMany({
       where: { clientId, organizationId: orgId },
       orderBy: { periodStart: 'desc' },
+      include: { creditNotes: { select: { totalAmount: true } } }, // #65 A1.1
     });
 
     // Filas facturables (todas, estampadas o no) para determinar hasFacturable + remanente.
@@ -673,7 +733,7 @@ export class ClientBillingService {
       ensure(period).variablesUsd = usd; // #23
     }
     for (const c of cycles) {
-      ensure(this.asuncionPeriodKey(c.periodStart)).cycles.push(this.toCycleDto(c));
+      ensure(this.asuncionPeriodKey(c.periodStart)).cycles.push(this.toCycleDto(c, c.creditNotes));
     }
 
     const result = [...months.entries()].map(([period, b]) => {
@@ -721,6 +781,7 @@ export class ClientBillingService {
 
     const cycle = await this.prisma.clientBillingCycle.findFirst({
       where: { id: cycleId, clientId, organizationId: orgId },
+      include: { creditNotes: { select: { totalAmount: true } } }, // #65 A1.1 (alimenta detalle + PDF)
     });
     if (!cycle) {
       throw new AppException('El ciclo no existe', 'CYCLE_NOT_FOUND', 404, { cycleId });
@@ -772,7 +833,7 @@ export class ClientBillingService {
       }));
 
     return {
-      cycle: this.toCycleDto(cycle),
+      cycle: this.toCycleDto(cycle, cycle.creditNotes),
       transactions: lines,
       grupos,
     };
@@ -1256,6 +1317,13 @@ export class ClientBillingService {
       totalHours: result.totalHours,
       movementCount: result.movementCount,
       currency: comp.currency,
+      // #65 A1.1: una factura recién emitida nace en DRAFT y una NC sólo se puede emitir sobre
+      //   SENT o PAID (:1515), así que acá el crédito es 0 por construcción y el saldo es el total.
+      //   Van literales, sin query. Se declaran igual para que este shape no sea el único del
+      //   módulo donde el saldo llega `undefined`.
+      creditedTotal: '0',
+      balance: result.totalAmount.toString(),
+      creditNoteCount: 0,
       // #63: desglose de lo recién emitido (null = sin IVA). Aditivo: ningún consumidor previo se rompe.
       netAmount: result.netAmount?.toString() ?? null,
       taxAmount: result.taxAmount?.toString() ?? null,
@@ -1377,8 +1445,93 @@ export class ClientBillingService {
       throw new AppException('No hay cambios para aplicar', 'NOTHING_TO_UPDATE', 400);
     }
 
-    const updated = await this.prisma.clientBillingCycle.update({ where: { id: cycleId }, data });
-    return this.toCycleDto(updated);
+    const updated = await this.prisma.clientBillingCycle.update({
+      where: { id: cycleId },
+      data,
+      include: { creditNotes: { select: { totalAmount: true } } }, // #65 A1.1
+    });
+    return this.toCycleDto(updated, updated.creditNotes);
+  }
+
+  /**
+   * #65 T12 (A1.4) — cierra una factura SIN COBRO: `SENT → WRITTEN_OFF`, con motivo obligatorio.
+   *
+   * El problema que resuelve: una factura acreditada al 100% por notas de crédito deja al
+   * operador ante tres salidas y las tres mienten. Dejarla en `SENT` la mantiene como cobranza
+   * abierta que nadie va a cobrar, ensuciando el pendiente para siempre. Marcarla `PAID` sella
+   * un `paidAt` de hoy: registra un pago que nunca ocurrió, y encima el portal le muestra al
+   * cliente el badge verde "Cobrada". Anularla devuelve 409 CYCLE_HAS_CREDIT_NOTES, porque
+   * liberar los estampados devolvería por segunda vez una plata que la NC ya devolvió.
+   *
+   * Por eso el cierre sin cobro es un estado propio y no un `PAID` disfrazado: `paidAt` queda
+   * en null porque no hubo pago, y ningún consumidor que lea `status` puede confundirlo con uno.
+   *
+   * NO valida que `balance === 0`: se puede cerrar sin cobro una incobrable con saldo, que es un
+   * caso de negocio legítimo (el cliente no paga y se da de baja la cobranza). Lo que la UI
+   * ofrece con saldo cero es sólo el camino más común, no el único. Lo que sí es obligatorio es
+   * el motivo — sin él, dentro de seis meses nadie sabe por qué esa factura dejó de cobrarse.
+   */
+  async writeOffCycle(
+    orgId: string,
+    clientId: string,
+    cycleId: string,
+    dto: WriteOffCycleDto,
+    user: AuthenticatedUser,
+  ) {
+    await this.assertClient(orgId, clientId);
+
+    const cycle = await this.prisma.clientBillingCycle.findFirst({
+      where: { id: cycleId, clientId, organizationId: orgId },
+      include: { creditNotes: { select: { totalAmount: true } } },
+    });
+    if (!cycle) {
+      throw new AppException('El ciclo no existe', 'CYCLE_NOT_FOUND', 404, { cycleId });
+    }
+
+    this.assertValidCycleTransition(cycle.status, 'WRITTEN_OFF');
+
+    const updated = await this.prisma.clientBillingCycle.update({
+      where: { id: cycleId },
+      data: {
+        status: 'WRITTEN_OFF',
+        // `paidAt` NO se toca: sigue en null. Es el punto entero de esta operación.
+        // El motivo va a `notes` además de a la auditoría porque `notes` es lo único que el
+        // detalle de la factura ya sabe renderizar, y una factura cerrada sin cobro tiene que
+        // poder explicarse sola sin ir a buscar el audit log.
+        notes: cycle.notes
+          ? `${cycle.notes}\n[Cerrada sin cobro] ${dto.reason}`
+          : `[Cerrada sin cobro] ${dto.reason}`,
+      },
+      include: { creditNotes: { select: { totalAmount: true } } },
+    });
+
+    // `updateCycle` no audita (es el único mutador de billing que no lo hace). Acá sí: cerrar
+    // una cobranza sin que entre plata es exactamente la clase de decisión que alguien va a
+    // querer rastrear después.
+    await this.auditService.create({
+      organizationId: orgId,
+      action: 'client.billing.cycle_written_off',
+      resource: 'client',
+      resourceId: clientId,
+      oldData: { cycleId, status: cycle.status },
+      newData: {
+        cycleId,
+        invoiceNumber: cycle.invoiceNumber,
+        status: 'WRITTEN_OFF',
+        reason: dto.reason,
+        totalAmount: cycle.totalAmount.toString(),
+        creditedTotal: cycle.creditNotes
+          .reduce((acc, n) => acc.plus(n.totalAmount), new Prisma.Decimal(0))
+          .toString(),
+        writtenOffBy: user.id,
+      },
+    });
+
+    this.logger.log(
+      `Ciclo ${cycleId} (${cycle.invoiceNumber}) cerrado SIN COBRO por ${user.id}: ${dto.reason}`,
+    );
+
+    return this.toCycleDto(updated, updated.creditNotes);
   }
 
   // ── H9b: Notas de crédito ───────────────────────────────────────────────
@@ -1392,9 +1545,13 @@ export class ClientBillingService {
       where: { id: cycleId, clientId, organizationId: orgId },
     });
     if (!cycle) throw new AppException('El ciclo no existe', 'CYCLE_NOT_FOUND', 404, { cycleId });
-    if (cycle.status !== 'SENT' && cycle.status !== 'PAID') {
+    // #65 A1.4: WRITTEN_OFF también acepta NC. Cerrar sin cobro no impide corregir después: si
+    // una incobrable se cerró y más tarde hay que acreditarla formalmente, la NC sigue siendo el
+    // mecanismo (la anulación no lo es — libera los estampados y devolvería la plata dos veces).
+    // El saldo es derivado, así que se recalcula solo con la NC nueva.
+    if (cycle.status !== 'SENT' && cycle.status !== 'PAID' && cycle.status !== 'WRITTEN_OFF') {
       throw new AppException(
-        'Solo se puede emitir una nota de crédito sobre una factura enviada o cobrada',
+        'Solo se puede emitir una nota de crédito sobre una factura enviada, cobrada o cerrada sin cobro',
         'CREDIT_NOTE_INVALID_INVOICE_STATE',
         409,
         { cycleId, status: cycle.status },
