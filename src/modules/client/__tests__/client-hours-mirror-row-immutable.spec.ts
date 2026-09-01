@@ -5,6 +5,7 @@ import { PrismaService } from '../../../database/prisma.service';
 import { AuditService } from '../../audit/audit.service';
 import { EmailInvitationService } from '../../../infrastructure/email/email-invitation.service';
 import { OnboardingService } from '../../auth/onboarding/onboarding.service';
+import { AppException } from '../../../common/filters/app-exception';
 
 /**
  * #54 — la FILA ESPEJO de una nota de crédito: no se edita, y se borra SIN tocar cupo.
@@ -270,24 +271,140 @@ describe('ClientService — inmutabilidad de la fila espejo de una NC (#54)', ()
     });
   });
 
-  describe('alcance del guard: espejo ≠ linaje de reversa H9a (caso 6)', () => {
-    it('un REFUND con reversesTransactionId (y espejo null) se borra normal, sin MIRROR_ROW_READONLY', async () => {
-      // Si alguien "endurece" el guard a
-      // `tx.rebilledFromTransactionId || tx.reversesTransactionId`, TODOS los REFUND que crea
-      // hours.listener quedan indeleteables en runtime. Este test fija esa frontera.
+  /**
+   * #65 T8 (B1.3) — este bloque AFIRMABA el bug.
+   *
+   * El caso original decía "un REFUND con reversesTransactionId se borra normal" y cerraba
+   * comprobando `contractedHours: { decrement: 2 }`. O sea: la suite estaba verde certificando
+   * que borrar un REFUND le restaba al cliente horas COMPRADAS —un contador que crear un REFUND
+   * nunca incrementó (hours.listener.ts:142-152 sólo baja usedHours/loanedHours)—. El test no
+   * se adaptó al fix: se corrigió, porque lo que afirmaba estaba mal.
+   *
+   * Lo que SÍ era válido de ese caso, y se conserva: los dos campos son DISTINTOS y el guard de
+   * la fila espejo (#54) sigue mirando sólo `rebilledFromTransactionId`. Un REFUND no puede
+   * salir por MIRROR_ROW_READONLY: sale por su guard propio, con su mensaje propio.
+   *
+   * Lo que cambió: el desenlace. Por decisión del dueño (B2.2) un REFUND ya no se borra a mano.
+   * Crearlo tombstonea el cargo original, y como no existe endpoint que lo reviva, borrar el
+   * REFUND dejaría esas horas fuera del pool facturable para siempre.
+   */
+  describe('un REFUND no se borra a mano, y no por ser espejo (caso 6, #65 T7/T8)', () => {
+    it('REFUND con reversesTransactionId → 409 REFUND_NOT_DELETABLE, NO MIRROR_ROW_READONLY', async () => {
       prisma.hoursTransaction.findFirst.mockResolvedValue(
         hoursTx({ type: 'REFUND', reversesTransactionId: 'usage-1', rebilledFromTransactionId: null }) as never,
       );
 
       await expect(
         service.deleteHoursTransaction(ORG, CLIENT, 'h1', 'user-1', 'motivo'),
+      ).rejects.toMatchObject({
+        code: 'REFUND_NOT_DELETABLE',
+        statusCode: 409,
+        details: { transactionId: 'h1', reversesTransactionId: 'usage-1' },
+      });
+    });
+
+    it('REFUND legacy sin reversesTransactionId → 409 REFUND_ORPHAN_NOT_DELETABLE', async () => {
+      // Sin el link no se sabe si el cargo revertido era USAGE o LOAN, así que no se sabe qué
+      // contador tocaría el borrado. Fallar explícito en vez de adivinar (B2.1).
+      prisma.hoursTransaction.findFirst.mockResolvedValue(
+        hoursTx({ type: 'REFUND', reversesTransactionId: null, rebilledFromTransactionId: null }) as never,
+      );
+
+      await expect(
+        service.deleteHoursTransaction(ORG, CLIENT, 'h1', 'user-1', 'motivo'),
+      ).rejects.toMatchObject({
+        code: 'REFUND_ORPHAN_NOT_DELETABLE',
+        statusCode: 409,
+      });
+    });
+
+    it('FAIL-CLOSED: ningún REFUND rechazado escribe nada — ni soft-delete ni contadores', async () => {
+      for (const reversesTransactionId of ['usage-1', null]) {
+        prisma.hoursTransaction.update.mockClear();
+        prisma.$transaction.mockClear();
+        prisma.hoursTransaction.findFirst.mockResolvedValue(
+          hoursTx({ type: 'REFUND', reversesTransactionId, rebilledFromTransactionId: null }) as never,
+        );
+
+        await expect(
+          service.deleteHoursTransaction(ORG, CLIENT, 'h1', 'user-1', 'motivo'),
+        ).rejects.toBeInstanceOf(AppException);
+
+        expect(prisma.$transaction).not.toHaveBeenCalled();
+        expect(prisma.hoursTransaction.update).not.toHaveBeenCalled();
+        expect(tx.client.update).not.toHaveBeenCalled();
+      }
+    });
+
+    it('el guard de espejo sigue sin mirar reversesTransactionId: un USAGE con link se borra normal', async () => {
+      // La frontera que fijaba el caso 6 original sigue viva: son campos distintos. Si alguien
+      // endureciera el guard de #54 a `rebilledFrom || reverses`, este caso se pondría rojo.
+      prisma.hoursTransaction.findFirst.mockResolvedValue(
+        hoursTx({ type: 'USAGE', reversesTransactionId: 'algo-1', rebilledFromTransactionId: null }) as never,
+      );
+
+      await expect(
+        service.deleteHoursTransaction(ORG, CLIENT, 'h1', 'user-1', 'motivo'),
       ).resolves.toBeUndefined();
 
-      // Recorrió el camino normal: $transaction con reversa de contadores.
-      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
       expect(tx.client.update).toHaveBeenCalledWith(
-        expect.objectContaining({ data: { contractedHours: { decrement: 2 } } }),
+        expect.objectContaining({ data: { usedHours: { decrement: 2 } } }),
       );
+    });
+  });
+
+  /**
+   * #65 T9 (B3) — la tabla crear-vs-borrar, ejecutable.
+   *
+   * El bug del REFUND no fue un descuido aislado: fue una rama copiada del tipo equivocado. Este
+   * bloque fija los CINCO tipos del enum para que la próxima copia mal hecha se ponga roja.
+   */
+  describe('reversa de contadores por tipo (#65 T9)', () => {
+    const casos: Array<[string, Record<string, unknown> | null]> = [
+      ['PURCHASE', { contractedHours: { decrement: 2 } }],
+      ['USAGE', { usedHours: { decrement: 2 } }],
+      ['LOAN', { loanedHours: { decrement: 2 } }],
+      // INTERNAL nace sin mover contadores (client.service.ts:1176-1189, tiempo no facturable),
+      // así que borrarlo tampoco los mueve. La AUSENCIA de reversa es la respuesta correcta.
+      ['INTERNAL', null],
+    ];
+
+    it.each(casos)('borrar un %s revierte exactamente su propio contador', async (type, esperado) => {
+      prisma.hoursTransaction.findFirst.mockResolvedValue(hoursTx({ type }) as never);
+
+      await expect(
+        service.deleteHoursTransaction(ORG, CLIENT, 'h1', 'user-1', 'motivo'),
+      ).resolves.toBeUndefined();
+
+      if (esperado === null) {
+        expect(tx.client.update).not.toHaveBeenCalled();
+      } else {
+        expect(tx.client.update).toHaveBeenCalledTimes(1);
+        expect(tx.client.update).toHaveBeenCalledWith(expect.objectContaining({ data: esperado }));
+      }
+    });
+
+    it('NINGÚN tipo toca contractedHours salvo PURCHASE', async () => {
+      for (const type of ['USAGE', 'LOAN', 'INTERNAL']) {
+        tx.client.update.mockClear();
+        prisma.hoursTransaction.findFirst.mockResolvedValue(hoursTx({ type }) as never);
+
+        await service.deleteHoursTransaction(ORG, CLIENT, 'h1', 'user-1', 'motivo');
+
+        for (const call of tx.client.update.mock.calls) {
+          expect(JSON.stringify(call)).not.toContain('contractedHours');
+        }
+      }
+    });
+
+    it('un tipo desconocido NO se borra en silencio: 500 UNKNOWN_TRANSACTION_TYPE', async () => {
+      // `type` es String libre en el schema (schema.prisma:1571). Sin este candado, un tipo nuevo
+      // caería en el else implícito y se soft-detearía dejando los contadores desincronizados.
+      prisma.hoursTransaction.findFirst.mockResolvedValue(hoursTx({ type: 'CORTESIA' }) as never);
+
+      await expect(
+        service.deleteHoursTransaction(ORG, CLIENT, 'h1', 'user-1', 'motivo'),
+      ).rejects.toMatchObject({ code: 'UNKNOWN_TRANSACTION_TYPE' });
     });
   });
 });

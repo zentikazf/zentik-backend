@@ -131,10 +131,6 @@ export class ProjectBudgetService {
       include: {
         client: { select: { id: true, name: true } },
         responsible: { select: { id: true, name: true } },
-        invoices: {
-          where: { status: 'PAID' },
-          select: { total: true },
-        },
         budgetItems: {
           select: {
             id: true,
@@ -165,7 +161,6 @@ export class ProjectBudgetService {
     });
 
     const data = projects.map((p) => {
-      const invoiced = p.invoices.reduce((sum, inv) => sum + Number(inv.total), 0);
       const budgetTotal = p.budgetItems.reduce((sum, bi) => sum + Number(bi.amount), 0);
 
       return {
@@ -179,7 +174,6 @@ export class ProjectBudgetService {
         responsible: p.responsible,
         budget: Number(p.budget ?? 0),
         investment: Number(p.investment ?? 0),
-        invoiced,
         budgetTotal,
         budgetItems: p.budgetItems.map((bi) => ({
           id: bi.id,
@@ -202,7 +196,6 @@ export class ProjectBudgetService {
     const totals = {
       budget: data.reduce((s, d) => s + d.budget, 0),
       investment: data.reduce((s, d) => s + d.investment, 0),
-      invoiced: data.reduce((s, d) => s + d.invoiced, 0),
     };
 
     return { data, totals };

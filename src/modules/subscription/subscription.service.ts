@@ -75,24 +75,4 @@ export class SubscriptionService {
 
     return { message: 'Subscription cancelled successfully' };
   }
-
-  async getInvoices(organizationId: string, page = 1) {
-    const limit = 20;
-    const skip = (page - 1) * limit;
-
-    const [invoices, total] = await Promise.all([
-      this.prisma.invoice.findMany({
-        where: { organizationId },
-        orderBy: { createdAt: 'desc' },
-        skip,
-        take: limit,
-      }),
-      this.prisma.invoice.count({ where: { organizationId } }),
-    ]);
-
-    return {
-      data: invoices,
-      meta: { total, page, limit, totalPages: Math.ceil(total / limit) },
-    };
-  }
 }

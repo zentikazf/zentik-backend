@@ -21,6 +21,10 @@ import { ClientService } from './client.service';
 import { CreateClientDto, UpdateClientDto } from './dto';
 import { CreateClientUserDto } from './dto/create-client-user.dto';
 import { EditHoursTransactionDto } from './dto/edit-hours-transaction.dto';
+import { DeleteHoursTransactionDto } from './dto/delete-hours-transaction.dto';
+import { ChangeClientStatusDto } from './dto/change-client-status.dto';
+import { TogglePortalDto } from './dto/toggle-portal.dto';
+import { AddHoursDto } from './dto/add-hours.dto';
 import { AppException } from '../../common/filters/app-exception';
 
 /**
@@ -59,6 +63,72 @@ function parsePaginationParam(raw?: string): number | undefined {
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
+/**
+ * #65 T1 (C1) — CRITERIO DE PERMISOS DE ESTE CONTROLLER.
+ *
+ * Hasta este spec el archivo tenía 17 rutas y UN solo `@Permissions` (el del edit de horas).
+ * Los guards de clase engañaban: `PermissionsGuard` devuelve `true` cuando el handler no tiene
+ * decorador (permissions.guard.ts:24), así que las otras 16 sólo exigían sesión válida —
+ * incluidas `@Delete(':clientId')` (archiva un cliente), `POST :clientId/hours` y el borrado de
+ * movimientos del ledger. Cualquier usuario autenticado, de cualquier rol, las ejecutaba.
+ *
+ * Los permisos se eligieron SÓLO entre los que existen de verdad (prisma/seed.ts:9-27 y
+ * organization.service.ts:70-82). Inventar uno nuevo habría sido peor que no hacer nada: un
+ * permiso recién creado no lo tiene ningún rol de producción, así que todos menos Owner (`*:*`)
+ * pasarían a comer 403 hasta correr un backfill de roles.
+ *
+ *   manage:members  → alta/baja/edición del cliente y de sus usuarios de portal. El service
+ *                     escribe filas `OrganizationMember` (client.service.ts:466, 584, 657): son
+ *                     literalmente operaciones de membresía. Además el sidebar del frontend ya
+ *                     declara toda la sección Clientes como `manage:members` (sidebar.tsx:42), y
+ *                     el gemelo exacto del resend-activation ya lo usa
+ *                     (organization.controller.ts:142) — el frontend dispara las dos URLs desde
+ *                     UN mismo botón, así que divergir garantizaba un 403 intermitente.
+ *   read:members    → las lecturas de esa misma superficie (`manage:members` las cubre por el
+ *                     fallback read→manage del guard, permissions.guard.ts:45-51).
+ *   read:billing    → el ledger de horas. Devuelve tarifa hora, montos y facturable
+ *                     (client.service.ts:766-771): es información comercial, y es el mismo
+ *                     permiso que usa client-billing.controller para todo lo que muestra plata
+ *                     del cliente. NO se usó `read:projects` acá a propósito: el rol `Cliente`
+ *                     —el usuario EXTERNO del portal— lo recibe en cada alta
+ *                     (client.service.ts:1410), así que habría sido un decorador decorativo
+ *                     puesto sobre las tarifas.
+ *   manage:projects → las mutaciones del ledger. Es el ancla que ya existía en el edit, y con la
+ *                     que el frontend gatea el lápiz (`canEditHours`, tiempo/page.tsx:201).
+ *   read:projects   → SÓLO el listado de clientes. Es deliberadamente el más laxo: tres
+ *                     pantallas de staff (projects, tickets, dashboard) lo llaman nada más que
+ *                     para poblar un dropdown de filtro, y con `.catch(() => {})` — con un
+ *                     permiso más fuerte ese filtro quedaba vacío para Developer/QA/Designer/
+ *                     DevOps/Soporte SIN ningún error visible. No corta al rol `Cliente`, que
+ *                     tampoco cortaba antes: cerrarlo de verdad es tenencia, no permisos.
+ *
+ * `POST :clientId/hours/sync` queda SIN decorador a propósito: es un tombstone que lanza 410
+ * antes de tocar nada (H1). Ponerle permiso sólo convertiría un 410 que explica por qué murió
+ * el endpoint en un 403 mudo.
+ *
+ * ⚠️ ALCANCE — esto agrega AUTORIZACIÓN, no TENENCIA. El `:orgId` de la URL se sigue sin validar
+ * contra las organizaciones del usuario, y `AuthGuard` resuelve los permisos con
+ * `user.organizationMembers[0]` (auth.guard.ts:95, sin `orderBy`): para un usuario multi-org el
+ * rol evaluado puede no ser el de la organización del path. Las dos cosas son PRE-EXISTENTES y
+ * app-wide, están fuera del alcance declarado de #65 y siguen en el backlog como
+ * OrgMembershipGuard. Un permiso mal evaluado sigue siendo estrictamente mejor que ninguno,
+ * pero este comentario existe para que nadie lea estos decoradores como "cerrado".
+ *
+ * ⚠️ Y OJO CON UN SEGUNDO EJE que ese guard NO va a cubrir: la tenencia del RECURSO. Casi todos
+ * los métodos de este controller arrancan con `findById(orgId, clientId)`, que ata el cliente a
+ * la organización de la URL; las tres rutas de sub-usuarios NO lo hacían, y ahí el
+ * OrgMembershipGuard no habría ayudado —valida usuario→org, y el atacante ya es miembro legítimo
+ * de la org que escribe en la URL—. Se cerraron acá porque `deleteSubUser` es un borrado DURO.
+ * Si aparece un método nuevo en este controller, tiene que empezar por `findById(orgId, ...)`.
+ *
+ * ⚠️ LO QUE SIGUE ABIERTO Y ESTE ARCHIVO NO CIERRA: `GET /` (el listado) quedó en
+ * `read:projects` para no vaciar en silencio los dropdowns de staff, pero `findAll` devuelve el
+ * modelo `Client` COMPLETO —incluidas `developmentHourlyRate` y `supportHourlyRate`—, o sea las
+ * mismas tarifas que el ledger de al lado protege con `read:billing`. El rol `Cliente` tiene
+ * `read:projects`. Cerrarlo bien es ponerle un `select` explícito a `findAll` y dejar las tarifas
+ * detrás de `read:billing`; es un cambio de payload que toca consumidores y queda para su
+ * propio spec. Está anotado en el impl doc de #65.
+ */
 @ApiTags('Clients')
 @ApiBearerAuth()
 @UseGuards(AuthGuard, PermissionsGuard)
@@ -67,6 +137,7 @@ export class ClientController {
   constructor(private readonly clientService: ClientService) {}
 
   @Post()
+  @Permissions('manage:members')
   @ApiOperation({ summary: 'Crear un cliente' })
   @HttpCode(HttpStatus.CREATED)
   create(
@@ -77,6 +148,7 @@ export class ClientController {
   }
 
   @Get()
+  @Permissions('read:projects')
   @ApiOperation({ summary: 'Listar clientes de la organizacion' })
   findAll(
     @Param('orgId') orgId: string,
@@ -100,6 +172,7 @@ export class ClientController {
   }
 
   @Get(':clientId')
+  @Permissions('read:members')
   @ApiOperation({ summary: 'Detalle de un cliente' })
   findById(
     @Param('orgId') orgId: string,
@@ -109,6 +182,7 @@ export class ClientController {
   }
 
   @Patch(':clientId')
+  @Permissions('manage:members')
   @ApiOperation({ summary: 'Actualizar un cliente' })
   update(
     @Param('orgId') orgId: string,
@@ -119,17 +193,19 @@ export class ClientController {
   }
 
   @Patch(':clientId/status')
+  @Permissions('manage:members')
   @ApiOperation({ summary: 'Cambiar estado del cliente (ACTIVE, DISABLED, ARCHIVED)' })
   changeStatus(
     @Param('orgId') orgId: string,
     @Param('clientId') clientId: string,
-    @Body() body: { status: 'ACTIVE' | 'DISABLED' | 'ARCHIVED' },
+    @Body() dto: ChangeClientStatusDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.clientService.changeStatus(orgId, clientId, body.status, user.id);
+    return this.clientService.changeStatus(orgId, clientId, dto.status, user.id);
   }
 
   @Delete(':clientId')
+  @Permissions('manage:members')
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Archivar un cliente (soft-delete)' })
   remove(
@@ -141,6 +217,7 @@ export class ClientController {
   }
 
   @Post(':clientId/create-user')
+  @Permissions('manage:members')
   @ApiOperation({ summary: 'Crear usuario de acceso portal para un cliente' })
   @HttpCode(HttpStatus.CREATED)
   createUser(
@@ -154,18 +231,20 @@ export class ClientController {
   // ── Portal toggle ──────────────────────────────────────
 
   @Patch(':clientId/portal')
+  @Permissions('manage:members')
   @ApiOperation({ summary: 'Habilitar o deshabilitar portal de un cliente' })
   togglePortal(
     @Param('orgId') orgId: string,
     @Param('clientId') clientId: string,
-    @Body() body: { enabled: boolean },
+    @Body() dto: TogglePortalDto,
   ) {
-    return this.clientService.togglePortal(orgId, clientId, body.enabled);
+    return this.clientService.togglePortal(orgId, clientId, dto.enabled);
   }
 
   // ── Sub-usuarios ──────────────────────────────────────
 
   @Post(':clientId/users')
+  @Permissions('manage:members')
   @ApiOperation({ summary: 'Crear sub-usuario para un cliente' })
   @HttpCode(HttpStatus.CREATED)
   createSubUser(
@@ -177,12 +256,19 @@ export class ClientController {
   }
 
   @Get(':clientId/users')
+  @Permissions('read:members')
   @ApiOperation({ summary: 'Listar sub-usuarios de un cliente' })
-  listSubUsers(@Param('clientId') clientId: string) {
-    return this.clientService.listSubUsers(clientId);
+  listSubUsers(
+    @Param('orgId') orgId: string,
+    @Param('clientId') clientId: string,
+  ) {
+    // #65: el `orgId` estaba en la URL y el handler lo ignoraba — la ruta devolvía los
+    // sub-usuarios de cualquier cliente, de cualquier organización.
+    return this.clientService.listSubUsers(orgId, clientId);
   }
 
   @Delete(':clientId/users/:userId')
+  @Permissions('manage:members')
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Eliminar sub-usuario de un cliente' })
   deleteSubUser(
@@ -194,6 +280,7 @@ export class ClientController {
   }
 
   @Post(':clientId/users/:userId/resend-activation')
+  @Permissions('manage:members')
   @Throttle({ short: { ttl: 60_000, limit: 10 } })
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Reenviar email de activación a un sub-usuario sin verificar' })
@@ -208,6 +295,7 @@ export class ClientController {
   // ── Horas contratadas ─────────────────────────────────
 
   @Get(':clientId/hours')
+  @Permissions('read:billing')
   @ApiOperation({ summary: 'Resumen de horas contratadas del cliente (transacciones paginadas)' })
   getHoursSummary(
     @Param('orgId') orgId: string,
@@ -226,26 +314,41 @@ export class ClientController {
   }
 
   @Post(':clientId/hours')
+  @Permissions('manage:projects')
   @ApiOperation({ summary: 'Agregar horas contratadas a un cliente' })
   @HttpCode(HttpStatus.CREATED)
   addHours(
     @Param('orgId') orgId: string,
     @Param('clientId') clientId: string,
-    @Body() body: { hours: number; note?: string },
+    @Body() dto: AddHoursDto,
   ) {
-    return this.clientService.addHours(orgId, clientId, body.hours, body.note);
+    return this.clientService.addHours(orgId, clientId, dto.hours, dto.note);
   }
 
+  // #65 T2 (C2.1) — el delete quedó igual que el edit de doce líneas más abajo, que ya lo
+  // hacía bien: permiso explícito, DTO validado y el ACTOR salido de la sesión.
+  //
+  // Lo que había: sin @Permissions (el guard deja pasar cuando no hay decorador,
+  // permissions.guard.ts:24), `@Body() body: { reason: string; deletedById: string }` como tipo
+  // inline —o sea sin validar— y `deletedById` tomado del BODY. Ese último era el peor de los
+  // tres: cualquiera podía firmar el borrado de un movimiento del ledger con el id de otra
+  // persona, así que el único registro de quién sacó horas de una factura era un dato que el
+  // atacante elegía. Una auditoría que miente es peor que no tenerla.
+  //
+  // El `deletedById` del DTO se acepta y se DESCARTA a propósito (ver DeleteHoursTransactionDto):
+  // `forbidNonWhitelisted: true` haría 400 con el frontend viejo, que todavía lo manda.
   @Post(':clientId/hours/:transactionId/delete')
+  @Permissions('manage:projects')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Eliminar (soft-delete) una transacción de horas' })
   deleteHoursTransaction(
     @Param('orgId') orgId: string,
     @Param('clientId') clientId: string,
     @Param('transactionId') transactionId: string,
-    @Body() body: { reason: string; deletedById: string },
+    @Body() dto: DeleteHoursTransactionDto,
+    @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.clientService.deleteHoursTransaction(orgId, clientId, transactionId, body.deletedById, body.reason);
+    return this.clientService.deleteHoursTransaction(orgId, clientId, transactionId, user.id, dto.reason);
   }
 
   @Post(':clientId/hours/:transactionId/edit')

@@ -11,6 +11,7 @@ import { CloseCycleDto } from './dto/close-cycle.dto';
 import { CreateCreditNoteDto } from './dto/create-credit-note.dto';
 import { PreviewCycleDto } from './dto/preview-cycle.dto';
 import { ReopenCycleDto } from './dto/reopen-cycle.dto';
+import { WriteOffCycleDto } from './dto/write-off-cycle.dto';
 import { UpdateCycleDto } from './dto/update-cycle.dto';
 
 @ApiTags('Client Billing')
@@ -127,6 +128,24 @@ export class ClientBillingController {
     @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.service.reopenCycle(orgId, clientId, cycleId, dto, user);
+  }
+
+  // #65 T12 (A1.4): endpoint propio y no un valor más del `@IsIn` del PATCH genérico, porque
+  // cerrar sin cobro exige MOTIVO. En el PATCH el motivo habría quedado opcional, y una factura
+  // que dejó de cobrarse sin explicación no se puede auditar. Misma forma que `reopen`, que es
+  // la convención del repo para las operaciones con motivo obligatorio.
+  @Post('cycles/:cycleId/write-off')
+  @Permissions('manage:billing')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Cerrar una factura SIN COBRO (SENT → WRITTEN_OFF, motivo obligatorio, no sella paidAt)' })
+  writeOffCycle(
+    @Param('orgId') orgId: string,
+    @Param('clientId') clientId: string,
+    @Param('cycleId') cycleId: string,
+    @Body() dto: WriteOffCycleDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.service.writeOffCycle(orgId, clientId, cycleId, dto, user);
   }
 
   @Patch('cycles/:cycleId')
