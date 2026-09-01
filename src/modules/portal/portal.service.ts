@@ -1401,6 +1401,21 @@ export class PortalService {
       subtotalTiempo,
       totalHoras,
       total: cycle.totalAmount.toString(), // gran total facturado (Soporte + Variables + IVA), Gs
+      // #65 A1.2 — el SALDO, con la misma definición que el lado staff: `total + Σ NC` (las NC ya
+      //   son negativas, así que se SUMA). Sale gratis: las notas de crédito de esta factura ya
+      //   están traídas unas líneas más arriba, no hace falta ninguna query nueva.
+      //
+      //   Sin esto la página se contradice con su PROPIO PDF: el botón "Descargar PDF" está a
+      //   ochenta líneas del total, y ese PDF ya imprime "SALDO 0" — el cliente vería un documento
+      //   diciendo una cosa y la pantalla que se lo dio, otra. El documento contradictorio es el
+      //   que después le reenvía a su contador.
+      creditedTotal: creditNotes
+        .reduce((acc, n) => acc.plus(n.totalAmount), new Prisma.Decimal(0))
+        .toString(),
+      balance: creditNotes
+        .reduce((acc, n) => acc.plus(n.totalAmount), new Prisma.Decimal(cycle.totalAmount))
+        .toString(),
+      creditNoteCount: creditNotes.length,
       // #63: desglose estampado. Los cuatro en null = factura emitida sin IVA → la página no
       //   dibuja ninguna línea de impuesto y queda como antes de #63.
       taxRate: cycle.taxRate?.toString() ?? null,

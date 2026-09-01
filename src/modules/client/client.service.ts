@@ -637,7 +637,12 @@ export class ClientService {
     };
   }
 
-  async listSubUsers(clientId: string) {
+  // #65: `orgId` es NUEVO en la firma. Antes el handler ni lo pasaba, así que un `clientId` de
+  // otra organización devolvía sus usuarios igual. `findById` filtra por
+  // `{ id: clientId, organizationId: orgId }` y tira 404 si no coinciden — mismo guard con el que
+  // arranca el resto de las mutaciones del controller.
+  async listSubUsers(orgId: string, clientId: string) {
+    await this.findById(orgId, clientId);
     return this.prisma.user.findMany({
       where: { clientId },
       select: { id: true, name: true, email: true, createdAt: true },
@@ -646,6 +651,11 @@ export class ClientService {
   }
 
   async deleteSubUser(orgId: string, clientId: string, userId: string) {
+    // #65: el cliente TIENE que pertenecer a esta organización antes de tocar a sus usuarios.
+    // Esto es un `user.delete` DURO (no soft-delete): sin este guard, cualquiera con
+    // `manage:members` en su propia org podía borrar físicamente —usuario, cuentas y sesiones—
+    // al usuario de portal de un cliente de OTRO tenant con sólo conocer el par de ids.
+    await this.findById(orgId, clientId);
     const user = await this.prisma.user.findFirst({
       where: { id: userId, clientId },
     });
@@ -673,6 +683,7 @@ export class ClientService {
   }
 
   async resendActivation(orgId: string, clientId: string, userId: string) {
+    await this.findById(orgId, clientId); // #65: misma tenencia que las demás rutas del controller
     const user = await this.prisma.user.findFirst({
       where: { id: userId, clientId },
       select: { id: true, name: true, email: true, emailVerified: true },

@@ -1510,6 +1510,9 @@ export class ClientBillingService {
     // querer rastrear después.
     await this.auditService.create({
       organizationId: orgId,
+      // El actor va en su COLUMNA, no sólo dentro de newData: sin `userId` el audit log queda con
+      // `user_id` en null y la fila no se puede filtrar por persona, que es para lo que existe.
+      userId: user.id,
       action: 'client.billing.cycle_written_off',
       resource: 'client',
       resourceId: clientId,

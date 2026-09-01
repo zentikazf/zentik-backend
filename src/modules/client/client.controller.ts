@@ -113,6 +113,21 @@ function parsePaginationParam(raw?: string): number | undefined {
  * app-wide, están fuera del alcance declarado de #65 y siguen en el backlog como
  * OrgMembershipGuard. Un permiso mal evaluado sigue siendo estrictamente mejor que ninguno,
  * pero este comentario existe para que nadie lea estos decoradores como "cerrado".
+ *
+ * ⚠️ Y OJO CON UN SEGUNDO EJE que ese guard NO va a cubrir: la tenencia del RECURSO. Casi todos
+ * los métodos de este controller arrancan con `findById(orgId, clientId)`, que ata el cliente a
+ * la organización de la URL; las tres rutas de sub-usuarios NO lo hacían, y ahí el
+ * OrgMembershipGuard no habría ayudado —valida usuario→org, y el atacante ya es miembro legítimo
+ * de la org que escribe en la URL—. Se cerraron acá porque `deleteSubUser` es un borrado DURO.
+ * Si aparece un método nuevo en este controller, tiene que empezar por `findById(orgId, ...)`.
+ *
+ * ⚠️ LO QUE SIGUE ABIERTO Y ESTE ARCHIVO NO CIERRA: `GET /` (el listado) quedó en
+ * `read:projects` para no vaciar en silencio los dropdowns de staff, pero `findAll` devuelve el
+ * modelo `Client` COMPLETO —incluidas `developmentHourlyRate` y `supportHourlyRate`—, o sea las
+ * mismas tarifas que el ledger de al lado protege con `read:billing`. El rol `Cliente` tiene
+ * `read:projects`. Cerrarlo bien es ponerle un `select` explícito a `findAll` y dejar las tarifas
+ * detrás de `read:billing`; es un cambio de payload que toca consumidores y queda para su
+ * propio spec. Está anotado en el impl doc de #65.
  */
 @ApiTags('Clients')
 @ApiBearerAuth()
@@ -243,8 +258,13 @@ export class ClientController {
   @Get(':clientId/users')
   @Permissions('read:members')
   @ApiOperation({ summary: 'Listar sub-usuarios de un cliente' })
-  listSubUsers(@Param('clientId') clientId: string) {
-    return this.clientService.listSubUsers(clientId);
+  listSubUsers(
+    @Param('orgId') orgId: string,
+    @Param('clientId') clientId: string,
+  ) {
+    // #65: el `orgId` estaba en la URL y el handler lo ignoraba — la ruta devolvía los
+    // sub-usuarios de cualquier cliente, de cualquier organización.
+    return this.clientService.listSubUsers(orgId, clientId);
   }
 
   @Delete(':clientId/users/:userId')

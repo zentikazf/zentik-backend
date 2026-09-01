@@ -209,3 +209,67 @@ describe('ClientController — el actor del borrado de horas (#65 T4 / C2.1)', (
     );
   });
 });
+
+/**
+ * #65 (review) — TENENCIA del recurso en las rutas de sub-usuarios.
+ *
+ * Casi todos los métodos de `ClientService` arrancan con `findById(orgId, clientId)`, que filtra
+ * `{ id: clientId, organizationId: orgId }` y tira 404 si el cliente no es de esa organización.
+ * Tres NO lo hacían: `listSubUsers` (que ni siquiera recibía `orgId`), `deleteSubUser` y
+ * `resendActivation`. Ahí el par `(clientId, userId)` nunca se comparaba contra la org de la URL.
+ *
+ * `deleteSubUser` es un `user.delete` DURO —borra usuario, cuentas y sesiones—, así que cualquiera
+ * con `manage:members` en su propia organización podía borrar físicamente al usuario de portal de
+ * un cliente de otro tenant con sólo conocer los dos ids.
+ *
+ * El `OrgMembershipGuard` del backlog NO habría cubierto esto: ése valida usuario→organización, y
+ * acá el atacante es miembro legítimo de la organización que escribe en la URL. Es el otro eje —
+ * la tenencia del RECURSO.
+ */
+describe('ClientService — tenencia en las rutas de sub-usuarios (#65 review)', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { mockDeep } = require('jest-mock-extended');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { ClientService } = require('../client.service');
+
+  const ORG = 'org-propia';
+  const CLIENT_AJENO = 'client-de-otra-org';
+
+  function makeService() {
+    const prisma = mockDeep();
+    const service = new ClientService(prisma, mockDeep(), mockDeep(), mockDeep());
+    // findById: el cliente NO pertenece a esta organización.
+    prisma.client.findFirst.mockResolvedValue(null);
+    return { prisma, service };
+  }
+
+  it('listSubUsers de un cliente de otra org → 404, sin leer un solo usuario', async () => {
+    const { prisma, service } = makeService();
+
+    await expect(service.listSubUsers(ORG, CLIENT_AJENO)).rejects.toMatchObject({
+      statusCode: 404,
+    });
+    expect(prisma.user.findMany).not.toHaveBeenCalled();
+  });
+
+  it('deleteSubUser de un cliente de otra org → 404, sin borrar NADA', async () => {
+    const { prisma, service } = makeService();
+
+    await expect(
+      service.deleteSubUser(ORG, CLIENT_AJENO, 'user-ajeno'),
+    ).rejects.toMatchObject({ statusCode: 404 });
+
+    // Fail-closed: ni siquiera se busca el usuario, y el $transaction del borrado duro no corre.
+    expect(prisma.user.findFirst).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('resendActivation de un cliente de otra org → 404, sin mandar ningún mail', async () => {
+    const { prisma, service } = makeService();
+
+    await expect(
+      service.resendActivation(ORG, CLIENT_AJENO, 'user-ajeno'),
+    ).rejects.toMatchObject({ statusCode: 404 });
+    expect(prisma.user.findFirst).not.toHaveBeenCalled();
+  });
+});
