@@ -26,9 +26,16 @@ describe('ClientController — saneo de page/limit en findAll (#57)', () => {
 
   const ORG = 'org-1';
 
+  /**
+   * #66 — `findAll` sumo un `@CurrentUser()` en la 2da posicion (de ahi sale `actorPermissions`,
+   * que decide que campos se serializan). El helper se actualiza para pasarlo; las aserciones de
+   * abajo, que son las de #57 y siguen mirando `page`/`limit`, NO se tocaron.
+   */
+  const ACTOR = { id: 'u1', permissions: ['read:projects'] } as never;
+
   /** Devuelve el objeto `params` tal como lo recibio el service. */
   const paramsFor = (page?: string, limit?: string) => {
-    controller.findAll(ORG, undefined, page, limit);
+    controller.findAll(ORG, ACTOR, undefined, page, limit);
     return service.findAll.mock.calls.at(-1)![1];
   };
 

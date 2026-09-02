@@ -441,6 +441,18 @@ export class AuthService {
               },
             },
           },
+          // #68 F1 — MISMO ORDEN QUE `auth.guard.ts`, y por una razon distinta.
+          //
+          // Este metodo no toma `[0]`: mapea TODAS las memberships a `organizations[]`. Pero el
+          // frontend SI toma la primera — `org-provider.tsx:46` hace
+          // `setCurrentOrgId(validSaved ? savedOrgId : organizations[0].id)`. O sea que en el
+          // primer login (o en un navegador sin `zentik:orgId` en localStorage) el orden de este
+          // array decide EN QUE ORGANIZACION entra la persona.
+          //
+          // Sin orden, un usuario con dos memberships podia caer en su organizacion PERSONAL
+          // —vacia— y ver la app sin un solo proyecto. `desc` manda esa org al final por el mismo
+          // motivo que en el guard: es siempre la mas antigua, porque nace en el registro.
+          orderBy: [{ createdAt: 'desc' }, { organizationId: 'asc' }],
         },
       },
     });

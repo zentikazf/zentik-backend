@@ -9,11 +9,12 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
-import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
+import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { AuthGuard } from '../auth/guards/auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { NotificationService } from './notification.service';
+import { ListNotificationsQueryDto } from './dto/list-notifications-query.dto';
 
 @ApiTags('Notifications')
 @ApiBearerAuth()
@@ -26,18 +27,13 @@ export class NotificationController {
 
   @Get()
   @ApiOperation({ summary: 'Listar notificaciones del usuario' })
-  @ApiQuery({ name: 'page', required: false, description: 'Numero de pagina' })
-  @ApiQuery({ name: 'limit', required: false, description: 'Cantidad por pagina' })
   async listNotifications(
     @CurrentUser() user: AuthenticatedUser,
-    @Query('page') page?: string,
-    @Query('limit') limit?: string,
+    @Query() query: ListNotificationsQueryDto,
   ) {
-    return this.notificationService.findByUser(
-      user.id,
-      page ? parseInt(page, 10) : 1,
-      limit ? parseInt(limit, 10) : 20,
-    );
+    // #67: los `@ApiQuery` manuales se fueron con el DTO — ahora Swagger los saca de los
+    // `@ApiPropertyOptional`, que ademas documentan el minimo y el maximo reales.
+    return this.notificationService.findByUser(user.id, query.page!, query.limit!);
   }
 
   @Get('unread-count')

@@ -78,6 +78,25 @@ export class AuthGuard implements CanActivate {
                 // poder exponer organizationIds[] al MCP y a cualquier modulo
                 // que necesite scoping multi-tenant. El "membership primario"
                 // (compat backwards) es el primer elemento.
+                //
+                // #68 F1 — ORDEN EXPLICITO. Sin este `orderBy`, Postgres devolvia las filas en
+                // orden FISICO, que cambia con cualquier UPDATE sobre organization_members. O sea
+                // que `[0]` —de donde salen los permisos de TODA la request, ver :99-108— era una
+                // membership distinta segun el dia.
+                //
+                // POR QUE `desc` Y NO `asc`: la organizacion PERSONAL que `auth.service.ts:68-72`
+                // le crea a cada registrado es, por construccion, la MAS ANTIGUA de ese usuario
+                // (nace en el registro, antes de cualquier invitacion). Con `asc` esa org ganaria
+                // SIEMPRE — y como ahi el usuario es Owner (organization.service.ts:95-104), el
+                // atajo de :106-108 le pondria `*:*` en cada request contra la organizacion real.
+                // `asc` no seria "determinista": seria determinISTAMENTE el peor caso. Con `desc`
+                // gana la membership mas reciente, que es la organizacion a la que lo invitaron.
+                //
+                // ⚠️ ESTO NO ARREGLA EL BUG, LO VUELVE PREDECIBLE Y MENOS DAÑINO. Sigue sin mirar
+                // el `:orgId` de la URL: un usuario invitado a DOS organizaciones reales sigue
+                // operando con los permisos de la mas nueva en las dos. El fix de verdad es
+                // resolver la membership contra el `:orgId` (#68 F2, OrgContextGuard).
+                orderBy: [{ createdAt: 'desc' }, { organizationId: 'asc' }],
               },
             },
           },
@@ -92,8 +111,24 @@ export class AuthGuard implements CanActivate {
       // Primer membership = "primario" para campos legacy (organizationId,
       // roleId, roleName, permissions). Se mantiene la semantica previa para
       // backwards-compat con modulos que leen user.organizationId singular.
+      //
+      // #68 F1: ya no es "el que salga", es el mas reciente (ver el `orderBy` del include).
+      // Sigue siendo un PARCHE: lo correcto es resolverlo contra el `:orgId` de la URL (F2).
       const membership = user.organizationMembers[0];
       const organizationIds = user.organizationMembers.map((m) => m.organizationId);
+
+      // #68 F1 — La señal que hoy no existe. El diagnostico de F0 dio CERO usuarios con mas de
+      // una membership, asi que este warn no deberia aparecer nunca... hasta que alguien se
+      // registre por `/auth/register` (publico, le crea su org personal como Owner) y despues lo
+      // inviten a la organizacion real. Ese es EXACTAMENTE el momento en que el bug se dispara, y
+      // sin este log no habria forma de enterarse: la request sigue devolviendo 200.
+      if (user.organizationMembers.length > 1) {
+        this.logger.warn(
+          `Usuario ${user.id} tiene ${user.organizationMembers.length} memberships: los permisos ` +
+            `salen de "${membership?.organizationId}" (rol ${membership?.role?.name}) sin mirar el ` +
+            `orgId de la URL. Ver #68 F2.`,
+        );
+      }
 
       let permissions = membership?.role?.rolePermissions?.map(
         (rp) => `${rp.permission.action}:${rp.permission.resource}`,

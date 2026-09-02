@@ -16,7 +16,7 @@ import { AuthGuard } from '../auth/guards';
 import { CurrentUser } from '../../common/decorators';
 import { AuthenticatedUser } from '../../common/interfaces/request.interface';
 import { CommentService } from './comment.service';
-import { CreateCommentDto, UpdateCommentDto } from './dto';
+import { CreateCommentDto, UpdateCommentDto, ListCommentsQueryDto } from './dto';
 
 @ApiTags('Comments')
 @ApiCookieAuth()
@@ -42,10 +42,12 @@ export class CommentController {
   @ApiResponse({ status: 200, description: 'Lista de comentarios' })
   async getComments(
     @Param('taskId') taskId: string,
-    @Query('page') page?: string,
-    @Query('limit') limit?: string,
+    @Query() query: ListCommentsQueryDto,
   ) {
-    return this.commentService.findByTask(taskId, Number(page) || 1, Number(limit) || 50);
+    // #67: los defaults viven en el DTO, no aca. `page`/`limit` ya llegan validados y
+    // convertidos a numero, con piso y techo — el `Number(x) || N` de antes atrapaba el NaN
+    // pero dejaba pasar los negativos hasta el `skip` de Prisma.
+    return this.commentService.findByTask(taskId, query.page!, query.limit!);
   }
 
   @Patch('comments/:commentId')
