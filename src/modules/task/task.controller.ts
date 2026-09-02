@@ -47,8 +47,30 @@ export class TaskController {
     return { name: user.name, email: user.email, permissions: user.permissions };
   }
 
+  /**
+   * #66 — Esta ruta pedía `view:tasks`, un permiso que NO EXISTE.
+   *
+   * No está en el catálogo (`prisma/seed.ts:9-27`) ni en las sugerencias por rol
+   * (`organization.service.ts:71-82`); `grep -rn "view:tasks"` sobre los dos repos devolvía
+   * una sola línea: ésta. Y el fallback del guard sólo deriva `read:X` ← `manage:X`
+   * (`permissions.guard.ts:44-53`), así que un permiso inventado no lo satisface NADIE:
+   * la ruta la pasaba únicamente Owner por el comodín `*:*`.
+   *
+   * El síntoma no se veía porque el consumidor la come en silencio: `task-detail-content.tsx:162`
+   * hace `.catch(() => {})`, así que con cualquier rol que no fuera Owner el bloque de horas
+   * disponibles del cliente simplemente no aparecía —sin toast, sin log, sin nada.
+   *
+   * Se pone `read:tasks` (existe, `prisma/seed.ts:19`) y no `read:members`: quienes cargan horas
+   * y necesitan ver el saldo son Developer / QA / Designer / DevOps / Soporte, y ninguno de esos
+   * roles tiene `read:members`. Con `read:tasks` entra todo el staff, directo o por derivación
+   * de `manage:tasks`.
+   *
+   * ⚠️ Efecto lateral conocido: el rol `Cliente` del portal también tiene `read:tasks`
+   * (`organization.service.ts:81`), así que puede llamar esta ruta a mano con un `projectId`
+   * ajeno. Eso es el IDOR recurso→org que está abierto app-wide, no una regresión de acá.
+   */
   @Get('projects/:projectId/available-hours')
-  @Permissions('view:tasks')
+  @Permissions('read:tasks')
   @ApiOperation({ summary: 'Consultar horas disponibles del cliente vinculado al proyecto' })
   async getAvailableHours(@Param('projectId') projectId: string) {
     return this.clientService.getAvailableHoursByProject(projectId);
