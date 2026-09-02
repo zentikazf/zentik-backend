@@ -130,7 +130,9 @@ export class FileController {
       if (!sessionUser) {
         throw new UnauthorizedException('No se encontro un token de sesion valido');
       }
-      if (file.organizationId !== sessionUser.organizationId) {
+      // #68 F1: se pregunta por PERTENENCIA, no por igualdad contra una organizacion elegida al
+      // azar. Para el 100% de los usuarios de hoy —una sola membership— el resultado es identico.
+      if (!sessionUser.organizationIds.includes(file.organizationId)) {
         // 404 (no 403) para no leakear existencia de archivos de otras orgs.
         throw new NotFoundException('Archivo no encontrado');
       }
@@ -155,7 +157,7 @@ export class FileController {
    * para avatares. Replica solo la extraccion de token + lookup de session,
    * NO emite cookies ni hace sliding session (read path inocuo).
    */
-  private async resolveSessionUser(req: Request): Promise<{ id: string; organizationId: string | null } | null> {
+  private async resolveSessionUser(req: Request): Promise<{ id: string; organizationIds: string[] } | null> {
     const token = this.extractSessionToken(req);
     if (!token) return null;
 
@@ -165,10 +167,18 @@ export class FileController {
         user: {
           select: {
             id: true,
-            organizationMembers: {
-              select: { organizationId: true },
-              take: 1,
-            },
+            // #68 F1 — Esto decia `take: 1` SIN `where` ni `orderBy`, y de esa unica fila
+            // arbitraria salia el `organizationId` con el que `serveFileById` decide si servir un
+            // archivo o devolver 404. Para un usuario con mas de una membership, Postgres elegia
+            // por orden fisico cual de sus organizaciones "contaba": podia comerse un 404 sobre un
+            // archivo de su propia organizacion, o —peor— pasar el control sobre uno ajeno si la
+            // fila que salia era la que casualmente coincidia.
+            //
+            // El arreglo no es ordenar: es dejar de elegir UNA. La pregunta correcta no es "cual
+            // es su organizacion" sino "¿es miembro de la organizacion del archivo?", y para eso
+            // hacen falta TODAS. Es el mismo criterio que `user.organizationIds` (#15) usa en el
+            // resto del sistema.
+            organizationMembers: { select: { organizationId: true } },
           },
         },
       },
@@ -178,7 +188,7 @@ export class FileController {
 
     return {
       id: session.user.id,
-      organizationId: session.user.organizationMembers[0]?.organizationId ?? null,
+      organizationIds: session.user.organizationMembers.map((m) => m.organizationId),
     };
   }
 
