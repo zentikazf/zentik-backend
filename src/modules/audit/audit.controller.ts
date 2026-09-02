@@ -5,10 +5,11 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
-import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
+import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { AuthGuard, PermissionsGuard } from '../auth/guards';
 import { Permissions } from '../../common/decorators/permissions.decorator';
 import { AuditService } from './audit.service';
+import { ListAuditQueryDto } from './dto/list-audit-query.dto';
 
 @ApiTags('Audit')
 @ApiBearerAuth()
@@ -20,49 +21,30 @@ export class AuditController {
 
   @Get('organizations/:orgId/audit-log')
   @ApiOperation({ summary: 'Log de actividad de la organizacion (solo admins)' })
-  @ApiQuery({ name: 'page', required: false, type: Number })
-  @ApiQuery({ name: 'limit', required: false, type: Number })
   async listByOrganization(
     @Param('orgId') orgId: string,
-    @Query('page') page?: string,
-    @Query('limit') limit?: string,
+    @Query() query: ListAuditQueryDto,
   ) {
-    return this.auditService.listByOrganization(
-      orgId,
-      page ? parseInt(page, 10) : 1,
-      limit ? parseInt(limit, 10) : 50,
-    );
+    // #67: los `@ApiQuery` manuales se fueron con el DTO. Swagger ahora saca `page`/`limit` de
+    // los `@ApiPropertyOptional`, que ademas documentan el minimo y el maximo reales.
+    return this.auditService.listByOrganization(orgId, query.page!, query.limit!);
   }
 
   @Get('projects/:projectId/activity')
   @ApiOperation({ summary: 'Feed de actividad del proyecto' })
-  @ApiQuery({ name: 'page', required: false, type: Number })
-  @ApiQuery({ name: 'limit', required: false, type: Number })
   async listByProject(
     @Param('projectId') projectId: string,
-    @Query('page') page?: string,
-    @Query('limit') limit?: string,
+    @Query() query: ListAuditQueryDto,
   ) {
-    return this.auditService.listByProject(
-      projectId,
-      page ? parseInt(page, 10) : 1,
-      limit ? parseInt(limit, 10) : 50,
-    );
+    return this.auditService.listByProject(projectId, query.page!, query.limit!);
   }
 
   @Get('tasks/:taskId/activity')
   @ApiOperation({ summary: 'Feed de actividad de la tarea' })
-  @ApiQuery({ name: 'page', required: false, type: Number })
-  @ApiQuery({ name: 'limit', required: false, type: Number })
   async listByTask(
     @Param('taskId') taskId: string,
-    @Query('page') page?: string,
-    @Query('limit') limit?: string,
+    @Query() query: ListAuditQueryDto,
   ) {
-    return this.auditService.listByTask(
-      taskId,
-      page ? parseInt(page, 10) : 1,
-      limit ? parseInt(limit, 10) : 50,
-    );
+    return this.auditService.listByTask(taskId, query.page!, query.limit!);
   }
 }

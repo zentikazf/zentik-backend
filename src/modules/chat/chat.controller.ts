@@ -11,7 +11,7 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
-import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
+import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { AuthGuard, PermissionsGuard } from '../auth/guards';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Permissions } from '../../common/decorators/permissions.decorator';
@@ -21,6 +21,7 @@ import { CreateChannelDto } from './dto/create-channel.dto';
 import { AddMemberDto } from './dto/add-member.dto';
 import { SendMessageDto } from './dto/send-message.dto';
 import { UpdateMessageDto } from './dto/update-message.dto';
+import { ListMessagesQueryDto } from './dto/list-messages-query.dto';
 
 @ApiTags('Chat')
 @ApiBearerAuth()
@@ -102,20 +103,12 @@ export class ChatController {
 
   @Get('channels/:channelId/messages')
   @ApiOperation({ summary: 'Listar mensajes de un canal (paginacion por cursor)' })
-  @ApiQuery({ name: 'cursor', required: false, description: 'ID del cursor para paginacion' })
-  @ApiQuery({ name: 'limit', required: false, description: 'Cantidad de mensajes por pagina' })
   async listMessages(
     @CurrentUser() user: AuthenticatedUser,
     @Param('channelId') channelId: string,
-    @Query('cursor') cursor?: string,
-    @Query('limit') limit?: string,
+    @Query() query: ListMessagesQueryDto,
   ) {
-    return this.messageService.findByChannel(
-      channelId,
-      user.id,
-      cursor,
-      limit ? parseInt(limit, 10) : 50,
-    );
+    return this.messageService.findByChannel(channelId, user.id, query.cursor, query.limit!);
   }
 
   @Post('channels/:channelId/messages')
