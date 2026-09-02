@@ -147,11 +147,25 @@ export class ClientController {
     return this.clientService.create(orgId, dto);
   }
 
+  /**
+   * #66 — La ruta SIGUE en `read:projects`, a propósito.
+   *
+   * Endurecerla a `read:members` cerraría la fuga de un plumazo, pero vacía EN SILENCIO los
+   * dropdowns de cliente de `projects/page.tsx:80` y `tickets/page.tsx:302` —los dos hacen
+   * `.catch(() => {})`— para Developer, QA, Designer, DevOps y Soporte, que tienen
+   * `read:projects` pero no `read:members` (organization.service.ts:74-80). Nadie se enteraría:
+   * el select queda vacío y no hay ni toast ni log. Y darles `read:members` para compensar es
+   * mover permisos de roles en producción.
+   *
+   * El corte va por PAYLOAD, en el service: `user.permissions` decide qué campos se serializan.
+   * Ver el comentario largo de `ClientService.findAll`.
+   */
   @Get()
   @Permissions('read:projects')
   @ApiOperation({ summary: 'Listar clientes de la organizacion' })
   findAll(
     @Param('orgId') orgId: string,
+    @CurrentUser() user: AuthenticatedUser,
     @Query('search') search?: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
@@ -160,6 +174,9 @@ export class ClientController {
   ) {
     return this.clientService.findAll(orgId, {
       search,
+      // #66: de acá sale el corte de la superficie. Es el MISMO array que ya evaluó
+      // `PermissionsGuard` para dejar pasar la request, no una segunda fuente de verdad.
+      actorPermissions: user.permissions ?? [],
       // #57: mismo saneo que getHoursSummary. Antes era `Number(page)` crudo, y `Number('abc')`
       // es NaN: aca es PEOR que en getHoursSummary porque el service de findAll no tiene ningun
       // clamp — `params.limit ?? 50` no atrapa NaN (`??` solo cubre null/undefined), asi que

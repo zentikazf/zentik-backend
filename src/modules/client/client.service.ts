@@ -117,9 +117,57 @@ export class ClientService {
     return client;
   }
 
+  /**
+   * #66 — SUPERFICIE DE DATOS DEL LISTADO.
+   *
+   * Lo que había: un `findMany` con `include` y SIN `select`, que en Prisma devuelve TODOS los
+   * escalares del modelo. O sea que este listado publicaba `developmentHourlyRate`,
+   * `supportHourlyRate`, `taxRate`, `taxMode`, `notes`, `phone` y `email` de todos los clientes
+   * de la organización. Y la ruta está en `read:projects` (client.controller.ts:150-151), un
+   * permiso que el rol `Cliente` del PORTAL recibe por dos vías independientes
+   * (organization.service.ts:81 y `ensureClienteRole` acá abajo): un usuario externo leía las
+   * tarifas de todos los demás clientes. Es la misma tarifa que `findById` le niega con 403 a
+   * dos líneas de distancia.
+   *
+   * POR QUE NO SE ENDURECIO EL PERMISO. Subir la ruta a `read:members` vacía EN SILENCIO los
+   * dropdowns de cliente de `projects/page.tsx:80` y `tickets/page.tsx:302` —los dos hacen
+   * `.catch(() => {})`— para Developer, QA, Designer, DevOps y Soporte, que no tienen ese
+   * permiso. Compensarlo exige un backfill de roles en producción. El corte va por PAYLOAD.
+   *
+   * POR QUE NO ALCANZABA UN `select` PLANO. `clients/page.tsx:152-173` (`openEdit`) rellena el
+   * diálogo de edición CON LA FILA DEL LISTADO, sin pedir el detalle. Y su `handleSave` manda
+   * `taxRate: null` EXPLICITO cuando el switch está apagado —es deliberado, es la única forma de
+   * apagarle el IVA a un cliente que lo tenía—. Con un `select` plano, `openEdit` no vería
+   * `taxRate`, dejaría el switch apagado, y el primer "Guardar" sobre ese cliente le BORRARIA EL
+   * IVA. Por eso quien tiene `read:members` sigue recibiendo el payload completo.
+   *
+   * Los campos que NO vuelve a devolver ningún modo (`organizationId`, `userId`,
+   * `portalBillingEnabled`, `botmakerAccountId`, `createdAt`, `updatedAt`,
+   * `defaultSlaPolicyId`) no los usa ningún consumidor: se verificaron los cinco a mano.
+   *
+   * ⚠️ LO QUE ESTO NO CIERRA: las horas (`contractedHours`/`usedHours`/`loanedHours`) quedan en
+   * el modo reducido a propósito, porque `clients/page.tsx:514-527` dibuja la barra de horas y
+   * esa pantalla la abre staff sin `read:members`. O sea que el rol `Cliente` sigue viendo el
+   * VOLUMEN de horas de los demás clientes, aunque ya no el precio. Cerrarlo del todo pide
+   * separar "listado de staff" de "listado para dropdown", que es otro spec.
+   */
   async findAll(
     orgId: string,
-    params: { search?: string; page?: number; limit?: number; status?: string; withUsers?: boolean },
+    params: {
+      search?: string;
+      page?: number;
+      limit?: number;
+      status?: string;
+      withUsers?: boolean;
+      /**
+       * Permisos del actor, tal como los deja `AuthGuard` en `request.user.permissions`.
+       * `undefined` ⇒ payload COMPLETO: es el comportamiento de siempre, y lo correcto para un
+       * llamador interno (otro service, un job, un test) que no pasa por el borde HTTP. Hoy no
+       * hay ninguno —el único llamador es el controller—, pero el default tiene que ser el que
+       * no cambia nada si alguien agrega uno.
+       */
+      actorPermissions?: string[];
+    },
   ): Promise<PaginatedResult<any>> {
     // Techos del listado: ver CLIENT_LIST_MAX_PAGE / CLIENT_LIST_MAX_LIMIT arriba (el porque de
     // cada numero). Sin el techo de `page` el `skip` desborda int64 y Prisma tira 500; sin el de
@@ -131,6 +179,17 @@ export class ClientService {
     const limit = Math.min(Math.max(1, params.limit ?? 50), CLIENT_LIST_MAX_LIMIT);
     const skip = (page - 1) * limit;
 
+    // #66 — El corte de la superficie. Replica la derivación del guard
+    // (permissions.guard.ts:44-53): `read:X` se satisface con `manage:X`, y `*:*` abre todo.
+    // Se evalúa por PERMISO EFECTIVO y no por nombre de rol a propósito: así funciona con
+    // cualquier combinación de roles que tenga una organización real, incluidos los custom.
+    const permisos = params.actorPermissions;
+    const verDatosComerciales =
+      permisos === undefined ||
+      permisos.includes('*:*') ||
+      permisos.includes('read:members') ||
+      permisos.includes('manage:members');
+
     const where: Prisma.ClientWhereInput = { organizationId: orgId };
 
     if (params.status) {
@@ -138,14 +197,22 @@ export class ClientService {
     }
 
     if (params.search) {
-      where.OR = [
-        { name: { contains: params.search, mode: 'insensitive' } },
-        { email: { contains: params.search, mode: 'insensitive' } },
-      ];
+      // #66 — El `search` por email es un ORACULO: quien no puede LEER los emails tampoco puede
+      // adivinarlos probando strings y mirando qué filas vuelven. Sin esta rama, esconder el
+      // campo del `select` no serviría de nada. Ninguno de los cinco consumidores manda
+      // `?search=` (los cinco llaman con `?limit=200` a secas), así que acotarlo no recorta
+      // ninguna pantalla real.
+      where.OR = verDatosComerciales
+        ? [
+            { name: { contains: params.search, mode: 'insensitive' } },
+            { email: { contains: params.search, mode: 'insensitive' } },
+          ]
+        : [{ name: { contains: params.search, mode: 'insensitive' } }];
     }
 
     // Si withUsers=true, incluir owner + sub-users del cliente para la vista
     // unificada de miembros (Feature #7: rediseno-vista-miembros-organizacion).
+    // No depende del permiso: es el mismo `select` anidado en los dos modos.
     const userInclude = params.withUsers
       ? {
           user: {
@@ -165,16 +232,45 @@ export class ClientService {
           user: { select: { email: true } },
         };
 
+    // #66 — Lo que ve TODO el que llega a esta ruta (`read:projects`). Es el mínimo que
+    // necesitan las cinco pantallas: identidad, estado, el switch de portal, la barra de horas
+    // y el contador de proyectos. Ver el comentario del método para el porqué de las horas.
+    // OJO: con `select` no se puede usar `include` a la vez, así que `_count` y `userInclude`
+    // van ADENTRO. `userInclude` ya era un `select` anidado y entra tal cual.
+    const camposBase = {
+      id: true,
+      name: true,
+      status: true,
+      portalEnabled: true,
+      contractedHours: true,
+      usedHours: true,
+      loanedHours: true,
+      _count: { select: { projects: true } },
+      ...userInclude,
+    };
+
+    // Datos COMERCIALES: sólo con `read:members` (o `manage:members`, o `*:*`). Es el mismo
+    // umbral que ya protege el detalle (`findById`, client.controller.ts:174-175), así que la
+    // regla queda pareja: quien no puede abrir la ficha de un cliente tampoco lee sus tarifas
+    // en el listado.
+    const camposComerciales = {
+      email: true,
+      phone: true,
+      notes: true,
+      developmentHourlyRate: true,
+      supportHourlyRate: true,
+      currency: true,
+      taxRate: true,
+      taxMode: true,
+    };
+
     const [data, total] = await this.prisma.$transaction([
       this.prisma.client.findMany({
         where,
         orderBy: { name: 'asc' },
         skip,
         take: limit,
-        include: {
-          _count: { select: { projects: true } },
-          ...userInclude,
-        },
+        select: verDatosComerciales ? { ...camposBase, ...camposComerciales } : camposBase,
       }),
       this.prisma.client.count({ where }),
     ]);
