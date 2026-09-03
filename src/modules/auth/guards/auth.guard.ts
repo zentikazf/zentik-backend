@@ -26,6 +26,22 @@ const ALLOWED_PATHS_UNVERIFIED = [
   '/auth/me',
 ];
 
+/**
+ * #68 F1b — La forma de una membership tal como la trae el `include` de `canActivate`.
+ *
+ * Se declara acá y no se importa de `@prisma/client` a propósito: lo que importa no es el modelo
+ * completo, son los tres campos que la resolución de permisos necesita. Si el `select` del
+ * include cambia, TypeScript rompe acá y no en runtime.
+ */
+interface MembershipCargada {
+  organizationId: string;
+  roleId: string;
+  role: {
+    name: string;
+    rolePermissions: { permission: { action: string; resource: string } }[];
+  } | null;
+}
+
 @Injectable()
 export class AuthGuard implements CanActivate {
   private readonly logger = new Logger(AuthGuard.name);
@@ -108,39 +124,40 @@ export class AuthGuard implements CanActivate {
       }
 
       const { user } = session;
-      // Primer membership = "primario" para campos legacy (organizationId,
-      // roleId, roleName, permissions). Se mantiene la semantica previa para
-      // backwards-compat con modulos que leen user.organizationId singular.
-      //
-      // #68 F1: ya no es "el que salga", es el mas reciente (ver el `orderBy` del include).
-      // Sigue siendo un PARCHE: lo correcto es resolverlo contra el `:orgId` de la URL (F2).
-      const membership = user.organizationMembers[0];
       const organizationIds = user.organizationMembers.map((m) => m.organizationId);
 
-      // #68 F1 — La señal que hoy no existe. El diagnostico de F0 dio CERO usuarios con mas de
-      // una membership, asi que este warn no deberia aparecer nunca... hasta que alguien se
-      // registre por `/auth/register` (publico, le crea su org personal como Owner) y despues lo
-      // inviten a la organizacion real. Ese es EXACTAMENTE el momento en que el bug se dispara, y
-      // sin este log no habria forma de enterarse: la request sigue devolviendo 200.
-      if (user.organizationMembers.length > 1) {
+      // #68 F1b — LOS PERMISOS SALEN DE LA ORGANIZACION DE LA QUE HABLA LA URL.
+      //
+      // Lo que habia: un unico array `permissions` derivado de `organizationMembers[0]`, o sea de
+      // una membership elegida SIN CONTEXTO, que `PermissionsGuard` despues consumia como si
+      // fuera la verdad para cualquier organizacion. Mientras existiera ese array global, el
+      // `:orgId` de la URL no podia influir en la decision.
+      //
+      // F1 (c09202d) solo le puso `orderBy` a esa eleccion: la volvio predecible, no correcta.
+      // F1b ELIMINA la eleccion — ver `resolverPermisos`.
+      const { membership, permissions, modo } = this.resolverPermisos(
+        user.organizationMembers,
+        (request.params as Record<string, string> | undefined)?.orgId,
+      );
+
+      // La unica rama que queda sin resolver: multi-membership en una ruta que no dice de que
+      // organizacion habla (`/tasks/:id`, `/notifications`, `/files/:id`). Cae a la interseccion,
+      // que es segura pero imprecisa. F3 la cierra resolviendo la organizacion desde el RECURSO.
+      // Hoy no se ejecuta para nadie: el diagnostico F0 contra produccion dio cero usuarios con
+      // mas de una membership.
+      if (modo === 'interseccion') {
         this.logger.warn(
-          `Usuario ${user.id} tiene ${user.organizationMembers.length} memberships: los permisos ` +
-            `salen de "${membership?.organizationId}" (rol ${membership?.role?.name}) sin mirar el ` +
-            `orgId de la URL. Ver #68 F2.`,
+          `Usuario ${user.id} tiene ${user.organizationMembers.length} memberships y la ruta ` +
+            `${request.path} no declara :orgId. Se aplica la INTERSECCION de sus permisos ` +
+            `(${permissions.join(', ') || 'ninguno'}). Ver #68 F3.`,
         );
       }
 
-      let permissions = membership?.role?.rolePermissions?.map(
-        (rp) => `${rp.permission.action}:${rp.permission.resource}`,
-      ) ?? [];
-
-      // Owner always gets full access
-      if (membership?.role?.name === 'Owner' && !permissions.includes('*:*')) {
-        permissions = ['*:*'];
-      }
-
-      // Validate client status for portal users
-      if (membership?.role?.name === 'Cliente') {
+      // Validate client status for portal users.
+      // #68 F1b: se pregunta por TODAS las memberships y no por la resuelta. Un usuario de portal
+      // cuyo cliente esta inactivo tiene que quedar afuera aunque la URL apunte a otra
+      // organizacion — si esto dependiera de `membership`, un `:orgId` ajeno saltearia el chequeo.
+      if (user.organizationMembers.some((m) => m.role?.name === 'Cliente')) {
         const client = await this.prisma.client.findFirst({
           where: {
             OR: [
@@ -221,6 +238,120 @@ export class AuthGuard implements CanActivate {
       this.logger.error('Error validating session', error);
       throw new UnauthorizedException('Error al validar la sesion');
     }
+  }
+
+  /**
+   * #68 F1b — Elige la membership con la que se evalua ESTA request, y sus permisos.
+   *
+   * EL BUG QUE CIERRA. `PermissionsGuard` consume un unico `user.permissions`. Ese array salia de
+   * `organizationMembers[0]` —una membership elegida sin saber contra que organizacion se estaba
+   * operando— y si su rol se llamaba 'Owner' se convertia en `['*:*']`. Como
+   * `auth.service.ts:68-72` le crea a cada registrado una organizacion PERSONAL donde es Owner,
+   * cualquiera con dos memberships podia arrastrar el comodin de su organizacion personal a
+   * TODAS las requests contra la organizacion real.
+   *
+   * EL CRITERIO: el `orgId` de la URL es un input del ATACANTE, asi que nunca CONCEDE nada — se
+   * usa para FILTRAR las memberships que el usuario ya tiene. Escribir un `orgId` ajeno no puede
+   * sumar permisos, porque el filtro corre sobre memberships reales y no sobre el string.
+   *
+   * Los cuatro caminos, y el porque de cada uno:
+   *
+   *  - `unica`      — una sola membership. Es el 100% del trafico de hoy (F0 dio cero usuarios
+   *                   multi-organizacion) y se comporta EXACTAMENTE como antes.
+   *  - `por-url`    — la ruta trae `:orgId` y el usuario es miembro: se usan los permisos DE ESA
+   *                   organizacion. Es el caso que arregla el bug.
+   *  - `ajena`      — la ruta trae `:orgId` y el usuario NO es miembro: `permissions = []`. No se
+   *                   lanza 403 desde aca a proposito: `AuthGuard` responde "¿quien sos?", y el
+   *                   403 de autorizacion es de `PermissionsGuard` (permissions.guard.ts:56-60),
+   *                   que ya sabe formatear el mensaje. Vaciar el array hace que toda ruta con
+   *                   `@Permissions` devuelva 403 sola, sin tocar 16 controllers ni depender del
+   *                   orden de guards. Lo que NO cubre es la ruta sin `@Permissions` (fail-open
+   *                   de permissions.guard.ts:24) — eso lo cierra F2.
+   *  - `interseccion` — la ruta NO dice de que organizacion habla (`/tasks/:id`,
+   *                   `/notifications`) y hay mas de una membership. Ver `intersecar`.
+   *
+   * NO cuesta una consulta extra: los `rolePermissions` de TODAS las memberships ya vienen en el
+   * `include` de arriba.
+   */
+  private resolverPermisos(
+    memberships: MembershipCargada[],
+    orgIdDeLaUrl: string | undefined,
+  ): {
+    membership: MembershipCargada | undefined;
+    permissions: string[];
+    modo: 'sin-membership' | 'unica' | 'por-url' | 'ajena' | 'interseccion';
+  } {
+    if (memberships.length === 0) {
+      return { membership: undefined, permissions: [], modo: 'sin-membership' };
+    }
+
+    if (memberships.length === 1) {
+      return {
+        membership: memberships[0],
+        permissions: this.permisosDe(memberships[0]),
+        modo: 'unica',
+      };
+    }
+
+    if (orgIdDeLaUrl) {
+      const propia = memberships.find((m) => m.organizationId === orgIdDeLaUrl);
+
+      // Una organizacion ajena y una inexistente dan el MISMO resultado, asi que la respuesta no
+      // sirve para enumerar organizaciones.
+      return propia
+        ? { membership: propia, permissions: this.permisosDe(propia), modo: 'por-url' }
+        : { membership: undefined, permissions: [], modo: 'ajena' };
+    }
+
+    return {
+      // El campo legacy `organizationId` sigue apuntando a la primera (la mas reciente por el
+      // `orderBy`), que es lo que esperan los modulos que lo leen. Los PERMISOS, en cambio, no
+      // salen de ella: salen de la interseccion.
+      membership: memberships[0],
+      permissions: this.intersecar(memberships.map((m) => this.permisosDe(m))),
+      modo: 'interseccion',
+    };
+  }
+
+  /** Los permisos de UNA membership, con el atajo de Owner acotado a su propia organizacion. */
+  private permisosDe(membership: MembershipCargada): string[] {
+    const permisos =
+      membership.role?.rolePermissions?.map(
+        (rp) => `${rp.permission.action}:${rp.permission.resource}`,
+      ) ?? [];
+
+    // Owner always gets full access — pero SOLO en la organizacion donde es Owner. Que este
+    // atajo se aplicara a una membership elegida al azar era el corazon de la escalada.
+    if (membership.role?.name === 'Owner' && !permisos.includes('*:*')) {
+      return ['*:*'];
+    }
+
+    return permisos;
+  }
+
+  /**
+   * #68 F1b — Lo que el usuario puede hacer en TODAS sus organizaciones a la vez.
+   *
+   * Es la respuesta a "no se contra que organizacion estas operando". Habia tres opciones y las
+   * otras dos son peores: quedarse con la primera es el azar de hoy, y la UNION es literalmente
+   * el bug (ser Owner en una organizacion te daria `*:*` en todas). La interseccion solo puede
+   * QUITAR permisos, nunca agregarlos: equivocarse para abajo es un 403 molesto, equivocarse para
+   * arriba es un agujero.
+   *
+   * `*:*` se expande a "todo", asi que no recorta: `['*:*'] ∩ ['read:projects']` es
+   * `['read:projects']`, no vacio. Si TODAS las memberships tienen `*:*`, el resultado es `*:*`.
+   *
+   * Es un puente hasta F3, donde la organizacion sale del RECURSO (`:taskId` -> su proyecto -> su
+   * organizacion) y esta rama desaparece. Hoy no se ejecuta para nadie.
+   */
+  private intersecar(conjuntos: string[][]): string[] {
+    const concretos = conjuntos.filter((c) => !c.includes('*:*'));
+
+    if (concretos.length === 0) return ['*:*'];
+
+    return concretos.reduce((acumulado, actual) =>
+      acumulado.filter((permiso) => actual.includes(permiso)),
+    );
   }
 
   private extractSessionToken(request: Request): string | null {
