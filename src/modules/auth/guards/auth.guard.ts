@@ -7,8 +7,13 @@ import {
 import { Request, Response } from 'express';
 import { PrismaService } from '../../../database/prisma.service';
 import { AppConfigService } from '../../../config/app.config';
-import { AppException, UnauthorizedException } from '../../../common/filters/app-exception';
+import {
+  AppException,
+  ForbiddenException,
+  UnauthorizedException,
+} from '../../../common/filters/app-exception';
 import { AuthenticatedUser } from '../../../common/interfaces/request.interface';
+import { estaExento, resolverOrganizacion } from '../org-context.resolver';
 
 const SESSION_TTL_HOURS = 5;
 const SESSION_TTL_MS = SESSION_TTL_HOURS * 60 * 60 * 1000;
@@ -108,10 +113,11 @@ export class AuthGuard implements CanActivate {
                 // `asc` no seria "determinista": seria determinISTAMENTE el peor caso. Con `desc`
                 // gana la membership mas reciente, que es la organizacion a la que lo invitaron.
                 //
-                // ⚠️ ESTO NO ARREGLA EL BUG, LO VUELVE PREDECIBLE Y MENOS DAÑINO. Sigue sin mirar
-                // el `:orgId` de la URL: un usuario invitado a DOS organizaciones reales sigue
-                // operando con los permisos de la mas nueva en las dos. El fix de verdad es
-                // resolver la membership contra el `:orgId` (#68 F2, OrgContextGuard).
+                // ⚠️ EL orderBy POR SI SOLO NO ARREGLABA NADA: solo volvia predecible una eleccion
+                // que no debia existir. Lo resolvio #68 F1b (los permisos salen de la organizacion
+                // de la URL) y lo cerro #69 (el candado de tenencia + resolucion por recurso). El
+                // orden se mantiene porque `organizationId` singular —campo legacy— sigue saliendo
+                // de `[0]` cuando no hay organizacion determinable.
                 orderBy: [{ createdAt: 'desc' }, { organizationId: 'asc' }],
               },
             },
@@ -135,21 +141,22 @@ export class AuthGuard implements CanActivate {
       //
       // F1 (c09202d) solo le puso `orderBy` a esa eleccion: la volvio predecible, no correcta.
       // F1b ELIMINA la eleccion — ver `resolverPermisos`.
-      const { membership, permissions, modo } = this.resolverPermisos(
+      const { membership, permissions, modo } = await this.resolverPermisos(
         user.organizationMembers,
-        (request.params as Record<string, string> | undefined)?.orgId,
+        request.params as Record<string, string> | undefined,
+        request.path ?? request.url ?? '',
       );
 
-      // La unica rama que queda sin resolver: multi-membership en una ruta que no dice de que
-      // organizacion habla (`/tasks/:id`, `/notifications`, `/files/:id`). Cae a la interseccion,
-      // que es segura pero imprecisa. F3 la cierra resolviendo la organizacion desde el RECURSO.
-      // Hoy no se ejecuta para nadie: el diagnostico F0 contra produccion dio cero usuarios con
-      // mas de una membership.
+      // #69 — La unica rama que queda sin organizacion determinable: multi-membership en una ruta
+      // que NO trae `:orgId` NI ningun param del mapa de `org-context.resolver.ts`. Ya no incluye
+      // `/tasks/:id` ni `/files/:id` —esos ahora resuelven por recurso—, asi que en la practica son
+      // rutas exentas o sin ids. Se aplica la interseccion: lo unico verdadero que se puede afirmar
+      // sin saber la organizacion. Hoy no se ejecuta para nadie (F0: cero usuarios multi-org).
       if (modo === 'interseccion') {
         this.logger.warn(
           `Usuario ${user.id} tiene ${user.organizationMembers.length} memberships y la ruta ` +
             `${request.path} no declara :orgId. Se aplica la INTERSECCION de sus permisos ` +
-            `(${permissions.join(', ') || 'ninguno'}). Ver #68 F3.`,
+            `(${permissions.join(', ') || 'ninguno'}). Ver #69: no hay :orgId ni ningun param del mapa contra el cual resolver.`,
         );
       }
 
@@ -273,36 +280,78 @@ export class AuthGuard implements CanActivate {
    * NO cuesta una consulta extra: los `rolePermissions` de TODAS las memberships ya vienen en el
    * `include` de arriba.
    */
-  private resolverPermisos(
+  private async resolverPermisos(
     memberships: MembershipCargada[],
-    orgIdDeLaUrl: string | undefined,
-  ): {
+    params: Record<string, string> | undefined,
+    path: string,
+  ): Promise<{
     membership: MembershipCargada | undefined;
     permissions: string[];
-    modo: 'sin-membership' | 'unica' | 'por-url' | 'ajena' | 'interseccion';
-  } {
+    modo: 'sin-membership' | 'unica' | 'por-url' | 'por-recurso' | 'ajena' | 'interseccion' | 'exenta';
+  }> {
     if (memberships.length === 0) {
       return { membership: undefined, permissions: [], modo: 'sin-membership' };
     }
 
-    if (memberships.length === 1) {
-      return {
-        membership: memberships[0],
-        permissions: this.permisosDe(memberships[0]),
-        modo: 'unica',
-      };
+    const unaSola = memberships.length === 1;
+
+    /** Permisos de la membership de `orgId`, o el 403 si no es del usuario. */
+    const contra = (orgId: string, modo: 'por-url' | 'por-recurso') => {
+      const propia = memberships.find((m) => m.organizationId === orgId);
+
+      if (!propia) {
+        // #69 — EL CANDADO. Esto es lo que F1b no podia hacer: un 403 que no depende de que la
+        // ruta declare `@Permissions`. Son 176 de las 302 rutas del repo, incluidas las 22 de
+        // `ticket.controller.ts`, que ni siquiera monta `PermissionsGuard`.
+        throw this.forbidden();
+      }
+
+      return { membership: propia, permissions: this.permisosDe(propia), modo };
+    };
+
+    // #69 — Las rutas exentas no tienen candado. Ver PREFIJOS_EXENTOS: el portal tiene scoping
+    // propio por `clientId`, y /users y /notifications operan sobre el propio usuario (su tenencia
+    // es `userId === session.userId`, otro eje). Se comportan como antes de #69.
+    if (estaExento(path)) {
+      return unaSola
+        ? { membership: memberships[0], permissions: this.permisosDe(memberships[0]), modo: 'exenta' }
+        : {
+            membership: memberships[0],
+            permissions: this.intersecar(memberships.map((m) => this.permisosDe(m))),
+            modo: 'exenta',
+          };
     }
 
-    if (orgIdDeLaUrl) {
-      const propia = memberships.find((m) => m.organizationId === orgIdDeLaUrl);
-
-      // Una organizacion ajena y una inexistente dan el MISMO resultado, asi que la respuesta no
-      // sirve para enumerar organizaciones.
-      return propia
-        ? { membership: propia, permissions: this.permisosDe(propia), modo: 'por-url' }
-        : { membership: undefined, permissions: [], modo: 'ajena' };
+    // 1. La URL lo dice. Se valida SIEMPRE, incluso con una sola membership: pedir `orgId` de otra
+    //    organizacion tiene que dar 403 aunque el usuario pertenezca a una sola.
+    if (params?.orgId) {
+      return contra(params.orgId, 'por-url');
     }
 
+    // 2. Sin `:orgId` y con UNA sola membership no hay nada que resolver: esa ES su organizacion.
+    //    Este atajo es lo que hace que hoy #69 no agregue NI UNA consulta — F0 dio cero usuarios
+    //    multi-organizacion, asi que el 100% del trafico actual sale por aca.
+    //    (Que el RECURSO pertenezca a esa organizacion es el otro eje, y lo cierra #70.)
+    if (unaSola) {
+      return { membership: memberships[0], permissions: this.permisosDe(memberships[0]), modo: 'unica' };
+    }
+
+    // 3. Multi-membership sin `:orgId`: la organizacion sale del RECURSO. Una sola consulta.
+    const resuelta = await resolverOrganizacion(this.prisma, params);
+
+    if (resuelta.orgId) {
+      return contra(resuelta.orgId, 'por-recurso');
+    }
+
+    if (resuelta.consulto) {
+      // Habia un param del mapa pero el recurso no existe. EXACTAMENTE el mismo 403 que un
+      // recurso ajeno — ver `forbidden()`.
+      throw this.forbidden();
+    }
+
+    // 4. No hay ningun param que permita saber de que organizacion habla la request
+    //    (`/some/route` sin ids conocidos). No hay nada que validar: se cae a la interseccion,
+    //    que es lo mas conservador que se puede afirmar sin saber la organizacion.
     return {
       // El campo legacy `organizationId` sigue apuntando a la primera (la mas reciente por el
       // `orderBy`), que es lo que esperan los modulos que lo leen. Los PERMISOS, en cambio, no
@@ -311,6 +360,20 @@ export class AuthGuard implements CanActivate {
       permissions: this.intersecar(memberships.map((m) => this.permisosDe(m))),
       modo: 'interseccion',
     };
+  }
+
+  /**
+   * #69 — UN SOLO 403 para todos los casos de tenencia.
+   *
+   * Los cuatro caminos que lo lanzan —organizacion ajena, organizacion inexistente, recurso ajeno
+   * y recurso inexistente— tienen que ser INDISTINGUIBLES desde afuera. Con mensajes distintos, la
+   * respuesta se vuelve un oraculo: probando ids se puede separar "existe pero no es tuyo" de "no
+   * existe", que es justo lo que un atacante necesita para enumerar.
+   *
+   * Se aprendio en la suite: el primer intento usaba dos mensajes y el test de R4.6 lo cazo.
+   */
+  private forbidden() {
+    return new ForbiddenException('este recurso', 'operar');
   }
 
   /** Los permisos de UNA membership, con el atajo de Owner acotado a su propia organizacion. */
