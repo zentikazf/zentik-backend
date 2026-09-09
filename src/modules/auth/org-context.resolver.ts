@@ -1,17 +1,15 @@
 import { PrismaService } from '../../database/prisma.service';
 
 /**
- * #69 — De que organizacion habla una request.
+ * De que organizacion habla una request.
  *
- * EL PROBLEMA QUE RESUELVE. Hasta #68 F1b habia DOS formas de saberlo: el `:orgId` de la URL, o
- * una interseccion de compromiso cuando no estaba. Y ninguna validaba que esa organizacion fuera
- * del usuario. Peor: `permissions.guard.ts:24` deja pasar cualquier ruta que no declare
- * `@Permissions`, y son **176 de las 302 rutas del repo** — entre ellas las 22 de
- * `ticket.controller.ts`, que ni siquiera monta `PermissionsGuard`. Ahi el vaciado de permisos de
- * F1b no sirve de nada, porque nadie mira ese array.
+ * UNA SOLA FORMA DE SABERLO: la organizacion sale del `:orgId` si la URL lo trae, y del RECURSO si
+ * no (`:taskId` -> su proyecto -> su organizacion). Despues `AuthGuard` valida la membresia y
+ * lanza el 403 si no corresponde.
  *
- * Este archivo deja UNA sola forma: la organizacion sale del `:orgId` si esta, y del RECURSO si
- * no. Despues `AuthGuard` valida la membresia y lanza el 403.
+ * POR QUE EL 403 SALE DEL GUARD Y NO DE `PermissionsGuard`: aquel devuelve `true` cuando el
+ * handler no declara `@Permissions` (permissions.guard.ts:24), y son 176 de las 302 rutas del
+ * repo — entre ellas las 22 de `ticket.controller.ts`, que ni siquiera lo monta.
  *
  * ES UNA FUNCION PURA Y NO UN PROVIDER, a proposito: `AuthGuard` se instancia en el contexto de
  * cada modulo que lo monta (~30), asi que un provider inyectable obligaria a exportarlo desde
@@ -139,12 +137,11 @@ export async function resolverOrganizacion(
   params: Record<string, string> | undefined,
   opciones: {
     /**
-     * #70 — Saltea el atajo de `orgId` y resuelve SIEMPRE por el recurso.
+     * Saltea el atajo de `orgId` y resuelve SIEMPRE por el recurso.
      *
-     * Existe para poder COMPARAR las dos fuentes. Con el comportamiento por defecto, `orgId` gana
-     * y el recurso no se mira nunca — que es lo correcto para *resolver*, pero deja abiertas las
-     * 43 rutas que traen `orgId` Y un id de recurso: ahi se puede poner la organizacion propia en
-     * la URL y pedir un recurso ajeno.
+     * Existe para poder COMPARAR las dos fuentes. Por defecto `orgId` gana y el recurso no se mira
+     * —correcto para *resolver*—, pero eso dejaria pasar a quien pone su propia organizacion en la
+     * URL y pide un recurso de otra. Lo usa `AuthGuard.verificarRecursoDeLaOrg`.
      *
      * Es un parametro y no una funcion aparte a proposito: el mapa y la navegacion se escriben
      * una sola vez.
