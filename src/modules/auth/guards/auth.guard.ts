@@ -325,7 +325,22 @@ export class AuthGuard implements CanActivate {
     // 1. La URL lo dice. Se valida SIEMPRE, incluso con una sola membership: pedir `orgId` de otra
     //    organizacion tiene que dar 403 aunque el usuario pertenezca a una sola.
     if (params?.orgId) {
-      return contra(params.orgId, 'por-url');
+      const resultado = contra(params.orgId, 'por-url');
+
+      // #70 — LA REGLA CRUZADA. `contra` acaba de responder "¿esta organizacion es tuya?", que es
+      // el eje usuario->organizacion. Falta el otro: "¿y el recurso de la URL es de ESA
+      // organizacion?".
+      //
+      // Sin esto quedan 43 rutas abiertas —las de `client`, `client-billing`, `botmaker-billing`,
+      // `sla-config` y una de `ticket`, que traen `:orgId` Y un id de recurso—: se pone la
+      // organizacion PROPIA en la URL y se pide un recurso ajeno. El resolver, por diseno, corta
+      // apenas ve `orgId` y no mira el recurso nunca.
+      //
+      // ORDEN IMPORTANTE: primero la membresia (arriba), despues el recurso. Al reves, un
+      // no-miembro podria deducir por el mensaje si el recurso existe.
+      await this.verificarRecursoDeLaOrg(params, params.orgId);
+
+      return resultado;
     }
 
     // 2. Sin `:orgId` y con UNA sola membership no hay nada que resolver: esa ES su organizacion.
@@ -360,6 +375,35 @@ export class AuthGuard implements CanActivate {
       permissions: this.intersecar(memberships.map((m) => this.permisosDe(m))),
       modo: 'interseccion',
     };
+  }
+
+  /**
+   * #70 — El eje recurso -> organizacion.
+   *
+   * Cuando la URL trae `:orgId` Y un id de recurso del mapa, verifica que ese recurso pertenezca a
+   * ESA organizacion. Es lo unico que quedaba fuera del candado despues de #69: las rutas SIN
+   * `:orgId` ya resuelven por recurso —y eso ya es tenencia—, pero en las que traen las dos cosas
+   * el `orgId` gana y el recurso no se mira.
+   *
+   * NO consulta si la ruta no trae ningun param del mapa, que es la mayoria: son 43 rutas de 215
+   * con id, todas de `client` / `client-billing` / `botmaker-billing` / `sla-config` / `ticket`.
+   * Ahi la consulta extra se paga con gusto: son datos de cliente, tarifas y facturacion.
+   */
+  private async verificarRecursoDeLaOrg(
+    params: Record<string, string>,
+    orgIdDeLaUrl: string,
+  ): Promise<void> {
+    const delRecurso = await resolverOrganizacion(this.prisma, params, { ignorarOrgId: true });
+
+    // Sin param de recurso en la URL no hay nada que comparar: `consulto` es false y se sale sin
+    // haber tocado la base.
+    if (!delRecurso.consulto) return;
+
+    // `encontrado: false` cubre el recurso inexistente Y la relacion rota. Los dos son el mismo
+    // 403 que un recurso ajeno — ver `forbidden()`.
+    if (!delRecurso.encontrado || delRecurso.orgId !== orgIdDeLaUrl) {
+      throw this.forbidden();
+    }
   }
 
   /**

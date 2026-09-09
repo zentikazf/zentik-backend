@@ -137,11 +137,25 @@ export function estaExento(path: string): boolean {
 export async function resolverOrganizacion(
   prisma: PrismaService,
   params: Record<string, string> | undefined,
+  opciones: {
+    /**
+     * #70 — Saltea el atajo de `orgId` y resuelve SIEMPRE por el recurso.
+     *
+     * Existe para poder COMPARAR las dos fuentes. Con el comportamiento por defecto, `orgId` gana
+     * y el recurso no se mira nunca — que es lo correcto para *resolver*, pero deja abiertas las
+     * 43 rutas que traen `orgId` Y un id de recurso: ahi se puede poner la organizacion propia en
+     * la URL y pedir un recurso ajeno.
+     *
+     * Es un parametro y no una funcion aparte a proposito: el mapa y la navegacion se escriben
+     * una sola vez.
+     */
+    ignorarOrgId?: boolean;
+  } = {},
 ): Promise<OrganizacionResuelta> {
   if (!params) return SIN_RESOLVER;
 
   // El camino barato: la URL ya lo dice.
-  if (params.orgId) {
+  if (params.orgId && !opciones.ignorarOrgId) {
     return { orgId: params.orgId, encontrado: true, consulto: false };
   }
 

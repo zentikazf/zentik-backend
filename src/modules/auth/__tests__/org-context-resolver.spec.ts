@@ -46,6 +46,39 @@ describe('#69 — resolución de la organización', () => {
     expect(consultas()).toBe(0);
   });
 
+  // ── #70: el modo que ignora orgId, para poder comparar ────────────────
+
+  describe('#70 — ignorarOrgId', () => {
+    it('con orgId + taskId resuelve por el RECURSO y consulta', async () => {
+      prisma.task.findUnique.mockResolvedValue({ project: { organizationId: 'org-del-task' } } as never);
+
+      const r = await resolverOrganizacion(
+        prisma,
+        { orgId: 'org-de-la-url', taskId: 't-1' },
+        { ignorarOrgId: true },
+      );
+
+      // Es lo que le permite al guard comparar las dos fuentes y cazar el "pongo mi organización
+      // en la URL y pido un recurso ajeno".
+      expect(r).toEqual({ orgId: 'org-del-task', encontrado: true, consulto: true });
+    });
+
+    it('el MISMO caso sin la opción devuelve el orgId y NO consulta', async () => {
+      // El par del anterior: fija que el comportamiento por defecto de #69 no se movió.
+      const r = await resolverOrganizacion(prisma, { orgId: 'org-de-la-url', taskId: 't-1' });
+
+      expect(r).toEqual({ orgId: 'org-de-la-url', encontrado: true, consulto: false });
+      expect(consultas()).toBe(0);
+    });
+
+    it('con orgId y SIN param de recurso no resuelve nada, sin consultar', async () => {
+      const r = await resolverOrganizacion(prisma, { orgId: 'org-1' }, { ignorarOrgId: true });
+
+      // `consulto: false` es la señal que usa el guard para saltearse la comparación.
+      expect(r).toEqual({ orgId: null, encontrado: false, consulto: false });
+    });
+  });
+
   it('sin params: no resuelve y no consulta', async () => {
     expect(await resolverOrganizacion(prisma, {})).toEqual({
       orgId: null,
