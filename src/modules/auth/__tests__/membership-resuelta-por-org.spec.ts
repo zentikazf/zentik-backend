@@ -3,6 +3,7 @@ import { ExecutionContext } from '@nestjs/common';
 import { AuthGuard } from '../guards/auth.guard';
 import { PrismaService } from '../../../database/prisma.service';
 import { AppConfigService } from '../../../config/app.config';
+import { AppException } from '../../../common/filters/app-exception';
 
 /**
  * #68 F1b — los permisos salen de la organización de la que habla la URL.
@@ -147,33 +148,48 @@ describe('#68 F1b — permisos resueltos por la organización de la URL', () => 
 
   // ── La organización ajena ─────────────────────────────────────────────
 
-  describe('cuando el :orgId no es del usuario', () => {
-    it('se queda sin permisos: PermissionsGuard devuelve 403 solo', async () => {
-      const user = await resolver([DEVELOPER_REAL(), OWNER_PERSONAL()], { orgId: ORG_AJENA });
+  /**
+   * ⚠️ ESTA SECCION CAMBIO EN #69, y el cambio es el objetivo del spec.
+   *
+   * En F1b, un `:orgId` ajeno dejaba `permissions = []` y el 403 lo terminaba dando
+   * `PermissionsGuard`. Eso alcanzaba SOLO para las rutas que declaran `@Permissions` — y son 126
+   * de 302. Para las otras 176, `permissions.guard.ts:24` devuelve `true` y el array vacio no lo
+   * mira nadie: pasaban con sesion valida.
+   *
+   * #69 mueve el 403 al propio `AuthGuard`, antes de que la pregunta de permisos se haga. Estos
+   * tests no estaban mal: documentaban el estado intermedio. Ahora afirman el final.
+   */
+  describe('cuando el :orgId no es del usuario (#69: 403 desde AuthGuard)', () => {
+    const esperar403 = async (memberships: unknown[], params: Record<string, string>) => {
+      const err = await resolver(memberships, params).catch((e) => e);
 
-      expect(user.permissions).toEqual([]);
+      expect(err).toBeInstanceOf(AppException);
+      expect((err as AppException).statusCode).toBe(403);
+      return err as AppException;
+    };
+
+    it('403, sin depender de que la ruta declare @Permissions', async () => {
+      await esperar403([DEVELOPER_REAL(), OWNER_PERSONAL()], { orgId: ORG_AJENA });
     });
 
     it('el comodín de su organización personal NO viaja a la ajena', async () => {
       // La escalada original, escrita como test: antes, con la personal en `[0]`, este mismo
       // request salía con `['*:*']` sobre una organización de la que no es miembro.
-      const user = await resolver([OWNER_PERSONAL(), DEVELOPER_REAL()], { orgId: ORG_AJENA });
-
-      expect(user.permissions).not.toContain('*:*');
-      expect(user.permissions).toEqual([]);
+      await esperar403([OWNER_PERSONAL(), DEVELOPER_REAL()], { orgId: ORG_AJENA });
     });
 
-    it('una organización INEXISTENTE da el mismo resultado que una ajena: no filtra existencia', async () => {
-      const ajena = await resolver([DEVELOPER_REAL(), OWNER_PERSONAL()], { orgId: ORG_AJENA });
-      const inventada = await resolver([DEVELOPER_REAL(), OWNER_PERSONAL()], { orgId: 'no-existe' });
+    it('una organización INEXISTENTE da el mismo mensaje que una ajena: no filtra existencia', async () => {
+      const ajena = await esperar403([DEVELOPER_REAL(), OWNER_PERSONAL()], { orgId: ORG_AJENA });
+      const inventada = await esperar403([DEVELOPER_REAL(), OWNER_PERSONAL()], { orgId: 'no-existe' });
 
-      expect(ajena.permissions).toEqual(inventada.permissions);
+      expect(ajena.message).toEqual(inventada.message);
     });
 
-    it('organizationIds sigue exponiendo las dos: acotar los permisos no es perder el resto', async () => {
-      const user = await resolver([DEVELOPER_REAL(), OWNER_PERSONAL()], { orgId: ORG_AJENA });
-
-      expect(user.organizationIds.sort()).toEqual([ORG_PERSONAL, ORG_REAL].sort());
+    it('con UNA sola membership tambien da 403 — era el agujero que dejo F1b', async () => {
+      // Este es el caso que F1b documentaba como abierto ("con una sola membership no se filtra
+      // por :orgId... la tenencia es F2"). F2 llegó: pedir otra organización es 403 aunque el
+      // usuario pertenezca a una sola.
+      await esperar403([DEVELOPER_REAL()], { orgId: ORG_AJENA });
     });
   });
 
@@ -227,14 +243,11 @@ describe('#68 F1b — permisos resueltos por la organización de la URL', () => 
     it.each([
       ['sin :orgId en la ruta', {}],
       ['con su propio :orgId', { orgId: ORG_REAL }],
-      ['con un :orgId ajeno', { orgId: ORG_AJENA }],
     ])('%s: sus permisos son los de siempre', async (caso, params) => {
+      // El caso "con un :orgId ajeno" salió de esta lista en #69: pasó a ser 403 y vive en el
+      // describe de arriba. Estos dos son los que recorre el 100% del tráfico real.
       const user = await resolver([DEVELOPER_REAL()], params);
 
-      // OJO: con una sola membership no se filtra por `:orgId`. Es deliberado — cambiarlo sería
-      // meter tenencia en `AuthGuard`, y la tenencia es F2 (`OrgContextGuard`), que devuelve un
-      // 403 explícito y también cubre las rutas sin `@Permissions`. F1b resuelve QUE permisos,
-      // no SI la organización es tuya.
       expect([caso, user.permissions]).toEqual([caso, PERMISOS_DEVELOPER]);
       expect(user.organizationId).toBe(ORG_REAL);
     });

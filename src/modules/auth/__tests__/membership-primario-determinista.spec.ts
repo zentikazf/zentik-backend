@@ -57,27 +57,20 @@ describe('#68 F1 — orden determinista de las memberships', () => {
     });
 
     /**
-     * ⚠️ ESTE CASO CAMBIÓ EN F1b, y el cambio es deliberado.
-     *
-     * En F1 el `warn` se disparaba con `organizationMembers.length > 1`, porque tener dos
-     * memberships ERA el problema: los permisos salían de una de ellas al azar. F1b resolvió eso
-     * —ahora salen de la organización que dice la URL—, así que avisar por multi-membership sería
-     * ruido: el caso está atendido.
-     *
-     * El `warn` quedó apuntando a lo único que sigue abierto: multi-membership en una ruta que NO
-     * declara `:orgId`, donde no hay contra qué resolver y se aplica la intersección. Eso espera
-     * a F3. La señal se volvió más precisa, no desapareció.
+     * El `warn` de la intersección: es el único camino donde el guard no puede determinar la
+     * organización, así que reparte los permisos que el usuario tiene en TODAS las suyas. Es
+     * impreciso por definición y conviene saber qué rutas caen ahí.
      */
-    it('deja una señal en el único caso que sigue sin resolverse (intersección)', () => {
+    it('deja una señal cuando cae a la intersección', () => {
       expect(contenido).toMatch(/modo === 'interseccion'/);
       expect(contenido).toContain('logger.warn');
-      expect(contenido).toMatch(/F3/);
     });
 
-    it('sigue documentando que el `orderBy` de F1 NO era el arreglo', () => {
-      // Si alguien borra esta advertencia, el próximo que lea el archivo va a creer que el
-      // `orderBy` resolvía algo. Sólo volvía predecible una elección que no debía existir.
-      expect(contenido).toMatch(/F2/);
+    it('documenta para qué sirve el orden, que no es evidente', () => {
+      // `[0]` alimenta el campo legacy `organizationId` y la organización a la que entra el
+      // frontend. Sin esa explicación, el `orderBy` parece decorativo y alguien lo saca.
+      expect(contenido).toMatch(/organizationId.*singular|campo legacy/i);
+      expect(contenido).toMatch(/org-provider/);
     });
   });
 
