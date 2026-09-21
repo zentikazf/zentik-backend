@@ -101,6 +101,24 @@ const ALLOWED_TRANSITIONS: Record<TicketStatus, TicketStatus[]> = {
   CLOSED:      ['OPEN'],
 };
 
+// ─── Reapertura (#71 B3) ───────────────────────────────────────────────
+/** Los dos estados desde los que volver al ciclo ES una reapertura. */
+const REOPENABLE_FROM: TicketStatus[] = ['RESOLVED', 'CLOSED'];
+
+/**
+ * ¿Esta transición es una REAPERTURA? Salir de RESOLVED/CLOSED hacia cualquier
+ * otro estado. Contra ALLOWED_TRANSITIONS hoy son exactamente dos casos
+ * (RESOLVED→IN_PROGRESS y CLOSED→OPEN), pero se escribe por predicado y no por
+ * lista para que un destino nuevo no lo deje mudo en silencio.
+ *
+ * `to` admite null porque el caller del kanban (`syncTicketFromTaskMove`) lo
+ * tiene tipado así: el narrowing de un `let` se pierde dentro del callback de
+ * la transacción. Sin destino no hay reapertura.
+ */
+function isReopen(from: TicketStatus, to: TicketStatus | null): boolean {
+  return to !== null && REOPENABLE_FROM.includes(from) && !REOPENABLE_FROM.includes(to);
+}
+
 // ─── Reclasificación interna (feature #42 — Fase 2) ────────────────────
 /** Un campo de clasificación que cambió, ya legible para el timeline. */
 export interface ClassificationChange {
@@ -1006,6 +1024,30 @@ export class TicketService {
           userId,
         });
 
+        // 3.a) Reapertura (#71 B3) — camino DETALLE DEL TICKET.
+        // Se SUMA al STATUS_CHANGE de arriba, NO lo reemplaza: hay consumidores
+        // que lo leen y el outbox de Onnix encola STATUS_CHANGED desde él (abajo).
+        // Va en la MISMA tx que el cambio de estado (writeEventTx con este `tx`):
+        // si el cambio revierte, el log no puede quedar afirmando una reapertura
+        // que no pasó.
+        //
+        // `origin` distingue el camino: el otro es el kanban
+        // (`syncTicketFromTaskMove`), y al auditar la primera pregunta es por dónde
+        // se reabrió. Los dos caminos son disjuntos —el sync ticket→task emite
+        // `task.moved` con `fromTicketSync: true` y el listener lo ignora— así que
+        // una reapertura escribe UN evento, no dos.
+        if (isReopen(previousStatus, newStatus)) {
+          await this.events.writeEventTx(tx, {
+            ticketId,
+            type: 'REOPENED',
+            fromValue: previousStatus,
+            toValue: newStatus,
+            source: 'TICKET',
+            userId,
+            metadata: { from: previousStatus, to: newStatus, origin: 'ticket_detail' },
+          });
+        }
+
         // Outbox sync Onnix (feature #13): cambio de estado en la MISMA tx (R10).
         // Gate por categoría: solo los tickets de soporte se replican a Onnix
         // (scope de la integración). Un STATUS_CHANGED de un ticket que no es
@@ -1403,6 +1445,28 @@ export class TicketService {
         userId,
         metadata: { taskId, newTaskStatus },
       });
+
+      // Reapertura (#71 B3/B3.5) — camino KANBAN: la tarjeta sale de DONE y el
+      // ticket vuelve de RESOLVED/CLOSED. Acá el evento base es el KANBAN_MOVE
+      // de arriba (este path nunca escribió STATUS_CHANGE); el REOPENED se le
+      // suma igual, en la MISMA tx, por la misma razón que en el detalle.
+      if (isReopen(ticket.status, targetTicketStatus)) {
+        await this.events.writeEventTx(tx, {
+          ticketId: ticket.id,
+          type: 'REOPENED',
+          fromValue: ticket.status,
+          toValue: targetTicketStatus,
+          source: 'KANBAN',
+          userId,
+          metadata: {
+            from: ticket.status,
+            to: targetTicketStatus,
+            origin: 'kanban',
+            taskId,
+            newTaskStatus,
+          },
+        });
+      }
 
       // Audit timeline para hitos SLA: FIRST_RESPONSE / RESOLVED.
       // El sync desde kanban tambien puede marcar por primera vez los hitos.
