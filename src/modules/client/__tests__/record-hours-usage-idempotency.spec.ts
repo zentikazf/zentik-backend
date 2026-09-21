@@ -5,6 +5,7 @@ import { PrismaService } from '../../../database/prisma.service';
 import { AuditService } from '../../audit/audit.service';
 import { EmailInvitationService } from '../../../infrastructure/email/email-invitation.service';
 import { OnboardingService } from '../../auth/onboarding/onboarding.service';
+import { mockClientBilling } from './client-billing-rollup.mock';
 
 /**
  * H2 — Idempotencia de escritura del ledger.
@@ -58,6 +59,7 @@ describe('ClientService.recordHoursUsage — H2 idempotencia (candado del ledger
       audit,
       mockDeep<EmailInvitationService>(),
       mockDeep<OnboardingService>(),
+      mockClientBilling(),
     );
     prisma.client.findUnique.mockResolvedValue(baseClient as never);
     prisma.$transaction.mockImplementation((cb: unknown) =>

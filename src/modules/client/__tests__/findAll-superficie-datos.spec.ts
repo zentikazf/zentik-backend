@@ -4,6 +4,7 @@ import { PrismaService } from '../../../database/prisma.service';
 import { AuditService } from '../../audit/audit.service';
 import { EmailInvitationService } from '../../../infrastructure/email/email-invitation.service';
 import { OnboardingService } from '../../auth/onboarding/onboarding.service';
+import { mockClientBilling } from './client-billing-rollup.mock';
 
 /**
  * #66 T2.4 — la superficie de datos del listado de clientes.
@@ -57,6 +58,7 @@ describe('ClientService — superficie de datos de findAll (#66)', () => {
       mockDeep<AuditService>(),
       mockDeep<EmailInvitationService>(),
       mockDeep<OnboardingService>(),
+      mockClientBilling(),
     );
     prisma.$transaction.mockResolvedValue([[], 0] as never);
   });

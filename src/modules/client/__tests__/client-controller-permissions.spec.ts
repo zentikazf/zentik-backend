@@ -5,6 +5,7 @@ import { PermissionsGuard } from '../../auth/guards/permissions.guard';
 import { PERMISSIONS_KEY } from '../../../common/decorators/permissions.decorator';
 import { AppException } from '../../../common/filters/app-exception';
 import { ClientController } from '../client.controller';
+import { mockClientBilling } from './client-billing-rollup.mock';
 
 /**
  * #65 T4 (R6.2) — UNA prueba por ruta, no una de muestra.
@@ -237,7 +238,7 @@ describe('ClientService — tenencia en las rutas de sub-usuarios (#65 review)',
 
   function makeService() {
     const prisma = mockDeep();
-    const service = new ClientService(prisma, mockDeep(), mockDeep(), mockDeep());
+    const service = new ClientService(prisma, mockDeep(), mockDeep(), mockDeep(), mockClientBilling());
     // findById: el cliente NO pertenece a esta organización.
     prisma.client.findFirst.mockResolvedValue(null);
     return { prisma, service };

@@ -8,6 +8,7 @@ import { PrismaService } from '../../../database/prisma.service';
 import { AuditService } from '../../audit/audit.service';
 import { EmailInvitationService } from '../../../infrastructure/email/email-invitation.service';
 import { OnboardingService } from '../../auth/onboarding/onboarding.service';
+import { mockClientBilling } from './client-billing-rollup.mock';
 
 /**
  * #57 fix A — techo de `page` en getHoursSummary.
@@ -47,7 +48,7 @@ describe('ClientService — techo de page en getHoursSummary (#57)', () => {
     audit = mockDeep<AuditService>();
     email = mockDeep<EmailInvitationService>();
     onboarding = mockDeep<OnboardingService>();
-    service = new ClientService(prisma, audit, email, onboarding);
+    service = new ClientService(prisma, audit, email, onboarding, mockClientBilling());
 
     prisma.client.findFirst.mockResolvedValue({
       id: CLIENT,

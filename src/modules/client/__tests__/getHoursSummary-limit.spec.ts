@@ -4,6 +4,7 @@ import { PrismaService } from '../../../database/prisma.service';
 import { AuditService } from '../../audit/audit.service';
 import { EmailInvitationService } from '../../../infrastructure/email/email-invitation.service';
 import { OnboardingService } from '../../auth/onboarding/onboarding.service';
+import { mockClientBilling } from './client-billing-rollup.mock';
 
 /**
  * #53 — cap del `limit` de getHoursSummary: sube de 100 a 500.
@@ -33,7 +34,7 @@ describe('ClientService — cap del limit en getHoursSummary (#53)', () => {
     audit = mockDeep<AuditService>();
     email = mockDeep<EmailInvitationService>();
     onboarding = mockDeep<OnboardingService>();
-    service = new ClientService(prisma, audit, email, onboarding);
+    service = new ClientService(prisma, audit, email, onboarding, mockClientBilling());
 
     // findById → cliente válido.
     prisma.client.findFirst.mockResolvedValue({

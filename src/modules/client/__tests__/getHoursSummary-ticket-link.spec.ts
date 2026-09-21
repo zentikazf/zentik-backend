@@ -4,6 +4,7 @@ import { PrismaService } from '../../../database/prisma.service';
 import { AuditService } from '../../audit/audit.service';
 import { EmailInvitationService } from '../../../infrastructure/email/email-invitation.service';
 import { OnboardingService } from '../../auth/onboarding/onboarding.service';
+import { mockClientBilling } from './client-billing-rollup.mock';
 
 /**
  * #72 C — "ir al ticket" desde el ledger de tiempos.
@@ -65,7 +66,7 @@ describe('ClientService — el ledger trae el ticket de la tarea (#72 C)', () =>
     audit = mockDeep<AuditService>();
     email = mockDeep<EmailInvitationService>();
     onboarding = mockDeep<OnboardingService>();
-    service = new ClientService(prisma, audit, email, onboarding);
+    service = new ClientService(prisma, audit, email, onboarding, mockClientBilling());
 
     prisma.client.findFirst.mockResolvedValue({
       id: CLIENT,

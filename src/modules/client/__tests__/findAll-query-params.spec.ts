@@ -5,6 +5,7 @@ import { PrismaService } from '../../../database/prisma.service';
 import { AuditService } from '../../audit/audit.service';
 import { EmailInvitationService } from '../../../infrastructure/email/email-invitation.service';
 import { OnboardingService } from '../../auth/onboarding/onboarding.service';
+import { mockClientBilling } from './client-billing-rollup.mock';
 
 /**
  * #57 fix C — el mismo bug de `?limit=abc`, 120 lineas mas arriba en el MISMO controller.
@@ -104,6 +105,7 @@ describe('ClientService — findAll interpreta el undefined del controller (#57)
       mockDeep<AuditService>(),
       mockDeep<EmailInvitationService>(),
       mockDeep<OnboardingService>(),
+      mockClientBilling(),
     );
 
     // $transaction([findMany, count]) → sin clientes.
