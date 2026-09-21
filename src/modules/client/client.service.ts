@@ -863,7 +863,24 @@ export class ClientService {
       this.prisma.hoursTransaction.findMany({
         where,
         include: {
-          task: { select: { id: true, title: true, type: true, project: { select: { id: true, name: true } } } },
+          // #72 C: el `ticket` viaja por la relacion INVERSA (`Ticket.taskId @unique` -> `Task.ticket`).
+          // El ledger solo traia `task.id` y la ruta del front es `/tickets/[ticketId]`: con el id de
+          // la TAREA no se puede armar esa URL, asi que sin este select el titulo se queda en texto
+          // plano aunque el ticket exista detras. Resolverlo en el front costaria un request POR FILA
+          // (hasta 500 por respuesta).
+          //
+          // Es nullable a proposito y el front lo trata como tal: una tarea PROJECT nunca fue un
+          // ticket y una carga manual no tiene tarea. El `@unique` de `Ticket.taskId` garantiza que
+          // el join sea 1:1 y no abanique filas, asi que ni el conteo ni los totales se mueven.
+          task: {
+            select: {
+              id: true,
+              title: true,
+              type: true,
+              project: { select: { id: true, name: true } },
+              ticket: { select: { id: true } },
+            },
+          },
         },
         orderBy: { createdAt: 'desc' },
         skip,
