@@ -10,6 +10,7 @@ import { PrismaService } from '../../../database/prisma.service';
 import { AuditService } from '../../audit/audit.service';
 import { EmailInvitationService } from '../../../infrastructure/email/email-invitation.service';
 import { OnboardingService } from '../../auth/onboarding/onboarding.service';
+import { mockClientBilling } from './client-billing-rollup.mock';
 
 /**
  * #57 (cierre) — techos de `page` y `limit` en findAll.
@@ -50,6 +51,7 @@ describe('ClientService — techos de page y limit en findAll (#57 cierre)', () 
       mockDeep<AuditService>(),
       mockDeep<EmailInvitationService>(),
       mockDeep<OnboardingService>(),
+      mockClientBilling(),
     );
 
     // $transaction([findMany, count]) → sin clientes.

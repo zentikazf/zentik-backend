@@ -6,6 +6,7 @@ import { AuditService } from '../../audit/audit.service';
 import { EmailInvitationService } from '../../../infrastructure/email/email-invitation.service';
 import { OnboardingService } from '../../auth/onboarding/onboarding.service';
 import { AppException } from '../../../common/filters/app-exception';
+import { mockClientBilling } from './client-billing-rollup.mock';
 
 /**
  * #54 — la FILA ESPEJO de una nota de crédito: no se edita, y se borra SIN tocar cupo.
@@ -68,6 +69,7 @@ describe('ClientService — inmutabilidad de la fila espejo de una NC (#54)', ()
       audit,
       mockDeep<EmailInvitationService>(),
       mockDeep<OnboardingService>(),
+      mockClientBilling(),
     );
 
     // findById → cliente válido.

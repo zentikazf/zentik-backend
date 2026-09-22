@@ -5,6 +5,7 @@ import { PrismaService } from '../../../database/prisma.service';
 import { AuditService } from '../../audit/audit.service';
 import { EmailInvitationService } from '../../../infrastructure/email/email-invitation.service';
 import { OnboardingService } from '../../auth/onboarding/onboarding.service';
+import { mockClientBilling } from './client-billing-rollup.mock';
 
 /**
  * H1 OBJ-1 — el candado de emergencia del motor de horas.
@@ -50,6 +51,7 @@ describe('ClientService.recordHoursUsage — H1 candado PROJECT (OBJ-1)', () => 
       audit,
       mockDeep<EmailInvitationService>(),
       mockDeep<OnboardingService>(),
+      mockClientBilling(),
     );
     prisma.client.findUnique.mockResolvedValue(baseClient as never);
     prisma.$transaction.mockImplementation((cb: unknown) =>
@@ -137,6 +139,7 @@ describe('ClientService.recordHoursUsage — H8a workedOn en el ledger', () => {
       audit,
       mockDeep<EmailInvitationService>(),
       mockDeep<OnboardingService>(),
+      mockClientBilling(),
     );
     prisma.client.findUnique.mockResolvedValue(baseClient as never);
     prisma.$transaction.mockImplementation((cb: unknown) =>

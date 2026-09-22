@@ -161,6 +161,52 @@ export interface CycleTransactionsResponse {
 
 // H8d: modo del motor. MES = un mes nominal (comportamiento mono-mes previo). ACUMULADO = varios
 // meses ELEGIDOS a mano (A1) barridos en una sola factura, sin gate de mes cerrado.
+// ── #72 A — Rollup de facturacion de las horas, para las tres cards del STAFF ────────────────
+//
+// `BillingState` es el MISMO contrato que ya usa el portal: exactamente TRES valores. El front lo
+// tipa como una union cerrada (`portal/hours/page.tsx`), asi que un cuarto valor NO rompe el build
+// —rompe el badge en produccion, y los deploys de Vercel y Railway son independientes—. Si algun
+// dia hace falta distinguir mas estados, se agrega un campo aparte, no un valor mas a esta union.
+export type HoursBillingState = 'PENDING' | 'INVOICED' | 'PAID';
+
+/** Una factura que compone una card. El `amount` es lo que sale DE ESTAS HORAS, no el total del
+ *  documento: es lo que hace que las filas SUMEN la card que las contiene. */
+export interface HoursBucketInvoice {
+  id: string;
+  invoiceNumber: string;
+  kind: string;
+  /** Crudo, para que el front etiquete "Borrador" / "Anulada" / "Incobrable" sin re-derivarlo. */
+  status: string;
+  periodStart: Date;
+  periodEnd: Date;
+  cutoffDate: Date | null;
+  currency: string;
+  /** Fecha de PAGO en la card de Cobrado; de ENVIO en la de Facturado; de creacion si es borrador. */
+  date: Date | null;
+  hours: number;
+  amount: string;
+  /** Lo acreditado DE ESTAS HORAS (suma de `priceAmount`, sin IVA). Es de lo que vienen netos
+   *  `amount` y `hours`, y es lo que hace que la fila cuadre con la card. */
+  creditedAmount: string;
+  /** Lo acreditado del DOCUMENTO (`CreditNote.totalAmount`, negativo y con IVA) — la MISMA
+   *  definicion que usa `toCycleDto` para `creditedTotal`/`balance` y la unica que cuadra contra
+   *  el PDF que el cliente tiene en la mano. Convive con la de arriba a proposito: responden
+   *  preguntas distintas y mezclarlas daria un numero que no cuadra con ninguna de las dos. */
+  creditedTotal: string;
+  taxMode: string | null;
+}
+
+export interface HoursBillingRollup {
+  billing: {
+    pending: { amount: string; taxMode: string | null };
+    invoiced: { amount: string; invoices: HoursBucketInvoice[] };
+    paid: { amount: string; invoices: HoursBucketInvoice[] };
+  };
+  /** Estado de facturacion por ciclo, para que el ledger pinte el badge de CADA FILA con el mismo
+   *  criterio que las cards en vez de con `if (billedCycleId)`, que #62 declaro mentiroso. */
+  stateByCycleId: Record<string, HoursBillingState>;
+}
+
 type FacturableMode = 'MES' | 'ACUMULADO';
 
 // Fila cruda del candidato facturable (con Decimal), para agrupar/subtotalizar en el preview.
@@ -769,6 +815,236 @@ export class ClientBillingService {
 
     result.sort((a, b) => (a.period < b.period ? 1 : a.period > b.period ? -1 : 0));
     return result;
+  }
+
+  /**
+   * #72 A — Rollup de facturacion de las horas del cliente: las TRES cards de la pantalla de
+   * tiempos del STAFF. Se cuelga de `getHoursSummary` (aditivo) para que la pantalla siga pidiendo
+   * UN solo endpoint.
+   *
+   * ⚠️ El "Pendiente" del staff NO es el del portal, y es deliberado (A1). En el repo conviven tres
+   * definiciones de "pendiente" y la VINCULANTE es la que alimenta el boton de facturar:
+   *
+   *   - STAFF  = `buildFacturableWhere`, el MISMO predicado que usan `previewCycle` y `closeCycle`.
+   *              Solo tareas SUPPORT, con precio, sin estampar y con `workedOn`. Una pantalla de
+   *              staff que diga "Pendiente de facturar" un numero que el flujo de facturacion NO
+   *              PUEDE facturar es un bug reportado el primer dia: el staff mira esa card
+   *              justamente PARA DECIDIR SI FACTURA.
+   *   - PORTAL = todo USAGE/LOAN con precio, sin filtro de tarea, con los BORRADORES adentro (#62:
+   *              un borrador no le movio nada al cliente). El portal NO SE TOCA: cambiarlo moveria
+   *              numeros que el cliente ya ve. No es el mismo numero y no tiene por que serlo — el
+   *              staff mira cuanto puede facturar, el cliente cuanto va a pagar.
+   *
+   * Por eso tampoco se extrae `getMyHours`: ademas del universo distinto, el portal aplica el
+   * filtro de visibilidad de #61 (esconde borradores y anuladas-nunca-enviadas), que es regla DEL
+   * PORTAL — el staff tiene que ver su borrador, es suyo.
+   *
+   * "Facturado" y "Cobrado" SI coinciden con el portal (A1.3): mismo agregado por ciclo y mismo
+   * neteo por nota de credito, porque una factura emitida es la misma para los dos. La unica
+   * diferencia es el BORRADOR, que aca cae en "Facturado" y alla en "Pendiente" — y eso va escrito
+   * en la leyenda de la card, no escondido.
+   */
+  async getHoursBillingRollup(orgId: string, clientId: string): Promise<HoursBillingRollup> {
+    // A2.3 — OBLIGATORIO: `PermissionsGuard` nunca mira el `:orgId` de la URL. La tenencia la pone
+    // el service o no la pone nadie.
+    const client = await this.assertClient(orgId, clientId);
+
+    // Borde superior del "Pendiente": el fin del mes corriente en Asuncion. Es el limite mas ancho
+    // que una factura emitida HOY puede alcanzar (modo MES con corte al fin del periodo), asi que
+    // la card no esconde plata que el flujo de facturacion ya podria tomar. Trabajo fechado mas
+    // alla del mes corriente no es facturable todavia, y decirlo es mas honesto que sumarlo.
+    const untilDate = this.asuncionDateOnly(
+      this.parsePeriod(this.asuncionPeriodKey(new Date())).periodEnd,
+    );
+
+    // Universo de "ya estampado": el MISMO que usa el portal para sus buckets. Sin filtro de tarea
+    // y sin `rebilledFromTransactionId`, porque lo que se pregunta no es "¿es facturable?" sino
+    // "¿en que factura cayo?". El neteo de las notas de credito se hace abajo.
+    const yaEstampado: Prisma.HoursTransactionWhereInput = {
+      clientId,
+      deletedAt: null,
+      type: { in: BILLABLE_TYPES },
+      priceAmount: { not: null },
+      billedCycleId: { not: null },
+    };
+
+    const [facturable, sumsByCycle, creditedByCycle, cycles] = await Promise.all([
+      // (1) PENDIENTE — el predicado vinculante, sin tocarlo. Es un `aggregate`, no un `findMany`:
+      //     no se pintan las filas, se suma la plata.
+      this.prisma.hoursTransaction.aggregate({
+        where: this.buildFacturableWhere(clientId, untilDate),
+        _sum: { priceAmount: true },
+      }),
+
+      // (2) Los buckets, sobre TODO el historial y agregados por ciclo (una fila por factura, no
+      //     una por movimiento): no crece con el volumen del ledger. No se calculan sobre la
+      //     pagina que se pinta — lo COBRADO es justamente lo viejo, lo primero que se cae de una
+      //     ventana paginada por `createdAt desc`.
+      this.prisma.hoursTransaction.groupBy({
+        by: ['billedCycleId'],
+        where: yaEstampado,
+        _sum: { priceAmount: true, hours: true },
+      }),
+
+      // (2-bis) Cuanto de cada ciclo YA SE ACREDITO, en la misma unidad que (2) para poder
+      //     restarlo. El predicado es `creditedByLine` (la relacion 1:1 con `CreditNoteLine`),
+      //     que es la UNICA fuente de verdad de "esta fila fue acreditada": deducirlo de la
+      //     existencia de la fila espejo da falsos negativos, porque la espejo es OPCIONAL (sale
+      //     de un switch del dialogo) y ademas borrable — fue el hallazgo de #55.
+      //     Se RESTA en vez de excluirse del `where` de (2) para que la plata acreditada no
+      //     desaparezca sin rastro: se expone aparte y la card puede explicar su propio numero.
+      this.prisma.hoursTransaction.groupBy({
+        by: ['billedCycleId'],
+        where: { ...yaEstampado, creditedByLine: { isNot: null } },
+        _sum: { priceAmount: true, hours: true },
+      }),
+
+      // (3) Los ciclos del cliente, para saber EN QUE ESTADO cayo cada estampado. Sin filtro de
+      //     visibilidad: esta pantalla es del STAFF y el borrador es suyo.
+      this.prisma.clientBillingCycle.findMany({
+        where: { clientId },
+        select: {
+          id: true,
+          invoiceNumber: true,
+          kind: true,
+          status: true,
+          periodStart: true,
+          periodEnd: true,
+          cutoffDate: true,
+          currency: true,
+          sentAt: true,
+          paidAt: true,
+          createdAt: true,
+          taxMode: true,
+          // La MISMA definicion de acreditado que `toCycleDto`: `CreditNote.totalAmount`, negativo
+          // y con IVA. Es la que cuadra contra el PDF.
+          creditNotes: { select: { totalAmount: true } },
+        },
+      }),
+    ]);
+
+    /**
+     * En que card cae la plata de un ciclo. NO es el `stateOf` del portal, y los CINCO estados
+     * estan resueltos EXPLICITAMENTE (A2.1): ninguno llega aca por un fail-safe.
+     *
+     *   DRAFT       → FACTURADO. Al generar el borrador esas horas quedan ESTAMPADAS y el flujo de
+     *                 facturacion ya no las toma, asi que NO pueden seguir en "Pendiente": la card
+     *                 estaria prometiendo facturar algo que ya esta adentro de otra factura. Va
+     *                 con etiqueta "Borrador" en el desplegable. En el portal cae en Pendiente, y
+     *                 tambien es correcto: para el cliente ese borrador no existe.
+     *   SENT        → FACTURADO.
+     *   PAID        → COBRADO.
+     *   WRITTEN_OFF → FACTURADO, igual que en el portal (#65 A1.4): se facturo y no se cobro. A
+     *                 COBRADO no va (no entro plata, y ese es el punto de que el estado exista) y a
+     *                 PENDIENTE tampoco: cerrar una factura no vuelve facturable su trabajo.
+     *   CANCELLED   → FACTURADO. `reopenCycle` libera el `billedCycleId` de todos los movimientos
+     *                 al anular, asi que en la practica no deberia quedar ninguna fila apuntando
+     *                 aca. Si por deriva de datos queda una, esa fila SIGUE estampada y por lo
+     *                 tanto sigue sin ser facturable: mandarla a "Pendiente" haria que la card
+     *                 prometa facturar algo que el boton de facturar no toma. Se queda a la vista
+     *                 con la factura marcada "Anulada", antes que desaparecer de la pantalla.
+     *
+     * Un estado futuro que nadie enseño a clasificar cae en FACTURADO por la misma razon que
+     * CANCELLED —esta estampado, luego no es facturable— y NO en COBRADO: no hay ninguna prueba de
+     * que haya entrado plata.
+     */
+    const bucketOf = (status: string): 'INVOICED' | 'PAID' => (status === 'PAID' ? 'PAID' : 'INVOICED');
+
+    /**
+     * El badge de CADA FILA del ledger. Este SI es el `stateOf` del portal, sin tocarlo: es el
+     * mismo contrato de tres valores que el front ya tipa, y un DRAFT sigue siendo `'PENDING'`
+     * (A3.2) porque al cliente todavia no se le cobro nada.
+     *
+     * Que la card mande el borrador a "Facturado" y el badge de la fila diga `'PENDING'` no es una
+     * contradiccion: miden cosas distintas —la card, si se puede facturar; el badge, si ya se
+     * cobro— y el front las reconcilia mostrando "Borrador" cuando la fila esta estampada y el
+     * estado sigue siendo pendiente, sin inventar un cuarto valor.
+     */
+    const stateOf = (status: string | undefined): HoursBillingState => {
+      if (status === 'SENT' || status === 'WRITTEN_OFF') return 'INVOICED';
+      if (status === 'PAID') return 'PAID';
+      return 'PENDING';
+    };
+
+    const cycleById = new Map(cycles.map((c) => [c.id, c]));
+    const creditedOf = new Map(
+      creditedByCycle.map((g) => [
+        g.billedCycleId,
+        {
+          // `new Prisma.Decimal(...)` y no el valor crudo: el driver puede entregar el agregado como
+          // string y `.minus()` necesita un Decimal de verdad.
+          amount: new Prisma.Decimal(g._sum.priceAmount ?? 0),
+          hours: g._sum.hours ?? 0,
+        },
+      ]),
+    );
+
+    const totals = { INVOICED: new Prisma.Decimal(0), PAID: new Prisma.Decimal(0) };
+    const invoicesByBucket: Record<'INVOICED' | 'PAID', HoursBucketInvoice[]> = {
+      INVOICED: [],
+      PAID: [],
+    };
+
+    for (const group of sumsByCycle) {
+      const cycle = group.billedCycleId ? cycleById.get(group.billedCycleId) : undefined;
+      // Fila estampada contra un ciclo que ya no existe: no se puede clasificar ni enlazar. Es
+      // imposible por FK, pero sumarla a un bucket al azar seria peor que no sumarla.
+      if (!cycle) continue;
+
+      const bucket = bucketOf(cycle.status);
+      const credited = creditedOf.get(group.billedCycleId) ?? {
+        amount: new Prisma.Decimal(0),
+        hours: 0,
+      };
+      const grossAmount = new Prisma.Decimal(group._sum.priceAmount ?? 0);
+      const grossHours = group._sum.hours ?? 0;
+      const amount = grossAmount.minus(credited.amount);
+
+      totals[bucket] = totals[bucket].plus(amount);
+      invoicesByBucket[bucket].push({
+        id: cycle.id,
+        invoiceNumber: cycle.invoiceNumber,
+        kind: cycle.kind,
+        status: cycle.status,
+        periodStart: cycle.periodStart,
+        periodEnd: cycle.periodEnd,
+        cutoffDate: cycle.cutoffDate,
+        currency: cycle.currency,
+        // Un borrador no tiene ni envio ni pago: cae a su fecha de creacion, que es la unica que
+        // tiene, en vez de quedar en null y pintar un hueco.
+        date: cycle.paidAt ?? cycle.sentAt ?? cycle.createdAt,
+        hours: grossHours - credited.hours,
+        amount: amount.toString(),
+        creditedAmount: credited.amount.toString(),
+        creditedTotal: cycle.creditNotes
+          .reduce((acc, n) => acc.plus(n.totalAmount), new Prisma.Decimal(0))
+          .toString(),
+        taxMode: cycle.taxMode,
+      });
+    }
+
+    // Mas reciente primero, igual que el resto de las pantallas de facturacion.
+    for (const list of Object.values(invoicesByBucket)) {
+      list.sort((a, b) => b.periodStart.getTime() - a.periodStart.getTime());
+    }
+
+    const stateByCycleId: Record<string, HoursBillingState> = {};
+    for (const c of cycles) stateByCycleId[c.id] = stateOf(c.status);
+
+    return {
+      billing: {
+        pending: {
+          amount: (facturable._sum.priceAmount ?? new Prisma.Decimal(0)).toString(),
+          // El modo de IVA del CLIENTE, no de un ciclo: todavia no hay documento emitido, asi que
+          // el IVA que va a llevar es el que el cliente tiene configurado HOY. Las facturas ya
+          // emitidas llevan el suyo ESTAMPADO (mismo criterio que #63 en el portal).
+          taxMode: client.taxMode,
+        },
+        invoiced: { amount: totals.INVOICED.toString(), invoices: invoicesByBucket.INVOICED },
+        paid: { amount: totals.PAID.toString(), invoices: invoicesByBucket.PAID },
+      },
+      stateByCycleId,
+    };
   }
 
   /**

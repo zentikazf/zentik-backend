@@ -5,6 +5,7 @@ import { PrismaService } from '../../../database/prisma.service';
 import { AuditService } from '../../audit/audit.service';
 import { EmailInvitationService } from '../../../infrastructure/email/email-invitation.service';
 import { OnboardingService } from '../../auth/onboarding/onboarding.service';
+import { mockClientBilling } from './client-billing-rollup.mock';
 
 /**
  * Feature #43 R3/R4 — cierre honesto al deshabilitar el cliente y restauración
@@ -32,7 +33,7 @@ describe('ClientService.changeStatus — cierre honesto + restauración (#43)', 
     audit = mockDeep<AuditService>();
     email = mockDeep<EmailInvitationService>();
     onboarding = mockDeep<OnboardingService>();
-    service = new ClientService(prisma, audit, email, onboarding);
+    service = new ClientService(prisma, audit, email, onboarding, mockClientBilling());
 
     // findById (previo a la tx) — cliente sin userId ni subusuarios para simplificar.
     prisma.client.findFirst.mockResolvedValue({

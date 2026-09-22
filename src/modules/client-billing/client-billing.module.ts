@@ -13,6 +13,9 @@ import { ClientBillingPdfService } from './client-billing-pdf.service';
   imports: [PrismaModule, AppConfigModule, AuditModule, BotmakerBillingModule],
   controllers: [ClientBillingController],
   providers: [ClientBillingService, ClientBillingPdfService],
-  exports: [ClientBillingPdfService],
+  // #72 A: `ClientBillingService` sale exportado para que `getHoursSummary` (ClientModule) cuelgue
+  //   el rollup de las tres cards. La dependencia es unidireccional —ClientBillingModule NO importa
+  //   ClientModule— asi que no hay ciclo.
+  exports: [ClientBillingPdfService, ClientBillingService],
 })
 export class ClientBillingModule {}

@@ -11,6 +11,7 @@ import { PaginatedResult } from '../../common/interfaces/request.interface';
 import { AuditService } from '../audit/audit.service';
 import { EmailInvitationService } from '../../infrastructure/email/email-invitation.service';
 import { OnboardingService } from '../auth/onboarding/onboarding.service';
+import { ClientBillingService } from '../client-billing/client-billing.service';
 
 // Buckets de movimiento del ledger de horas (String libre en el schema).
 // Filtro opcional de `getHoursSummary`: ausente ⇒ todos los tipos (incl. INTERNAL);
@@ -85,6 +86,9 @@ export class ClientService {
     private readonly auditService: AuditService,
     private readonly emailInvitationService: EmailInvitationService,
     private readonly onboardingService: OnboardingService,
+    // #72 A: el rollup de facturacion de las horas vive en el motor de ciclos, que ya tiene el
+    // predicado vinculante (`buildFacturableWhere`) y los ciclos con sus notas de credito.
+    private readonly clientBillingService: ClientBillingService,
   ) {}
 
   async create(orgId: string, dto: CreateClientDto) {
@@ -859,24 +863,50 @@ export class ClientService {
       where.type = { in: bucket };
     }
 
-    const [transactions, total, billableAggregate] = await this.prisma.$transaction([
-      this.prisma.hoursTransaction.findMany({
-        where,
-        include: {
-          task: { select: { id: true, title: true, type: true, project: { select: { id: true, name: true } } } },
-        },
-        orderBy: { createdAt: 'desc' },
-        skip,
-        take: safeLimit,
-      }),
-      this.prisma.hoursTransaction.count({ where }),
-      this.prisma.hoursTransaction.aggregate({
-        // H9b: excluye las filas ESPEJO (rebilledFromTransactionId != null) para NO doble-contar
-        // la espejo con su original en el "Total facturable" del cartel del staff.
-        where: { ...where, type: { in: ['USAGE', 'LOAN'] }, priceAmount: { not: null }, rebilledFromTransactionId: null },
-        _sum: { priceAmount: true },
-      }),
+    // #72 A2.2 — El rollup de las tres cards sale en PARALELO con el ledger: son consultas
+    // independientes, asi que la pantalla sigue costando un solo viaje y sigue pidiendo UN solo
+    // endpoint (bloque `billing` aditivo al return, mismo patron que uso #62 en el portal).
+    // Tiene su propio `where`: no lleva `movement`, ni page, ni limit. El `totalAmount` de hoy
+    // heredaba el filtro de las pildoras y por eso CAMBIABA al apretar una — las cards no.
+    const [ledger, rollup] = await Promise.all([
+      this.prisma.$transaction([
+        this.prisma.hoursTransaction.findMany({
+          where,
+          include: {
+            // #72 C: el `ticket` viaja por la relacion INVERSA (`Ticket.taskId @unique` -> `Task.ticket`).
+            // El ledger solo traia `task.id` y la ruta del front es `/tickets/[ticketId]`: con el id de
+            // la TAREA no se puede armar esa URL, asi que sin este select el titulo se queda en texto
+            // plano aunque el ticket exista detras. Resolverlo en el front costaria un request POR FILA
+            // (hasta 500 por respuesta).
+            //
+            // Es nullable a proposito y el front lo trata como tal: una tarea PROJECT nunca fue un
+            // ticket y una carga manual no tiene tarea. El `@unique` de `Ticket.taskId` garantiza que
+            // el join sea 1:1 y no abanique filas, asi que ni el conteo ni los totales se mueven.
+            task: {
+              select: {
+                id: true,
+                title: true,
+                type: true,
+                project: { select: { id: true, name: true } },
+                ticket: { select: { id: true } },
+              },
+            },
+          },
+          orderBy: { createdAt: 'desc' },
+          skip,
+          take: safeLimit,
+        }),
+        this.prisma.hoursTransaction.count({ where }),
+        this.prisma.hoursTransaction.aggregate({
+          // H9b: excluye las filas ESPEJO (rebilledFromTransactionId != null) para NO doble-contar
+          // la espejo con su original en el "Total facturable" del cartel del staff.
+          where: { ...where, type: { in: ['USAGE', 'LOAN'] }, priceAmount: { not: null }, rebilledFromTransactionId: null },
+          _sum: { priceAmount: true },
+        }),
+      ]),
+      this.clientBillingService.getHoursBillingRollup(orgId, clientId),
     ]);
+    const [transactions, total, billableAggregate] = ledger;
 
     // #56: aviso de que el ledger de este cliente se esta acercando al techo. Se emite SOLO al
     // cruzar el umbral: por debajo, silencio absoluto — un warn que aparece siempre deja de leerse.
@@ -906,6 +936,19 @@ export class ClientService {
       ? parseFloat(billableAggregate._sum.priceAmount.toString())
       : 0;
 
+    // #72 A3.1 — El badge de facturacion de CADA FILA sale del ESTADO DEL CICLO, no de
+    // `if (tx.billedCycleId)`: tener ciclo NO significa estar facturado — un borrador tiene ciclo y
+    // no le cobro a nadie. Es el criterio que #62 ya declaro mentiroso y arreglo en el portal.
+    // Sin esto, agregar las cards dejaria DOS fuentes de estado de facturacion contradiciendose a
+    // 200 pixeles de distancia, que es exactamente el bug que #62 vino a cerrar.
+    //
+    // Una fila sin ciclo es `'PENDING'` (nunca se facturo) y una que apunta a un ciclo que el
+    // rollup no conoce tambien: pendiente antes que cobrado, nunca al reves.
+    const transactionsWithState = transactions.map((t) => ({
+      ...t,
+      billingState: (t.billedCycleId ? rollup.stateByCycleId[t.billedCycleId] : undefined) ?? 'PENDING',
+    }));
+
     return {
       contractedHours: client.contractedHours,
       usedHours: client.usedHours,
@@ -914,8 +957,16 @@ export class ClientService {
       developmentHourlyRate: client.developmentHourlyRate,
       supportHourlyRate: client.supportHourlyRate,
       currency: client.currency,
+      // ⚠️ SE CONSERVA con el mismo nombre, el mismo tipo y el mismo significado que siempre tuvo,
+      // porque hay consumidores que lo leen. Ojo con lo que NO es: suma TODAS las filas USAGE/LOAN
+      // con precio —facturadas, cobradas y sin facturar por igual— y hereda el filtro `movement`,
+      // asi que cambia al apretar una pildora. El numero honesto de "pendiente de facturar" es
+      // `billing.pending`, que tiene su propio where.
       totalAmount,
-      transactions,
+      // #72 A2.2 — Bloque ADITIVO: la pantalla sigue pidiendo un solo endpoint y ningun consumidor
+      // existente se rompe. Las tres cards se SUMAN al payload, no lo reemplazan.
+      billing: rollup.billing,
+      transactions: transactionsWithState,
       transactionsTotal: total,
       page: safePage,
       limit: safeLimit,

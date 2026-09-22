@@ -6,6 +6,7 @@ import { PrismaService } from '../../../database/prisma.service';
 import { AuditService } from '../../audit/audit.service';
 import { EmailInvitationService } from '../../../infrastructure/email/email-invitation.service';
 import { OnboardingService } from '../../auth/onboarding/onboarding.service';
+import { mockClientBilling } from './client-billing-rollup.mock';
 
 /**
  * H1 OBJ-2 — tombstone 410 de POST /organizations/:orgId/clients/:clientId/hours/sync.
@@ -28,6 +29,7 @@ describe('ClientController.syncHours — H1 tombstone 410 (OBJ-2)', () => {
       mockDeep<AuditService>(),
       mockDeep<EmailInvitationService>(),
       mockDeep<OnboardingService>(),
+      mockClientBilling(),
     );
     controller = new ClientController(clientService);
   });

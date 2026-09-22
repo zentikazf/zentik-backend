@@ -9,6 +9,7 @@ import { PrismaService } from '../../../database/prisma.service';
 import { AuditService } from '../../audit/audit.service';
 import { EmailInvitationService } from '../../../infrastructure/email/email-invitation.service';
 import { OnboardingService } from '../../auth/onboarding/onboarding.service';
+import { mockClientBilling } from './client-billing-rollup.mock';
 
 /**
  * #56 — aviso cuando el ledger de un cliente se acerca al techo de getHoursSummary.
@@ -46,7 +47,7 @@ describe('ClientService — aviso al acercarse al techo del ledger (#56)', () =>
     audit = mockDeep<AuditService>();
     email = mockDeep<EmailInvitationService>();
     onboarding = mockDeep<OnboardingService>();
-    service = new ClientService(prisma, audit, email, onboarding);
+    service = new ClientService(prisma, audit, email, onboarding, mockClientBilling());
 
     warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
 
