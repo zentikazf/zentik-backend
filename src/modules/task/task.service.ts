@@ -297,7 +297,12 @@ export class TaskService {
     return { data: tasks, total, page, limit };
   }
 
-  async getTaskById(taskId: string, organizationId?: string) {
+  /**
+   * #74 Bloque A: `userId` (opcional, al final para no romper callers) habilita
+   * `isChannelMember` — si quien pide es miembro del canal del ticket de la tarea.
+   * La pestaña "Chat con el cliente" lo usa para elegir entre el chat y "Unirme".
+   */
+  async getTaskById(taskId: string, organizationId?: string, userId?: string) {
     const task = await this.prisma.task.findFirst({
       where: {
         id: taskId,
@@ -332,6 +337,7 @@ export class TaskService {
           take: 30,
         },
         _count: { select: { subTasks: true, comments: true, timeEntries: true } },
+        ticket: { select: { id: true, ticketNumber: true, channelId: true } },
       },
     });
 
@@ -342,7 +348,69 @@ export class TaskService {
     // Compute total duration from time entries
     const totalDuration = task.timeEntries.reduce((acc, entry) => acc + (entry.duration || 0), 0);
 
-    return { ...task, totalDuration };
+    const channelId = task.ticket?.channelId;
+    const isChannelMember =
+      channelId && userId
+        ? !!(await this.prisma.channelMember.findUnique({
+            where: { channelId_userId: { channelId, userId } },
+            select: { id: true },
+          }))
+        : false;
+
+    return { ...task, totalDuration, isChannelMember };
+  }
+
+  /**
+   * #74 Bloque B — "Unirme" al chat del ticket de la tarea. La membresía del canal sigue
+   * siendo la única regla para leer al cliente (REST y socket); esto la otorga de forma
+   * explícita. Idempotente: si ya es miembro no escribe ni vuelve a registrar actividad.
+   * El evento lo persiste el AuditListener en AuditLog → aparece en GET /tasks/:id/activity.
+   */
+  async joinTicketChat(taskId: string, userId: string, organizationIds: string[]) {
+    const task = await this.prisma.task.findFirst({
+      where: { id: taskId, project: { organizationId: { in: organizationIds } } },
+      select: {
+        id: true,
+        title: true,
+        projectId: true,
+        project: { select: { organizationId: true } },
+        ticket: { select: { id: true, channelId: true } },
+      },
+    });
+
+    if (!task) {
+      throw new TaskNotFoundException(taskId);
+    }
+
+    const channelId = task.ticket?.channelId;
+    if (!channelId) {
+      throw new AppException('La tarea no tiene chat de ticket', 'TASK_TICKET_CHAT_NOT_FOUND', 404, { taskId });
+    }
+
+    const existing = await this.prisma.channelMember.findUnique({
+      where: { channelId_userId: { channelId, userId } },
+      select: { id: true },
+    });
+
+    if (!existing) {
+      // Upsert (no create): dos "Unirme" simultáneos no chocan con el unique.
+      await this.prisma.channelMember.upsert({
+        where: { channelId_userId: { channelId, userId } },
+        create: { channelId, userId },
+        update: {},
+      });
+      this.eventEmitter.emit('task.ticket_chat.joined', {
+        ...domainEvent('task.ticket_chat.joined', 'task', task.id, task.project.organizationId, userId, {
+          taskTitle: task.title,
+          projectId: task.projectId,
+          ticketId: task.ticket!.id,
+          channelId,
+        }),
+      });
+      this.logger.log(`User ${userId} se unió al chat del ticket (taskId=${taskId}, channelId=${channelId})`);
+    }
+
+    return { channelId };
   }
 
   async updateTask(taskId: string, dto: UpdateTaskDto, userId: string, organizationId?: string, actor?: HoursGateActorContext) {
