@@ -117,7 +117,19 @@ export class TaskController {
     @Param('taskId') taskId: string,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.taskService.getTaskById(taskId, user.organizationId);
+    return this.taskService.getTaskById(taskId, user.organizationId, user.id);
+  }
+
+  @Post('tasks/:taskId/ticket-chat/join')
+  @Permissions('manage:projects')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: '#74 — Unirse al chat del ticket de la tarea (quien puede aprobarla)' })
+  @ApiResponse({ status: 200, description: '{ channelId } — idempotente' })
+  async joinTicketChat(
+    @Param('taskId') taskId: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.taskService.joinTicketChat(taskId, user.id, user.organizationIds);
   }
 
   @Patch('tasks/:taskId')
