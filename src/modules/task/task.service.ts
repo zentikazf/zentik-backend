@@ -364,7 +364,11 @@ export class TaskService {
    * #74 Bloque B — "Unirme" al chat del ticket de la tarea. La membresía del canal sigue
    * siendo la única regla para leer al cliente (REST y socket); esto la otorga de forma
    * explícita. Idempotente: si ya es miembro no escribe ni vuelve a registrar actividad.
-   * El evento lo persiste el AuditListener en AuditLog → aparece en GET /tasks/:id/activity.
+   *
+   * El AuditLog se escribe DIRECTO, en la misma transacción que la membresía (patrón de
+   * task-hours-guard.service.ts:228): `EventEmitterModule.forRoot()` corre sin `wildcard`,
+   * así que el `@OnEvent('**')` del AuditListener no recibe eventos de dominio. Con
+   * resource 'task' + resourceId = taskId aparece en GET /tasks/:id/activity.
    */
   async joinTicketChat(taskId: string, userId: string, organizationIds: string[]) {
     const task = await this.prisma.task.findFirst({
@@ -393,20 +397,24 @@ export class TaskService {
     });
 
     if (!existing) {
-      // Upsert (no create): dos "Unirme" simultáneos no chocan con el unique.
-      await this.prisma.channelMember.upsert({
-        where: { channelId_userId: { channelId, userId } },
-        create: { channelId, userId },
-        update: {},
-      });
-      this.eventEmitter.emit('task.ticket_chat.joined', {
-        ...domainEvent('task.ticket_chat.joined', 'task', task.id, task.project.organizationId, userId, {
-          taskTitle: task.title,
-          projectId: task.projectId,
-          ticketId: task.ticket!.id,
-          channelId,
+      await this.prisma.$transaction([
+        // Upsert (no create): dos "Unirme" simultáneos no chocan con el unique.
+        this.prisma.channelMember.upsert({
+          where: { channelId_userId: { channelId, userId } },
+          create: { channelId, userId },
+          update: {},
         }),
-      });
+        this.prisma.auditLog.create({
+          data: {
+            organizationId: task.project.organizationId,
+            userId,
+            action: 'task.ticket_chat.joined',
+            resource: 'task',
+            resourceId: task.id,
+            newData: { taskTitle: task.title, projectId: task.projectId, ticketId: task.ticket!.id, channelId },
+          },
+        }),
+      ]);
       this.logger.log(`User ${userId} se unió al chat del ticket (taskId=${taskId}, channelId=${channelId})`);
     }
 

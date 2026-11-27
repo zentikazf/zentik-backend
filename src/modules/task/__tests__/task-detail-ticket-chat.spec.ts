@@ -145,7 +145,10 @@ describe('TaskService.getTaskById — chat del ticket (#74 Bloque A)', () => {
  *
  * D1: la membresía del canal sigue siendo la ÚNICA regla para leer al cliente (REST y socket).
  * Entrar es explícito, idempotente y queda en el log de actividad de la tarea (R3.4: `AuditLog`
- * acepta una acción libre, sin migración; el `AuditListener` (`@OnEvent('**')`) la escribe).
+ * acepta una acción libre, sin migración). La fila se escribe DIRECTO, no por evento: el
+ * `@OnEvent('**')` del AuditListener no recibe nada porque `EventEmitterModule.forRoot()` corre
+ * sin `wildcard`. Un test que sólo verificara un `emit` daría verde sin que la fila exista
+ * (hallazgo B1 del reviewer) — por eso se asierta `auditLog.create`.
  */
 describe('POST /tasks/:taskId/ticket-chat/join (#74 Bloque B)', () => {
   const TASK_ID = 'task-1';
@@ -222,6 +225,7 @@ describe('POST /tasks/:taskId/ticket-chat/join (#74 Bloque B)', () => {
       expect.objectContaining({ where: { id: TASK_ID, project: { organizationId: { in: ORG_IDS } } } }),
     );
     expect(prisma.channelMember.upsert).not.toHaveBeenCalled();
+    expect(prisma.auditLog.create).not.toHaveBeenCalled();
   });
 
   it('R3.2 — tarea sin ticket → 404, no toca la membresía', async () => {
@@ -254,19 +258,23 @@ describe('POST /tasks/:taskId/ticket-chat/join (#74 Bloque B)', () => {
       create: { channelId: CHANNEL_ID, userId: USER_ID },
       update: {},
     });
-    // El AuditListener convierte este evento en una fila de AuditLog (resource 'task',
-    // resourceId = taskId), que es exactamente lo que lista GET /tasks/:id/activity.
-    expect(events.emit).toHaveBeenCalledWith(
-      'task.ticket_chat.joined',
-      expect.objectContaining({
-        type: 'task.ticket_chat.joined',
-        entity: 'task',
-        entityId: TASK_ID,
+    // resource 'task' + resourceId = taskId es exactamente el `where` de
+    // AuditService.listByTask (audit.service.ts:103) → GET /tasks/:id/activity.
+    expect(prisma.auditLog.create).toHaveBeenCalledWith({
+      data: {
         organizationId: ORG_ID,
         userId: USER_ID,
-        data: expect.objectContaining({ channelId: CHANNEL_ID, ticketId: 'ticket-1' }),
-      }),
-    );
+        action: 'task.ticket_chat.joined',
+        resource: 'task',
+        resourceId: TASK_ID,
+        newData: { taskTitle: 'Tarea', projectId: 'project-1', ticketId: 'ticket-1', channelId: CHANNEL_ID },
+      },
+    });
+    // Membresía y auditoría van juntas: o quedan las dos o ninguna.
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect((prisma.$transaction.mock.calls[0][0] as unknown[]).length).toBe(2);
+    // Sin evento muerto: no hay listener que lo reciba.
+    expect(events.emit).not.toHaveBeenCalled();
   });
 
   it('R3.3 — dos llamadas → una sola escritura y un solo registro de actividad; las dos devuelven { channelId }', async () => {
@@ -281,7 +289,8 @@ describe('POST /tasks/:taskId/ticket-chat/join (#74 Bloque B)', () => {
     expect(primera).toEqual({ channelId: CHANNEL_ID });
     expect(segunda).toEqual({ channelId: CHANNEL_ID });
     expect(prisma.channelMember.upsert).toHaveBeenCalledTimes(1);
-    expect(events.emit).toHaveBeenCalledTimes(1);
+    expect(prisma.auditLog.create).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
   });
 
   it('el controller pasa taskId, id y organizaciones de quien pide', async () => {
