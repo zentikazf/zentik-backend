@@ -272,3 +272,59 @@ describe('TaskApprovalService.rejectTask — H8c (guard revert facturado)', () =
     expect(timeEntry.revertManualCharges).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Las cards de Aprobaciones muestran el número del ticket del que salió la tarea. Una tarea
+ * que no viene de un ticket devuelve `ticketNumber: null` (la card no muestra nada).
+ */
+describe('TaskApprovalService — ticketNumber en los listados de aprobación', () => {
+  let prisma: DeepMockProxy<PrismaService>;
+  let service: TaskApprovalService;
+
+  const base = {
+    title: 'Tarea',
+    status: 'IN_REVIEW',
+    priority: 'MEDIUM',
+    reviewAttempts: 0,
+    updatedAt: new Date('2026-11-27T12:00:00Z'),
+    project: { id: 'p-1', name: 'Proyecto' },
+    assignments: [{ user: { id: 'u-1', name: 'Ana' } }],
+    boardColumn: null,
+  };
+
+  beforeEach(() => {
+    prisma = mockDeep<PrismaService>();
+    service = new TaskApprovalService(
+      prisma,
+      mockDeep<EventEmitter2>(),
+      mockDeep<TimeEntryService>(),
+      mockDeep<TaskHoursGuardService>(),
+      mockDeep<TicketClassificationGuardService>(),
+    );
+    prisma.task.findMany.mockResolvedValue([
+      { ...base, id: 't-ticket', ticket: { ticketNumber: '20261127-001' } },
+      { ...base, id: 't-sin-ticket', ticket: null },
+    ] as never);
+  });
+
+  it.each([
+    ['de la organización', (s: TaskApprovalService) => s.findPendingApprovals('org-1')],
+    ['del proyecto', (s: TaskApprovalService) => s.findPendingApprovalsByProject('p-1')],
+  ])('listado %s: pide el ticket y devuelve ticketNumber o null', async (_label, list) => {
+    const result = await list(service);
+
+    expect(prisma.task.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        include: expect.objectContaining({ ticket: { select: { ticketNumber: true } } }),
+      }),
+    );
+    expect(result[0]).toMatchObject({ id: 't-ticket', ticketNumber: '20261127-001' });
+    expect(result[1]).toMatchObject({ id: 't-sin-ticket', ticketNumber: null });
+    // Lo que ya devolvía sigue igual.
+    expect(result[0]).toMatchObject({
+      title: 'Tarea',
+      project: { id: 'p-1', name: 'Proyecto' },
+      assignees: [{ id: 'u-1', name: 'Ana' }],
+    });
+  });
+});

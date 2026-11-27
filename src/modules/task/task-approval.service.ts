@@ -303,6 +303,7 @@ export class TaskApprovalService {
           select: { user: { select: { id: true, name: true } } },
         },
         boardColumn: { select: { id: true, name: true, color: true } },
+        ticket: { select: { ticketNumber: true } },
       },
       orderBy: { updatedAt: 'desc' },
     });
@@ -317,6 +318,7 @@ export class TaskApprovalService {
       project: t.project,
       assignees: t.assignments.map((a) => a.user),
       column: t.boardColumn,
+      ticketNumber: t.ticket?.ticketNumber ?? null,
     }));
   }
 
@@ -341,6 +343,7 @@ export class TaskApprovalService {
           select: { user: { select: { id: true, name: true } } },
         },
         boardColumn: { select: { id: true, name: true, color: true } },
+        ticket: { select: { ticketNumber: true } },
       },
       orderBy: { updatedAt: 'desc' },
     });
@@ -355,6 +358,7 @@ export class TaskApprovalService {
       project: t.project,
       assignees: t.assignments.map((a) => a.user),
       column: t.boardColumn,
+      ticketNumber: t.ticket?.ticketNumber ?? null,
     }));
   }
 }
