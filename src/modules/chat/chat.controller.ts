@@ -78,7 +78,12 @@ export class ChatController {
     return this.channelService.getMembers(channelId, user.id);
   }
 
+  // #74 Bloque 0: el service no mira quién pide y el portal tiene `read:chat`; sin
+  // `manage:projects` un usuario del portal podía agregarse al canal del ticket de otro
+  // cliente de su misma organización. `getAllAndOverride`: el del método REEMPLAZA al del
+  // controller, por eso se repite `read:chat`.
   @Post('channels/:channelId/members')
+  @Permissions('read:chat', 'manage:projects')
   @ApiOperation({ summary: 'Agregar miembro a un canal' })
   async addMember(
     @Param('channelId') channelId: string,
@@ -87,7 +92,9 @@ export class ChatController {
     return this.channelService.addMember(channelId, dto.userId);
   }
 
+  // #74 Bloque 0: mismo hueco que addMember (podía sacar al cliente de su propio canal).
   @Delete('channels/:channelId/members/:userId')
+  @Permissions('read:chat', 'manage:projects')
   @ApiOperation({ summary: 'Quitar miembro de un canal' })
   @HttpCode(HttpStatus.NO_CONTENT)
   async removeMember(
